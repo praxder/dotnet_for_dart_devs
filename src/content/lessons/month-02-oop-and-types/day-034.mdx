@@ -118,7 +118,7 @@ var result = output[..written].ToString();
 // For larger or variable sizes, use array pools
 ```
 
-## `Memory<T>` — For When Span<T> Isn't Enough
+## `Memory<T>` — For When `Span<T>` Isn't Enough
 
 `Span<T>` has a critical limitation: it's a **ref struct** — it can only exist on the stack and cannot be stored in fields, used with `async`/`await`, or put in closures. `Memory<T>` is the heap-compatible version:
 

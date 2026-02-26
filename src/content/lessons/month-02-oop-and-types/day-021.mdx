@@ -206,53 +206,57 @@ public class UserService
 ```
 
 <CodeComparison>
-  <div slot="dart">```dart
-class UserService {
-  final UserRepository _repository; // library-private
-  final Logger _logger;             // library-private
+  <div slot="dart">
+  ```dart
+  class UserService {
+    final UserRepository _repository; // library-private
+    final Logger _logger;             // library-private
 
-  // No 'protected' concept — subclasses in other files can't see _repository
-  String get _defaultRole => 'User';
+    // No 'protected' concept — subclasses in other files can't see _repository
+    String get _defaultRole => 'User';
 
-  UserService(this._repository, this._logger);
+    UserService(this._repository, this._logger);
 
-  Future<User?> getById(int id) async {
-    _logger.info('Fetching user $id');
-    return await _repository.find(id);
+    Future<User?> getById(int id) async {
+      _logger.info('Fetching user $id');
+      return await _repository.find(id);
+    }
+
+    void _validateId(int id) {
+      if (id <= 0) throw ArgumentError('ID must be positive.');
+    }
   }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  public class UserService
+  {
+      private readonly IUserRepository _repository;
+      private readonly ILogger _logger;
 
-  void _validateId(int id) {
-    if (id <= 0) throw ArgumentError('ID must be positive.');
+      protected virtual string DefaultRole => "User";
+      // ^ subclasses in ANY file can access this
+
+      internal UserService(IUserRepository repository, ILogger logger)
+      {
+          _repository = repository;
+          _logger = logger;
+      }
+
+      public async Task<User?> GetByIdAsync(int id)
+      {
+          _logger.LogInformation("Fetching user {Id}", id);
+          return await _repository.FindAsync(id);
+      }
+
+      private void ValidateId(int id)
+      {
+          if (id <= 0) throw new ArgumentException("ID must be positive.");
+      }
   }
-}
-```</div>
-  <div slot="csharp">```csharp
-public class UserService
-{
-    private readonly IUserRepository _repository;
-    private readonly ILogger _logger;
-
-    protected virtual string DefaultRole => "User";
-    // ^ subclasses in ANY file can access this
-
-    internal UserService(IUserRepository repository, ILogger logger)
-    {
-        _repository = repository;
-        _logger = logger;
-    }
-
-    public async Task<User?> GetByIdAsync(int id)
-    {
-        _logger.LogInformation("Fetching user {Id}", id);
-        return await _repository.FindAsync(id);
-    }
-
-    private void ValidateId(int id)
-    {
-        if (id <= 0) throw new ArgumentException("ID must be positive.");
-    }
-}
-```</div>
+  ```
+  </div>
 </CodeComparison>
 
 ## Access Modifiers on Types

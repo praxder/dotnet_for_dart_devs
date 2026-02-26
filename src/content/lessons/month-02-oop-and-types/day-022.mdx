@@ -230,64 +230,68 @@ public class BankAccount
 ```
 
 <CodeComparison>
-  <div slot="dart">```dart
-class BankAccount {
-  final String accountId;
-  double _balance;          // private field, exposed via getter
-  final List<String> _transactions = [];
+  <div slot="dart">
+  ```dart
+  class BankAccount {
+    final String accountId;
+    double _balance;          // private field, exposed via getter
+    final List<String> _transactions = [];
 
-  BankAccount(this.accountId, this._balance);
+    BankAccount(this.accountId, this._balance);
 
-  double get balance => _balance;  // public read
-  // no setter — mutation only via methods
+    double get balance => _balance;  // public read
+    // no setter — mutation only via methods
 
-  List<String> get transactions => List.unmodifiable(_transactions);
+    List<String> get transactions => List.unmodifiable(_transactions);
 
-  void deposit(double amount) {
-    if (amount <= 0) throw ArgumentError('Amount must be positive.');
-    _balance += amount;
-    _transactions.add('+\$${amount.toStringAsFixed(2)}');
+    void deposit(double amount) {
+      if (amount <= 0) throw ArgumentError('Amount must be positive.');
+      _balance += amount;
+      _transactions.add('+\$${amount.toStringAsFixed(2)}');
+    }
+
+    void withdraw(double amount) {
+      if (amount > _balance) throw StateError('Insufficient funds.');
+      _balance -= amount;
+      _transactions.add('-\$${amount.toStringAsFixed(2)}');
+    }
   }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  public class BankAccount
+  {
+      public string AccountId { get; }
+      public decimal Balance { get; private set; }
+      // private set = class can mutate, outside world cannot
 
-  void withdraw(double amount) {
-    if (amount > _balance) throw StateError('Insufficient funds.');
-    _balance -= amount;
-    _transactions.add('-\$${amount.toStringAsFixed(2)}');
+      private readonly List<string> _transactions = new();
+      public IReadOnlyList<string> Transactions => _transactions;
+      // expose as read-only view — callers cannot Add() to it
+
+      public BankAccount(string accountId, decimal initialBalance)
+      {
+          AccountId = accountId;
+          Balance = initialBalance;
+      }
+
+      public void Deposit(decimal amount)
+      {
+          if (amount <= 0) throw new ArgumentException("Amount must be positive.");
+          Balance += amount;
+          _transactions.Add($"+{amount:C}");
+      }
+
+      public void Withdraw(decimal amount)
+      {
+          if (amount > Balance) throw new InvalidOperationException("Insufficient funds.");
+          Balance -= amount;
+          _transactions.Add($"-{amount:C}");
+      }
   }
-}
-```</div>
-  <div slot="csharp">```csharp
-public class BankAccount
-{
-    public string AccountId { get; }
-    public decimal Balance { get; private set; }
-    // private set = class can mutate, outside world cannot
-
-    private readonly List<string> _transactions = new();
-    public IReadOnlyList<string> Transactions => _transactions;
-    // expose as read-only view — callers cannot Add() to it
-
-    public BankAccount(string accountId, decimal initialBalance)
-    {
-        AccountId = accountId;
-        Balance = initialBalance;
-    }
-
-    public void Deposit(decimal amount)
-    {
-        if (amount <= 0) throw new ArgumentException("Amount must be positive.");
-        Balance += amount;
-        _transactions.Add($"+{amount:C}");
-    }
-
-    public void Withdraw(decimal amount)
-    {
-        if (amount > Balance) throw new InvalidOperationException("Insufficient funds.");
-        Balance -= amount;
-        _transactions.Add($"-{amount:C}");
-    }
-}
-```</div>
+  ```
+  </div>
 </CodeComparison>
 
 ## Property Patterns You Will See Constantly

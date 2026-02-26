@@ -84,45 +84,49 @@ C# primary constructor parameters are NOT automatically properties. In Dart, `th
 </ConceptCallout>
 
 <CodeComparison>
-  <div slot="dart">```dart
-class HttpClient {
-  final String baseUrl;
-  final Duration timeout;
-  final Map<String, String> headers;
+  <div slot="dart">
+  ```dart
+  class HttpClient {
+    final String baseUrl;
+    final Duration timeout;
+    final Map<String, String> headers;
 
-  // this.field shorthand — concise and explicit
-  HttpClient(
-    this.baseUrl, {
-    this.timeout = const Duration(seconds: 30),
-    this.headers = const {},
-  });
-}
+    // this.field shorthand — concise and explicit
+    HttpClient(
+      this.baseUrl, {
+      this.timeout = const Duration(seconds: 30),
+      this.headers = const {},
+    });
+  }
 
-// Usage:
-final client = HttpClient(
-  'https://api.example.com',
-  timeout: Duration(seconds: 60),
-);
-```</div>
-  <div slot="csharp">```csharp
-// C# 12 primary constructor
-public class HttpClient(
-    string baseUrl,
-    TimeSpan? timeout = null,
-    Dictionary<string, string>? headers = null)
-{
-    public string BaseUrl { get; } = baseUrl;
-    public TimeSpan Timeout { get; } = timeout ?? TimeSpan.FromSeconds(30);
-    public Dictionary<string, string> Headers { get; } =
-        headers ?? new Dictionary<string, string>();
-}
+  // Usage:
+  final client = HttpClient(
+    'https://api.example.com',
+    timeout: Duration(seconds: 60),
+  );
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# 12 primary constructor
+  public class HttpClient(
+      string baseUrl,
+      TimeSpan? timeout = null,
+      Dictionary<string, string>? headers = null)
+  {
+      public string BaseUrl { get; } = baseUrl;
+      public TimeSpan Timeout { get; } = timeout ?? TimeSpan.FromSeconds(30);
+      public Dictionary<string, string> Headers { get; } =
+          headers ?? new Dictionary<string, string>();
+  }
 
-// Usage:
-var client = new HttpClient(
-    "https://api.example.com",
-    timeout: TimeSpan.FromSeconds(60)
-);
-```</div>
+  // Usage:
+  var client = new HttpClient(
+      "https://api.example.com",
+      timeout: TimeSpan.FromSeconds(60)
+  );
+  ```
+  </div>
 </CodeComparison>
 
 ## Constructor Overloading
