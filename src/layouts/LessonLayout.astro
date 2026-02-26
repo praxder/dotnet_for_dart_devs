@@ -19,7 +19,7 @@ const { day, title, module: moduleId, moduleName, phase, dartConcept, csharpConc
 
 const mod = MODULES.find(m => m.id === moduleId)!;
 const phaseLabel = phase === 'csharp' ? 'Phase 1: C# Language' : 'Phase 2: .NET & ASP.NET';
-const nextUrl = nav.next ? `/lessons/day-${String(nav.next.data.day).padStart(3, '0')}` : undefined;
+const nextUrl = nav.next ? `${import.meta.env.BASE_URL}lessons/day-${String(nav.next.data.day).padStart(3, '0')}` : undefined;
 ---
 
 <BaseLayout title={`Day ${day}: ${title}`} description={`Day ${day} — ${title}. Learn ${csharpConcept} in C# from a Dart developer perspective.`}>
@@ -34,9 +34,9 @@ const nextUrl = nav.next ? `/lessons/day-${String(nav.next.data.day).padStart(3,
 
         <!-- Breadcrumb -->
         <nav class="flex items-center gap-2 text-xs text-slate-600 mb-6">
-          <a href="/" class="hover:text-slate-400 transition-colors">Dashboard</a>
+          <a href={import.meta.env.BASE_URL} class="hover:text-slate-400 transition-colors">Dashboard</a>
           <span>/</span>
-          <a href={`/modules/${mod.slug}`} class="hover:text-slate-400 transition-colors">{mod.shortName}</a>
+          <a href={`${import.meta.env.BASE_URL}modules/${mod.slug}`} class="hover:text-slate-400 transition-colors">{mod.shortName}</a>
           <span>/</span>
           <span class="text-slate-400">Day {day}</span>
         </nav>

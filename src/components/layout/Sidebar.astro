@@ -47,7 +47,7 @@ const byModule = MODULES.map(mod => ({
             const dayStr = String(lesson.data.day).padStart(3, '0');
             return (
               <a
-                href={`/lessons/day-${dayStr}`}
+                href={`${import.meta.env.BASE_URL}lessons/day-${dayStr}`}
                 data-day={lesson.data.day}
                 class={`sidebar-lesson flex items-start gap-2 px-2 py-1.5 rounded-md text-xs transition-colors group/lesson ${
                   isActive

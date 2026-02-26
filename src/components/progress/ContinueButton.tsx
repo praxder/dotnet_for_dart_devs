@@ -21,7 +21,7 @@ export default function ContinueButton() {
 
   return (
     <a
-      href={`/lessons/day-${dayStr}`}
+      href={`${import.meta.env.BASE_URL}lessons/day-${dayStr}`}
       class={`inline-flex items-center gap-3 px-8 py-4 rounded-2xl font-bold text-lg transition-all duration-200 hover:scale-105 active:scale-100 shadow-lg ${
         isStart
           ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-indigo-500/30 hover:shadow-indigo-500/50'
