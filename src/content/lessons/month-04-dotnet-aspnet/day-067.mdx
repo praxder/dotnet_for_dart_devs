@@ -1,0 +1,209 @@
+---
+title: "NuGet: Package Management"
+day: 67
+week: 14
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "pub.dev, pubspec.yaml, dart pub get"
+csharpConcept: "NuGet, .csproj PackageReference, dotnet add package, NuGet.org"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+NuGet is .NET's package manager — the equivalent of pub.dev for Dart. If you understand pubspec.yaml and `dart pub get`, you'll feel at home with NuGet and `.csproj` files within minutes.
+
+## pub.dev vs NuGet Side by Side
+
+<CodeComparison>
+  <div slot="dart">
+  ```yaml
+  # pubspec.yaml
+  name: my_app
+  dependencies:
+    http: ^1.1.0
+    json_serializable: ^6.7.1
+  dev_dependencies:
+    build_runner: ^2.4.6
+    flutter_test:
+      sdk: flutter
+
+  # Install:
+  # dart pub get
+  # dart pub upgrade
+  # dart pub add http
+  ```
+  </div>
+  <div slot="csharp">
+  ```xml
+  <!-- MyApp.csproj -->
+  <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+      <OutputType>Exe</OutputType>
+      <TargetFramework>net9.0</TargetFramework>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+      <PackageReference Include="Serilog" Version="3.1.1" />
+    </ItemGroup>
+  </Project>
+  ```
+  ```bash
+  # Install:
+  dotnet add package Newtonsoft.Json
+  dotnet add package Newtonsoft.Json --version 13.0.3
+  dotnet restore
+  dotnet list package
+  dotnet remove package Newtonsoft.Json
+  ```
+  </div>
+</CodeComparison>
+
+## Version Ranges
+
+```xml
+<!-- Exact version -->
+<PackageReference Include="Serilog" Version="3.1.1" />
+
+<!-- Minimum version (x >= 3.1.1) -->
+<PackageReference Include="Serilog" Version="[3.1.1,)" />
+
+<!-- Range (3.x.x) -->
+<PackageReference Include="Serilog" Version="[3.0.0, 4.0.0)" />
+
+<!-- Floating (latest patch in 3.1.x) — useful for development -->
+<PackageReference Include="Serilog" Version="3.1.*" />
+```
+
+```bash
+# Check for outdated packages
+dotnet list package --outdated
+
+# Update all packages to latest compatible
+dotnet add package Serilog  # re-adds with latest version
+
+# Restore (like dart pub get after pulling from git)
+dotnet restore
+```
+
+## NuGet.org — Finding Packages
+
+The main registry is [nuget.org](https://nuget.org). Key search tips:
+
+- Filter by: **Downloads** (popular), **Recently updated** (maintained)
+- Check: **.NET compatibility** badge, **Source Link** (debuggable), **Strong Name** (security)
+- Prefer packages from known publishers (Microsoft, JetBrains, etc.)
+
+Essential packages every .NET developer uses:
+
+```bash
+# Serialization
+dotnet add package Newtonsoft.Json        # battle-tested JSON (still widely used)
+# Note: System.Text.Json is built-in and preferred for new code
+
+# HTTP
+dotnet add package Polly                 # resilience: retry, circuit breaker, timeout
+dotnet add package Refit                 # REST client from interface definitions
+
+# Logging
+dotnet add package Serilog               # structured logging
+dotnet add package Serilog.Sinks.Console # log to console
+dotnet add package Serilog.Sinks.File    # log to file
+
+# Database
+dotnet add package Microsoft.EntityFrameworkCore.SqlServer
+dotnet add package Microsoft.EntityFrameworkCore.Sqlite
+dotnet add package Dapper                # lightweight ORM
+
+# Testing
+dotnet add package xunit                 # test framework
+dotnet add package FluentAssertions      # readable assertions
+dotnet add package Moq                   # mocking
+
+# Utility
+dotnet add package AutoMapper            # object mapping
+dotnet add package FluentValidation      # validation rules
+dotnet add package MediatR               # mediator/CQRS pattern
+```
+
+## Central Package Management
+
+For solutions with multiple projects, avoid version drift:
+
+```xml
+<!-- Directory.Packages.props (in solution root) -->
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Serilog" Version="3.1.1" />
+    <PackageVersion Include="FluentValidation" Version="11.8.1" />
+  </ItemGroup>
+</Project>
+```
+
+```xml
+<!-- Individual .csproj — no version needed, taken from Directory.Packages.props -->
+<PackageReference Include="Serilog" />
+<PackageReference Include="FluentValidation" />
+```
+
+## Private NuGet Feeds
+
+```bash
+# Add a private feed (GitHub Packages, Azure Artifacts, etc.)
+dotnet nuget add source https://nuget.pkg.github.com/OWNER/index.json \
+    --name "github" \
+    --username "your-username" \
+    --password "YOUR_PAT"
+
+# Add to NuGet.config (commit to repo — no credentials)
+```
+
+```xml
+<!-- NuGet.config -->
+<configuration>
+  <packageSources>
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+    <add key="company-feed" value="https://pkgs.dev.azure.com/company/project/_packaging/feed/nuget/v3/index.json" />
+  </packageSources>
+</configuration>
+```
+
+## Creating a NuGet Package
+
+```xml
+<!-- In your .csproj, add packaging metadata -->
+<PropertyGroup>
+  <PackageId>MyCompany.MyLibrary</PackageId>
+  <Version>1.0.0</Version>
+  <Authors>Alice Smith</Authors>
+  <Description>A useful library</Description>
+  <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  <RepositoryUrl>https://github.com/mycompany/mylibrary</RepositoryUrl>
+  <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  <IncludeSymbols>true</IncludeSymbols>
+  <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+</PropertyGroup>
+```
+
+```bash
+# Pack and publish
+dotnet pack --configuration Release
+dotnet nuget push bin/Release/MyCompany.MyLibrary.1.0.0.nupkg \
+    --api-key YOUR_API_KEY \
+    --source https://api.nuget.org/v3/index.json
+```
+
+<ExerciseBlock>
+1. Create a new console app and add `Newtonsoft.Json` and `FluentValidation`. Use `FluentValidation` to validate a `CreateUserRequest` (name required, email format, age 18-120). Serialize valid requests to JSON.
+2. Explore NuGet.org and find a package for each: (a) HTTP resilience policies, (b) CSV parsing, (c) YAML parsing. Check their download counts, last update date, and GitHub stars.
+3. Set up Central Package Management for a solution with two projects (a web API and a class library). Ensure both use the same version of `FluentValidation` defined in `Directory.Packages.props`.
+</ExerciseBlock>

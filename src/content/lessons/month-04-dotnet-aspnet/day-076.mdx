@@ -1,0 +1,220 @@
+---
+title: "ASP.NET Core: Middleware Pipeline"
+day: 76
+week: 16
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "shelf middleware, dart_frog middleware"
+csharpConcept: "middleware, IMiddleware, Use/Run/Map, request/response pipeline"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Every HTTP request in ASP.NET Core flows through a **middleware pipeline** — a chain of components that each get a chance to inspect, modify, or short-circuit the request and response. This is identical in concept to Dart's `shelf` middleware.
+
+## The Middleware Pipeline
+
+```
+Request →  [Logging] → [Auth] → [Routing] → [Controller]
+Response ← [Logging] ← [Auth] ← [Routing] ← [Controller]
+```
+
+Each middleware component can:
+1. Do work **before** the next middleware
+2. Call `next()` to pass control down the chain
+3. Do work **after** the next middleware (on the way back)
+4. Short-circuit and return early (e.g., auth rejection)
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // shelf middleware
+  Middleware loggingMiddleware() {
+    return (Handler next) {
+      return (Request request) async {
+        print('→ ${request.method} ${request.url}');
+        final response = await next(request);  // call next
+        print('← ${response.statusCode}');
+        return response;
+      };
+    };
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // ASP.NET Core middleware
+  app.Use(async (context, next) =>
+  {
+      // Before: runs on the way IN
+      Console.WriteLine($"→ {context.Request.Method} {context.Request.Path}");
+
+      await next(context);  // call the next middleware
+
+      // After: runs on the way OUT (after response is prepared)
+      Console.WriteLine($"← {context.Response.StatusCode}");
+  });
+  ```
+  </div>
+</CodeComparison>
+
+## Middleware Registration Methods
+
+```csharp
+// Use() — adds middleware that calls next
+app.Use(async (context, next) =>
+{
+    // ... do work before
+    await next(context);  // MUST call next or pipeline stops here
+    // ... do work after
+});
+
+// Run() — terminal middleware (no next) — always the LAST one
+app.Run(async context =>
+{
+    await context.Response.WriteAsync("Hello from terminal middleware!");
+});
+
+// Map() — branch the pipeline based on path
+app.Map("/health", healthApp =>
+{
+    healthApp.Run(async context =>
+        await context.Response.WriteAsync("Healthy"));
+});
+
+app.Map("/api", apiApp =>
+{
+    apiApp.UseRouting();
+    apiApp.UseAuthentication();
+    apiApp.MapControllers();
+});
+
+// MapWhen() — branch based on any condition
+app.MapWhen(
+    ctx => ctx.Request.Headers.ContainsKey("X-Debug"),
+    debugApp => debugApp.Run(DumpDebugInfo));
+```
+
+## Middleware Order Matters
+
+```csharp
+// Program.cs — order is CRITICAL
+var app = builder.Build();
+
+// 1. Exception handling — MUST be first to catch errors from everything below
+app.UseExceptionHandler("/error");
+
+// 2. HSTS/HTTPS redirect
+app.UseHsts();
+app.UseHttpsRedirection();
+
+// 3. Static files — serve before auth (they're public)
+app.UseStaticFiles();
+
+// 4. Routing — must be before auth
+app.UseRouting();
+
+// 5. CORS — after routing, before auth
+app.UseCors("AllowAll");
+
+// 6. Auth — after CORS
+app.UseAuthentication();
+app.UseAuthorization();
+
+// 7. Custom middleware
+app.UseRequestLogging();
+
+// 8. Endpoints — MUST be last
+app.MapControllers();
+app.MapRazorPages();
+```
+
+<ConceptCallout type="gotcha" title="Order Is Not Optional">
+Getting middleware order wrong breaks your app in subtle ways. `UseAuthentication()` before `UseAuthorization()` is required. `UseRouting()` before both is required. `MapControllers()` must come after `UseAuthorization()`. ASP.NET Core will warn about some errors but not all — follow the order above.
+</ConceptCallout>
+
+## Writing a Class-Based Middleware
+
+```csharp
+// Inline lambdas are fine for simple middleware
+// For complex middleware: implement IMiddleware or use the convention
+
+// Convention-based (most common — no interface)
+public class RequestTimingMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<RequestTimingMiddleware> _logger;
+
+    // Constructor injection works here too
+    public RequestTimingMiddleware(RequestDelegate next, ILogger<RequestTimingMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var sw = Stopwatch.StartNew();
+
+        await _next(context);  // call next middleware
+
+        sw.Stop();
+        _logger.LogInformation(
+            "{Method} {Path} → {Status} ({Ms}ms)",
+            context.Request.Method,
+            context.Request.Path,
+            context.Response.StatusCode,
+            sw.ElapsedMilliseconds);
+    }
+}
+
+// Extension method for clean registration
+public static class MiddlewareExtensions
+{
+    public static IApplicationBuilder UseRequestTiming(this IApplicationBuilder app)
+        => app.UseMiddleware<RequestTimingMiddleware>();
+}
+
+// Usage
+app.UseRequestTiming();
+```
+
+## Short-Circuiting the Pipeline
+
+```csharp
+// API key validation middleware — stops pipeline if key is invalid
+public class ApiKeyMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context, IConfiguration config)
+    {
+        // Only apply to /api routes
+        if (!context.Request.Path.StartsWithSegments("/api"))
+        {
+            await next(context);
+            return;
+        }
+
+        if (!context.Request.Headers.TryGetValue("X-Api-Key", out var key)
+            || key != config["ApiKey"])
+        {
+            context.Response.StatusCode = 401;
+            await context.Response.WriteAsJsonAsync(new { error = "Invalid API key" });
+            return;  // don't call next — request is rejected
+        }
+
+        await next(context);  // key is valid — proceed
+    }
+}
+```
+
+<ExerciseBlock>
+1. Write a `CorrelationIdMiddleware` that reads `X-Correlation-Id` from the request header (or generates a new GUID if absent), sets it on the response header, and adds it to the logging scope with `ILogger.BeginScope`. Verify it appears in all log statements within a request.
+2. Write a `RateLimitingMiddleware` using a `ConcurrentDictionary<string, (int Count, DateTime Window)>` per IP address. Allow max 100 requests per minute. Return 429 Too Many Requests when exceeded.
+3. Write a `MaintenanceModeMiddleware` that reads a `MaintenanceMode:Enabled` config value and returns 503 for all non-admin requests when true. Admin requests (with `X-Admin-Key` header) pass through. Support toggling without restart via `IOptionsMonitor<MaintenanceModeSettings>`.
+</ExerciseBlock>

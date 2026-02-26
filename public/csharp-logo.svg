@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M50 5L8.7 28.5v43L50 95l41.3-23.5v-43L50 5z" fill="#9B4F96"/>
+  <path d="M50 5L8.7 28.5v43L50 95V5z" fill="#68217A"/>
+  <text x="50" y="65" text-anchor="middle" font-family="Arial,sans-serif" font-weight="bold" font-size="40" fill="white">C#</text>
+</svg>

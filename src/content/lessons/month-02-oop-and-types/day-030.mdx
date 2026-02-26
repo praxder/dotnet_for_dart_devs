@@ -1,0 +1,264 @@
+---
+title: "Mini-Project: Shape Hierarchy"
+day: 30
+week: 7
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart OOP: abstract classes, interfaces, polymorphism"
+csharpConcept: "Interfaces, abstract classes, virtual methods, generics, LINQ, polymorphism"
+estimatedMinutes: 45
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This mini-project ties together everything from Weeks 5-6: interfaces, abstract classes, inheritance, properties, and polymorphism. Build a complete shape hierarchy that demonstrates all these patterns working together.
+
+## What You're Building
+
+A shape library with:
+- `IShape` interface defining the shape contract
+- `IResizable` interface for shapes that can be scaled
+- `ShapeBase` abstract class with shared functionality
+- Concrete shapes: `Circle`, `Rectangle`, `Triangle`
+- A `ShapeReport` utility that processes collections of shapes
+
+## The Full Implementation
+
+```csharp
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+// ==================== INTERFACES ====================
+
+public interface IShape
+{
+    string Name { get; }
+    double Area { get; }
+    double Perimeter { get; }
+    bool Contains(double x, double y);
+}
+
+public interface IResizable
+{
+    IShape Scale(double factor);
+}
+
+// ==================== ABSTRACT BASE ====================
+
+public abstract class ShapeBase : IShape, IResizable
+{
+    public abstract string Name { get; }
+    public abstract double Area { get; }
+    public abstract double Perimeter { get; }
+    public abstract bool Contains(double x, double y);
+    public abstract IShape Scale(double factor);
+
+    // Shared implementation — all shapes get this for free
+    public bool IsLargerThan(IShape other) => Area > other.Area;
+
+    public override string ToString()
+        => $"{Name}: Area={Area:F2}, Perimeter={Perimeter:F2}";
+}
+
+// ==================== CIRCLE ====================
+
+public class Circle : ShapeBase
+{
+    public double Radius { get; }
+    public double CenterX { get; }
+    public double CenterY { get; }
+
+    public Circle(double radius, double centerX = 0, double centerY = 0)
+    {
+        if (radius <= 0) throw new ArgumentException("Radius must be positive", nameof(radius));
+        Radius = radius;
+        CenterX = centerX;
+        CenterY = centerY;
+    }
+
+    public override string Name => "Circle";
+    public override double Area => Math.PI * Radius * Radius;
+    public override double Perimeter => 2 * Math.PI * Radius;
+
+    public override bool Contains(double x, double y)
+    {
+        var dx = x - CenterX;
+        var dy = y - CenterY;
+        return dx * dx + dy * dy <= Radius * Radius;
+    }
+
+    public override IShape Scale(double factor) => new Circle(Radius * factor, CenterX, CenterY);
+
+    public override string ToString() => $"Circle(r={Radius:F2}, center=({CenterX},{CenterY}))";
+}
+
+// ==================== RECTANGLE ====================
+
+public class Rectangle : ShapeBase
+{
+    public double Width { get; }
+    public double Height { get; }
+    public double X { get; }  // top-left corner
+    public double Y { get; }
+
+    public Rectangle(double width, double height, double x = 0, double y = 0)
+    {
+        if (width <= 0) throw new ArgumentException("Width must be positive", nameof(width));
+        if (height <= 0) throw new ArgumentException("Height must be positive", nameof(height));
+        Width = width;
+        Height = height;
+        X = x;
+        Y = y;
+    }
+
+    public override string Name => Width == Height ? "Square" : "Rectangle";
+    public override double Area => Width * Height;
+    public override double Perimeter => 2 * (Width + Height);
+
+    public override bool Contains(double x, double y)
+        => x >= X && x <= X + Width && y >= Y && y <= Y + Height;
+
+    public override IShape Scale(double factor)
+        => new Rectangle(Width * factor, Height * factor, X, Y);
+
+    // Rectangle-specific: check if another rectangle fits inside
+    public bool CanContain(Rectangle other)
+        => other.Width <= Width && other.Height <= Height;
+}
+
+// ==================== TRIANGLE ====================
+
+public class Triangle : ShapeBase
+{
+    public double A { get; }  // side lengths
+    public double B { get; }
+    public double C { get; }
+
+    public Triangle(double a, double b, double c)
+    {
+        if (a <= 0 || b <= 0 || c <= 0)
+            throw new ArgumentException("All sides must be positive");
+        if (a + b <= c || a + c <= b || b + c <= a)
+            throw new ArgumentException("Invalid triangle: triangle inequality violated");
+        A = a;
+        B = b;
+        C = c;
+    }
+
+    public override string Name => IsEquilateral ? "Equilateral Triangle"
+        : IsIsosceles ? "Isosceles Triangle"
+        : "Scalene Triangle";
+
+    private double S => (A + B + C) / 2;  // semi-perimeter
+
+    public override double Area => Math.Sqrt(S * (S - A) * (S - B) * (S - C));  // Heron's formula
+    public override double Perimeter => A + B + C;
+
+    public bool IsEquilateral => Math.Abs(A - B) < 1e-9 && Math.Abs(B - C) < 1e-9;
+    public bool IsIsosceles => Math.Abs(A - B) < 1e-9 || Math.Abs(B - C) < 1e-9 || Math.Abs(A - C) < 1e-9;
+
+    public override bool Contains(double x, double y)
+        => false; // simplified — would need vertex coordinates
+
+    public override IShape Scale(double factor) => new Triangle(A * factor, B * factor, C * factor);
+}
+
+// ==================== REPORT UTILITY ====================
+
+public static class ShapeReport
+{
+    public static void PrintReport(IEnumerable<IShape> shapes)
+    {
+        var list = shapes.ToList();
+        if (!list.Any())
+        {
+            Console.WriteLine("No shapes.");
+            return;
+        }
+
+        Console.WriteLine("╔══════════════════════════════════════════╗");
+        Console.WriteLine("║            SHAPE REPORT                  ║");
+        Console.WriteLine("╠══════════════════════════════════════════╣");
+
+        // Sort by area descending
+        foreach (var shape in list.OrderByDescending(s => s.Area))
+        {
+            Console.WriteLine($"║ {shape.Name,-18} Area: {shape.Area,8:F2}  P: {shape.Perimeter,7:F2} ║");
+        }
+
+        Console.WriteLine("╠══════════════════════════════════════════╣");
+        Console.WriteLine($"║ Total shapes: {list.Count,-28}║");
+        Console.WriteLine($"║ Total area:   {list.Sum(s => s.Area),-28:F2}║");
+        Console.WriteLine($"║ Largest:      {list.MaxBy(s => s.Area)?.Name ?? "none",-28}║");
+        Console.WriteLine($"║ Smallest:     {list.MinBy(s => s.Area)?.Name ?? "none",-28}║");
+        Console.WriteLine("╚══════════════════════════════════════════╝");
+    }
+
+    public static IEnumerable<IShape> FilterByMinArea(IEnumerable<IShape> shapes, double minArea)
+        => shapes.Where(s => s.Area >= minArea);
+
+    public static IEnumerable<IShape> ScaleAll(IEnumerable<IShape> shapes, double factor)
+        => shapes.OfType<IResizable>().Select(s => s.Scale(factor));
+}
+
+// ==================== MAIN ====================
+
+var shapes = new List<IShape>
+{
+    new Circle(5),
+    new Circle(2.5),
+    new Rectangle(10, 6),
+    new Rectangle(4, 4),       // square
+    new Triangle(3, 4, 5),     // right triangle
+    new Triangle(5, 5, 5),     // equilateral
+};
+
+ShapeReport.PrintReport(shapes);
+
+Console.WriteLine("\n--- Shapes with area > 50 ---");
+ShapeReport.PrintReport(ShapeReport.FilterByMinArea(shapes, 50));
+
+Console.WriteLine("\n--- All shapes scaled by 2x ---");
+ShapeReport.PrintReport(ShapeReport.ScaleAll(shapes, 2.0));
+
+// Polymorphism demonstration
+Console.WriteLine("\n--- Polymorphism test ---");
+foreach (var shape in shapes)
+{
+    var resizable = shape as IResizable;
+    Console.WriteLine($"{shape} | Resizable: {resizable != null}");
+}
+```
+
+## Expected Output
+
+```
+╔══════════════════════════════════════════╗
+║            SHAPE REPORT                  ║
+╠══════════════════════════════════════════╣
+║ Circle              Area:    78.54  P:    31.42 ║
+║ Rectangle           Area:    60.00  P:    32.00 ║
+║ ...
+```
+
+## Key Patterns Used
+
+- **Interface + abstract class**: `IShape` defines the contract, `ShapeBase` provides shared behavior
+- **Explicit typing**: `double` properties with computed `get`-only
+- **Pattern matching**: `shape as IResizable` for safe interface casting
+- **LINQ**: `OrderByDescending`, `Sum`, `MaxBy`, `MinBy`, `OfType`, `Where`, `Select`
+- **Exception handling**: `ArgumentException` for invalid inputs
+- **Expression-bodied members**: one-liner properties and methods
+
+<ExerciseBlock title="Extend the Project">
+1. Add a `Polygon` class that takes any number of vertices as `(double X, double Y)` tuples and computes area using the Shoelace formula.
+2. Add an `IColorable` interface with a `Color` property and implement it on `Circle` and `Rectangle`.
+3. Add a `GroupByType()` static method to `ShapeReport` that returns a `Dictionary<string, List<IShape>>` grouping shapes by their `Name`.
+4. Implement `IComparable<IShape>` on `ShapeBase` to sort shapes by area. Verify that `list.Sort()` works.
+</ExerciseBlock>

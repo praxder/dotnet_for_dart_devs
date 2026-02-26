@@ -1,0 +1,246 @@
+---
+title: "Docker and Containerizing .NET Apps"
+day: 116
+week: 24
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Flutter web deployment, build artifacts"
+csharpConcept: "Dockerfile, multi-stage builds, docker-compose, ASP.NET Core in containers"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Containers are the standard way to deploy .NET applications. They bundle your app with all its dependencies, making deployments reproducible across environments. Docker and .NET work seamlessly together.
+
+## Multi-Stage Dockerfile
+
+```dockerfile
+# Multi-stage build: build in full SDK image, run in smaller runtime image
+# Stage 1: Build
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+WORKDIR /src
+
+# Copy project files first (for layer caching — only re-run restore when .csproj changes)
+COPY ["src/Api/Api.csproj", "src/Api/"]
+COPY ["src/Domain/Domain.csproj", "src/Domain/"]
+COPY ["src/Infrastructure/Infrastructure.csproj", "src/Infrastructure/"]
+RUN dotnet restore "src/Api/Api.csproj"
+
+# Copy source and build
+COPY . .
+WORKDIR "/src/src/Api"
+RUN dotnet build "Api.csproj" -c Release -o /app/build
+
+# Stage 2: Publish
+FROM build AS publish
+RUN dotnet publish "Api.csproj" \
+    -c Release \
+    -o /app/publish \
+    --no-restore \
+    -r linux-x64 \
+    --self-contained false
+
+# Stage 3: Final runtime image
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final
+WORKDIR /app
+
+# Security: run as non-root user
+RUN adduser --disabled-password --gecos '' appuser
+USER appuser
+
+EXPOSE 8080
+EXPOSE 8081  # HTTPS (if needed)
+
+ENV ASPNETCORE_URLS=http://+:8080
+ENV ASPNETCORE_ENVIRONMENT=Production
+
+COPY --from=publish /app/publish .
+
+ENTRYPOINT ["dotnet", "Api.dll"]
+```
+
+## Optimized for .NET 8+ Chiseled Images
+
+```dockerfile
+# Chiseled images: minimal attack surface, smaller size
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+# ... (same build stages as above)
+
+# Use chiseled runtime image (Ubuntu-based, stripped down)
+FROM mcr.microsoft.com/dotnet/aspnet:9.0-jammy-chiseled AS final
+WORKDIR /app
+EXPOSE 8080
+ENV ASPNETCORE_URLS=http://+:8080
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "Api.dll"]
+
+# Regular image: ~220MB
+# Chiseled image: ~90MB
+# Chiseled already runs as non-root — no need to add user
+```
+
+## Docker Compose for Local Development
+
+```yaml
+# docker-compose.yml
+version: '3.9'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build  # stop at build stage for hot reload
+    volumes:
+      - ./src:/src  # mount source for hot reload
+    ports:
+      - "5000:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__Default=Host=db;Database=blogdb;Username=postgres;Password=postgres
+      - Jwt__Key=${JWT_KEY:-dev-secret-key-min-32-chars-long}
+      - Jwt__Issuer=http://localhost:5000
+      - Jwt__Audience=blog-clients
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: dotnet watch run --project src/Api/Api.csproj  # hot reload!
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: blogdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional: pgAdmin for DB management
+  pgadmin:
+    image: dpage/pgadmin4
+    profiles: ["tools"]  # only starts when: docker compose --profile tools up
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+
+volumes:
+  postgres_data:
+```
+
+## ASP.NET Core Container Configuration
+
+```csharp
+// Containers have specific considerations
+
+// 1. Listen on the right port
+// Environment variable ASPNETCORE_URLS=http://+:8080
+// Or in code:
+builder.WebHost.UseUrls("http://+:8080");
+
+// 2. Handle forwarded headers (behind reverse proxy/load balancer)
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();   // trust any proxy (or configure specific IPs)
+    options.KnownProxies.Clear();
+});
+app.UseForwardedHeaders();  // must be first middleware!
+
+// 3. Health checks for container orchestrators
+builder.Services.AddHealthChecks()
+    .AddNpgSql(connectionString, name: "database")
+    .AddRedis(redisConnectionString, name: "redis");
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false  // liveness: just check app is up
+});
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")  // readiness: check dependencies
+});
+
+// 4. Graceful shutdown
+builder.Host.ConfigureHostOptions(options =>
+    options.ShutdownTimeout = TimeSpan.FromSeconds(30));
+
+// Handle SIGTERM from container orchestrator
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() =>
+{
+    // Stop accepting new requests, finish processing existing ones
+    Console.WriteLine("Shutting down gracefully...");
+});
+```
+
+## Running Migrations on Startup
+
+```csharp
+// Automatically run pending migrations when the container starts
+// Useful for simple deployments; use separate migration job for production
+
+public static async Task ApplyMigrationsAsync(WebApplication app)
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+    try
+    {
+        logger.LogInformation("Applying database migrations...");
+        await db.Database.MigrateAsync();
+        logger.LogInformation("Migrations applied successfully");
+    }
+    catch (Exception ex)
+    {
+        logger.LogCritical(ex, "Failed to apply migrations — aborting startup");
+        throw;
+    }
+}
+
+// In Program.cs:
+await ApplyMigrationsAsync(app);
+await app.RunAsync();
+```
+
+<ConceptCallout type="tip" title="Container Security Best Practices">
+1. **Non-root user**: ASP.NET Core chiseled images run as non-root by default
+2. **Read-only filesystem**: mount secrets as files, not baked into the image
+3. **No secrets in image**: use environment variables or mounted secrets
+4. **Minimal base image**: use `aspnet:9.0-jammy-chiseled` or Alpine-based images
+5. **Scan images**: run `docker scout` or Trivy in CI to detect vulnerabilities
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Write a multi-stage Dockerfile for your blog API. Verify the image builds, runs, and responds to `GET /health`. Check the final image size with `docker images`.
+2. Create a `docker-compose.yml` with your API, PostgreSQL, and Redis. Add health checks so the API only starts after the database is ready. Test `docker compose up` brings everything up and that `dotnet ef database update` runs automatically.
+3. Add a `docker-compose.override.yml` for development: enable hot reload with `dotnet watch`, mount the source directory as a volume, and expose debugging port 9229. The base `docker-compose.yml` should be production-ready; the override adds dev conveniences.
+</ExerciseBlock>

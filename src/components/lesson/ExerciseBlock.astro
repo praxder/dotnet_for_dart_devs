@@ -1,0 +1,16 @@
+---
+interface Props {
+  title?: string;
+}
+const { title = 'Try It Yourself' } = Astro.props;
+---
+
+<div class="my-6 rounded-xl border border-purple-800/50 bg-purple-950/20 p-5">
+  <p class="flex items-center gap-2 text-sm font-semibold text-purple-300 mb-3">
+    <span>🧪</span>
+    <span>{title}</span>
+  </p>
+  <div class="text-sm text-slate-300 space-y-2 [&>p]:m-0 [&>ol]:mt-2 [&>ol]:space-y-1.5 [&>ol>li]:leading-relaxed">
+    <slot />
+  </div>
+</div>

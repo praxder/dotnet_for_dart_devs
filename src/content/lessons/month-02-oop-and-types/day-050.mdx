@@ -1,0 +1,242 @@
+---
+title: "Mini-Project: In-Memory Data Pipeline"
+day: 50
+week: 10
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Stream transformers, collection pipelines"
+csharpConcept: "LINQ pipelines, generics, custom operators, IEnumerable<T>"
+estimatedMinutes: 30
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This mini-project consolidates everything from Module 4: generics, LINQ operators, custom extension methods, and collection performance. You'll build a reusable in-memory data pipeline that can filter, transform, group, and report on any dataset.
+
+## Project: Sales Analytics Engine
+
+Build a fluent analytics engine that processes `SaleRecord` data with a composable query API.
+
+### Data Model
+
+```csharp
+public record SaleRecord(
+    Guid Id,
+    string SalesRep,
+    string Region,
+    string ProductCategory,
+    string ProductName,
+    decimal Amount,
+    DateTime SaleDate,
+    bool IsRefunded
+);
+
+public record RegionSummary(
+    string Region,
+    int TotalSales,
+    decimal TotalRevenue,
+    decimal AverageOrderValue,
+    string TopProduct,
+    string TopRep
+);
+```
+
+### Data Generator
+
+```csharp
+public static class SalesDataGenerator
+{
+    private static readonly string[] Reps = ["Alice", "Bob", "Carol", "Dave", "Eve"];
+    private static readonly string[] Regions = ["North", "South", "East", "West"];
+    private static readonly string[] Categories = ["Software", "Hardware", "Services", "Support"];
+    private static readonly string[] Products = [
+        "Enterprise License", "Developer Seat", "Support Pack",
+        "Hardware Bundle", "Cloud Subscription", "Training"
+    ];
+
+    public static IReadOnlyList<SaleRecord> Generate(int count, int seed = 42)
+    {
+        var rng = new Random(seed);
+        return Enumerable.Range(1, count).Select(_ => new SaleRecord(
+            Id: Guid.NewGuid(),
+            SalesRep: Reps[rng.Next(Reps.Length)],
+            Region: Regions[rng.Next(Regions.Length)],
+            ProductCategory: Categories[rng.Next(Categories.Length)],
+            ProductName: Products[rng.Next(Products.Length)],
+            Amount: Math.Round((decimal)(rng.NextDouble() * 9900 + 100), 2),
+            SaleDate: DateTime.Today.AddDays(-rng.Next(365)),
+            IsRefunded: rng.NextDouble() < 0.05  // 5% refund rate
+        )).ToList();
+    }
+}
+```
+
+### Fluent Query Builder
+
+```csharp
+public class SalesQuery
+{
+    private IEnumerable<SaleRecord> _source;
+
+    public SalesQuery(IEnumerable<SaleRecord> source) => _source = source;
+
+    // Filtering
+    public SalesQuery InRegion(string region)
+    {
+        _source = _source.Where(s => s.Region.Equals(region, StringComparison.OrdinalIgnoreCase));
+        return this;
+    }
+
+    public SalesQuery ByRep(string rep)
+    {
+        _source = _source.Where(s => s.SalesRep.Equals(rep, StringComparison.OrdinalIgnoreCase));
+        return this;
+    }
+
+    public SalesQuery InCategory(string category)
+    {
+        _source = _source.Where(s => s.ProductCategory == category);
+        return this;
+    }
+
+    public SalesQuery Between(DateTime start, DateTime end)
+    {
+        _source = _source.Where(s => s.SaleDate >= start && s.SaleDate <= end);
+        return this;
+    }
+
+    public SalesQuery ExcludeRefunds()
+    {
+        _source = _source.Where(s => !s.IsRefunded);
+        return this;
+    }
+
+    public SalesQuery MinimumAmount(decimal min)
+    {
+        _source = _source.Where(s => s.Amount >= min);
+        return this;
+    }
+
+    // Terminal operations
+    public IReadOnlyList<SaleRecord> ToList() => _source.ToList();
+
+    public decimal TotalRevenue() => _source.Sum(s => s.Amount);
+
+    public decimal AverageOrderValue() => _source.Average(s => s.Amount);
+
+    public int Count() => _source.Count();
+
+    public IReadOnlyList<RegionSummary> ByRegion()
+    {
+        return _source
+            .GroupBy(s => s.Region)
+            .Select(g => new RegionSummary(
+                Region: g.Key,
+                TotalSales: g.Count(),
+                TotalRevenue: g.Sum(s => s.Amount),
+                AverageOrderValue: g.Average(s => s.Amount),
+                TopProduct: g.GroupBy(s => s.ProductName)
+                             .OrderByDescending(pg => pg.Sum(s => s.Amount))
+                             .First().Key,
+                TopRep: g.GroupBy(s => s.SalesRep)
+                         .OrderByDescending(rg => rg.Sum(s => s.Amount))
+                         .First().Key
+            ))
+            .OrderByDescending(r => r.TotalRevenue)
+            .ToList();
+    }
+
+    public IReadOnlyDictionary<string, decimal> RevenueByMonth()
+    {
+        return _source
+            .GroupBy(s => s.SaleDate.ToString("yyyy-MM"))
+            .ToDictionary(
+                g => g.Key,
+                g => g.Sum(s => s.Amount)
+            );
+    }
+
+    public IReadOnlyList<(string Rep, decimal Revenue, int Count)> LeaderBoard(int top = 5)
+    {
+        return _source
+            .GroupBy(s => s.SalesRep)
+            .Select(g => (Rep: g.Key, Revenue: g.Sum(s => s.Amount), Count: g.Count()))
+            .OrderByDescending(t => t.Revenue)
+            .Take(top)
+            .ToList();
+    }
+}
+```
+
+### Report Generator
+
+```csharp
+public static class SalesReport
+{
+    public static void PrintSummary(IEnumerable<SaleRecord> data)
+    {
+        var query = new SalesQuery(data).ExcludeRefunds();
+
+        Console.WriteLine("=== SALES REPORT ===");
+        Console.WriteLine($"Total Sales:   {query.Count():N0}");
+        Console.WriteLine($"Total Revenue: {query.TotalRevenue():C}");
+        Console.WriteLine($"Avg Order:     {query.AverageOrderValue():C}");
+        Console.WriteLine();
+
+        Console.WriteLine("--- By Region ---");
+        foreach (var region in query.ByRegion())
+        {
+            Console.WriteLine($"{region.Region,8}: {region.TotalRevenue,12:C} " +
+                            $"({region.TotalSales} sales, avg {region.AverageOrderValue:C})");
+            Console.WriteLine($"          Top Product: {region.TopProduct}");
+            Console.WriteLine($"          Top Rep: {region.TopRep}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("--- Leaderboard ---");
+        foreach (var (rep, revenue, count) in query.LeaderBoard())
+            Console.WriteLine($"  {rep,-10}: {revenue,10:C} ({count} deals)");
+    }
+}
+```
+
+### Main Program
+
+```csharp
+// Generate 500 sales records
+var sales = SalesDataGenerator.Generate(500);
+
+// Print full report
+SalesReport.PrintSummary(sales);
+
+// Ad-hoc queries
+var q = new SalesQuery(sales);
+
+Console.WriteLine("\n--- Q1 Software Sales ---");
+var q1Software = q
+    .Between(new DateTime(2025, 1, 1), new DateTime(2025, 3, 31))
+    .InCategory("Software")
+    .ExcludeRefunds();
+
+Console.WriteLine($"Revenue: {q1Software.TotalRevenue():C}");
+Console.WriteLine($"Count:   {q1Software.Count():N0}");
+
+// Monthly revenue trend
+Console.WriteLine("\n--- Monthly Revenue ---");
+var monthly = new SalesQuery(sales).ExcludeRefunds().RevenueByMonth();
+foreach (var (month, revenue) in monthly.OrderBy(kv => kv.Key))
+    Console.WriteLine($"  {month}: {revenue:C}");
+```
+
+### Extensions to Try
+
+<ExerciseBlock>
+1. Add a `MovingAverage(int windowSize)` terminal method that returns the 30-day moving average of daily revenue as `IReadOnlyList<(DateTime Date, decimal Average)>`.
+2. Add a `Compare(SalesQuery other)` method that takes a second query and returns a side-by-side comparison of key metrics (total revenue, count, avg order, top rep).
+3. Add a `Percentile(double p)` method that returns the Pth percentile sale amount (e.g., 90th percentile = 90% of sales are at or below this value). Implement using sorted LINQ.
+4. Add a `Trend()` method that compares the first half of the date range to the second half and returns `(decimal GrowthRate, bool IsGrowing)`.
+</ExerciseBlock>

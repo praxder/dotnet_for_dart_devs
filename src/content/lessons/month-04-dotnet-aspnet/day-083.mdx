@@ -1,0 +1,215 @@
+---
+title: "File Upload, Streaming, and Static Files"
+day: 83
+week: 17
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "MultipartRequest, file_picker, path_provider"
+csharpConcept: "IFormFile, multipart/form-data, streaming, StaticFiles, PhysicalFileProvider"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+File upload and download are essential for document management, image uploading, and data import/export. This lesson covers both simple `IFormFile` uploads and efficient streaming for large files.
+
+## Single File Upload
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: multipart request with http package
+  var request = http.MultipartRequest('POST', Uri.parse('/upload'));
+  request.files.add(await http.MultipartFile.fromPath('file', filePath));
+  var response = await request.send();
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Minimal API endpoint for file upload
+  app.MapPost("/api/files/upload", async (IFormFile file, IWebHostEnvironment env) =>
+  {
+      if (file.Length == 0)
+          return Results.BadRequest("Empty file");
+
+      if (file.Length > 10 * 1024 * 1024)  // 10MB limit
+          return Results.BadRequest("File too large (max 10MB)");
+
+      var allowedTypes = new[] { "image/jpeg", "image/png", "image/webp", "application/pdf" };
+      if (!allowedTypes.Contains(file.ContentType))
+          return Results.BadRequest($"File type {file.ContentType} not allowed");
+
+      // Generate safe filename
+      var extension = Path.GetExtension(file.FileName);
+      var fileName = $"{Guid.NewGuid()}{extension}";
+      var uploadPath = Path.Combine(env.ContentRootPath, "uploads", fileName);
+
+      // Ensure directory exists
+      Directory.CreateDirectory(Path.GetDirectoryName(uploadPath)!);
+
+      // Save file
+      await using var stream = File.Create(uploadPath);
+      await file.CopyToAsync(stream);
+
+      return Results.Ok(new { fileName, url = $"/files/{fileName}" });
+  });
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="gotcha" title="Never Trust the FileName from the Client">
+`file.FileName` is user-controlled — a malicious upload could set it to `../../../../etc/passwd` (path traversal). Always generate a server-side filename (e.g., `Guid.NewGuid() + extension`). Also validate the content type AND inspect the actual file bytes (magic numbers) for production security.
+</ConceptCallout>
+
+## Multiple File Upload
+
+```csharp
+app.MapPost("/api/files/upload-multiple", async (
+    IFormFileCollection files,  // all files from multipart request
+    CancellationToken ct) =>
+{
+    if (files.Count == 0)
+        return Results.BadRequest("No files provided");
+
+    if (files.Count > 10)
+        return Results.BadRequest("Maximum 10 files per upload");
+
+    var results = new List<UploadResult>();
+
+    foreach (var file in files)
+    {
+        if (file.Length > 5 * 1024 * 1024)
+        {
+            results.Add(new UploadResult(file.FileName, null, "File too large"));
+            continue;
+        }
+
+        var fileName = $"{Guid.NewGuid()}{Path.GetExtension(file.FileName)}";
+        var path = Path.Combine("uploads", fileName);
+
+        await using var stream = File.Create(path);
+        await file.CopyToAsync(stream, ct);
+
+        results.Add(new UploadResult(file.FileName, $"/files/{fileName}", null));
+    }
+
+    return Results.Ok(results);
+});
+
+record UploadResult(string OriginalName, string? Url, string? Error);
+```
+
+## Streaming Large File Downloads
+
+```csharp
+// Stream files without loading into memory
+app.MapGet("/api/exports/csv", async (IOrderRepository orders, HttpContext ctx, CancellationToken ct) =>
+{
+    ctx.Response.ContentType = "text/csv";
+    ctx.Response.Headers.ContentDisposition = "attachment; filename=\"orders.csv\"";
+
+    // Write directly to response stream — never loads whole file into memory
+    await using var writer = new StreamWriter(ctx.Response.Body);
+    await writer.WriteLineAsync("Id,Customer,Total,Date");
+
+    await foreach (var order in orders.GetAllStreamAsync(ct))
+    {
+        await writer.WriteLineAsync(
+            $"{order.Id},{order.CustomerName},{order.Total},{order.Date:yyyy-MM-dd}");
+    }
+
+    return Results.Empty;
+}).RequireAuthorization();
+
+// Alternative: use IAsyncEnumerable → CSV transformation
+app.MapGet("/api/exports/json-stream", (IOrderRepository orders) =>
+    Results.Json(orders.GetAllStreamAsync()));  // System.Text.Json handles IAsyncEnumerable
+```
+
+## Serving Static Files
+
+```csharp
+// Serve files from wwwroot (default)
+app.UseStaticFiles();
+
+// Serve from additional directories
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(
+        Path.Combine(env.ContentRootPath, "uploads")),
+    RequestPath = "/files",
+
+    // Security: add headers to downloads
+    OnPrepareResponse = ctx =>
+    {
+        ctx.Context.Response.Headers.CacheControl = "public, max-age=86400";  // 1 day
+        ctx.Context.Response.Headers.ContentDispositionAdd("inline");
+    }
+});
+
+// Directory browsing (development only)
+if (app.Environment.IsDevelopment())
+{
+    app.UseDirectoryBrowser(new DirectoryBrowserOptions
+    {
+        FileProvider = new PhysicalFileProvider(
+            Path.Combine(env.ContentRootPath, "uploads")),
+        RequestPath = "/files-browser"
+    });
+}
+```
+
+## Validate File Content (Not Just Extension)
+
+```csharp
+// Magic number validation — check actual file bytes
+public static class FileValidator
+{
+    private static readonly Dictionary<string, byte[]> MagicNumbers = new()
+    {
+        ["image/jpeg"] = [0xFF, 0xD8, 0xFF],
+        ["image/png"]  = [0x89, 0x50, 0x4E, 0x47],
+        ["image/gif"]  = [0x47, 0x49, 0x46],
+        ["application/pdf"] = [0x25, 0x50, 0x44, 0x46],
+    };
+
+    public static async Task<bool> IsValidContentTypeAsync(
+        IFormFile file, string expectedContentType)
+    {
+        if (!MagicNumbers.TryGetValue(expectedContentType, out var magic))
+            return true;  // no magic number defined — skip check
+
+        var header = new byte[magic.Length];
+        await using var stream = file.OpenReadStream();
+        var read = await stream.ReadAsync(header.AsMemory(0, magic.Length));
+
+        return read == magic.Length && header.SequenceEqual(magic);
+    }
+}
+```
+
+## Upload Size Limits
+
+```csharp
+// Default: 30MB limit on Kestrel, 28MB on IIS
+// Override in Program.cs:
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 100 * 1024 * 1024;  // 100MB global
+});
+
+// Or per-endpoint with [RequestSizeLimit]:
+app.MapPost("/api/large-upload", HandleLargeUpload)
+    .WithMetadata(new RequestSizeLimitAttribute(100 * 1024 * 1024));
+```
+
+<ExerciseBlock>
+1. Build a complete image upload endpoint that: (a) accepts only JPEG/PNG/WebP, (b) validates magic numbers, (c) resizes to max 1920px width using `ImageSharp` (NuGet: SixLabors.ImageSharp), (d) saves with a generated name, (e) returns the URL.
+2. Implement a CSV import endpoint that streams a large CSV file (50,000+ rows) using `CsvHelper` (NuGet), validates each row, and inserts valid rows in batches of 100. Return a summary: `{ imported, errors: [{row, message}] }`.
+3. Create a file download endpoint that serves files from the "uploads" directory, sets appropriate `Content-Type`, `Content-Disposition`, and `ETag` headers, and supports `Range` requests for resumable downloads.
+</ExerciseBlock>

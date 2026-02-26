@@ -1,0 +1,348 @@
+---
+title: "Numeric Types: int, long, double, decimal, and More"
+day: 4
+week: 1
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "Dart int (arbitrary precision), double"
+csharpConcept: "int (32-bit), long (64-bit), double, float, decimal, BigInteger"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+# Numeric Types: int, long, double, decimal, and More
+
+In Dart, you have exactly two numeric types: `int` (arbitrary-precision integers on the VM, 64-bit on native) and `double` (64-bit IEEE 754 floating point). That is it. C# has a full suite of numeric types, each with a specific size, range, and use case. This lesson covers all of them, explains when to use each, and highlights the `decimal` type — a C# feature with no Dart equivalent that is essential for financial calculations.
+
+---
+
+## The Full Numeric Type Table
+
+| C# Alias | .NET Type | Size | Range | Use Case |
+|----------|-----------|------|-------|----------|
+| `sbyte` | `System.SByte` | 8-bit signed | -128 to 127 | Rarely used directly |
+| `byte` | `System.Byte` | 8-bit unsigned | 0 to 255 | Binary data, buffers |
+| `short` | `System.Int16` | 16-bit signed | -32,768 to 32,767 | Rarely used |
+| `ushort` | `System.UInt16` | 16-bit unsigned | 0 to 65,535 | Interop, binary protocols |
+| `int` | `System.Int32` | 32-bit signed | -2.1B to 2.1B | Default integer |
+| `uint` | `System.UInt32` | 32-bit unsigned | 0 to 4.3B | Bit manipulation |
+| `long` | `System.Int64` | 64-bit signed | ±9.2 × 10¹⁸ | Large counts, timestamps |
+| `ulong` | `System.UInt64` | 64-bit unsigned | 0 to 1.8 × 10¹⁹ | Cryptography, large IDs |
+| `float` | `System.Single` | 32-bit IEEE 754 | ~±3.4 × 10³⁸ | Graphics, 3D math |
+| `double` | `System.Double` | 64-bit IEEE 754 | ~±1.7 × 10³⁰⁸ | General floating point |
+| `decimal` | `System.Decimal` | 128-bit base-10 | 28-29 sig digits | Financial, monetary |
+| `nint` | `System.IntPtr` | Platform-native | Pointer-sized | Unsafe/interop code |
+
+<DartEquivalent>
+Dart's `int` compiles to a 64-bit integer on native platforms (equivalent to C#'s `long`). Dart's `double` is identical to C#'s `double` — both are 64-bit IEEE 754. There is no Dart equivalent of `float`, `decimal`, `short`, `byte`, etc.
+</DartEquivalent>
+
+---
+
+## The Default Choice: int
+
+For most integer work, use `int`. It is 32-bit, maps to the native CPU integer on 32-bit platforms, and is what the .NET framework uses throughout its APIs.
+
+```csharp
+int count = 0;
+int max = int.MaxValue;    // 2,147,483,647
+int min = int.MinValue;    // -2,147,483,648
+
+// Arithmetic
+int sum = 100 + 200;
+int product = 6 * 7;
+int quotient = 17 / 5;    // 3 — integer division, truncates toward zero
+int remainder = 17 % 5;   // 2
+
+// Integer division truncation
+Console.WriteLine(7 / 2);    // 3 (not 3.5)
+Console.WriteLine(-7 / 2);   // -3 (truncates toward zero, not toward negative infinity)
+```
+
+<ConceptCallout type="gotcha">
+C# integer division truncates toward zero. Dart's `~/` operator also truncates toward zero. But there is a subtle difference: in Dart you must use `~/` for integer division and `/` always returns a `double`. In C#, `/` on two `int` values performs integer division and returns an `int`. This is a common source of bugs when porting math from JavaScript or when you expected a fractional result.
+
+```csharp
+int result = 7 / 2;      // 3, NOT 3.5
+double result2 = 7 / 2;  // still 3.0 — integer division happens first!
+double result3 = 7.0 / 2; // 3.5 — now it is floating-point division
+```
+</ConceptCallout>
+
+---
+
+## long: When int Is Not Enough
+
+Use `long` when you need values beyond ±2.1 billion:
+
+```csharp
+long fileSize = 8_000_000_000L;   // 8GB — note the L suffix
+long unixEpoch = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();  // current time in ms
+
+// Numeric literals can use _ as a separator (like Dart)
+long creditCardTransactions = 1_000_000_000_000L;
+```
+
+The `L` suffix on a literal tells the compiler it is a `long`. Without it, the compiler infers `int` and will error if the value exceeds `int.MaxValue`.
+
+```csharp
+// Common mistake
+long big = 3000000000;   // ERROR: integer literal too large for int
+long big2 = 3000000000L; // OK: explicit long literal
+long big3 = (long)3000000000; // also OK but verbose
+```
+
+---
+
+## float vs double: Precision vs Performance
+
+Both are IEEE 754 floating-point. `float` is 32-bit (7 decimal digits of precision), `double` is 64-bit (15–17 decimal digits of precision).
+
+```csharp
+float f = 3.14f;       // f suffix required — otherwise literal is double
+double d = 3.14;       // no suffix needed — default floating-point literal
+
+float imprecise = 0.1f + 0.2f;
+double lessBad = 0.1 + 0.2;
+
+Console.WriteLine(imprecise);   // 0.3 (seems ok but internally imprecise)
+Console.WriteLine(lessBad);     // 0.30000000000000004 (IEEE 754 reality)
+```
+
+<ConceptCallout type="tip">
+Use `double` as your default floating-point type, just like Dart. Use `float` only when:
+- You are working with graphics/3D math where 32-bit precision is sufficient and memory/throughput matters (e.g., `Vector3` in game engines uses `float`)
+- You are interoperating with APIs that require `float`
+- You are storing large arrays of floating-point values and memory is tight
+
+The `f` suffix on literals is easy to forget — the compiler will warn you when you try to assign a `double` literal to a `float` variable.
+</ConceptCallout>
+
+---
+
+## decimal: Financial Math Without IEEE 754 Errors
+
+This is the most important C# numeric type that Dart developers do not know about. `decimal` is a 128-bit base-10 floating-point type. It does NOT suffer from IEEE 754 binary representation errors for decimal fractions.
+
+```csharp
+decimal price = 9.99m;           // m suffix required
+decimal tax = 0.0875m;           // 8.75% tax rate
+decimal total = price * (1 + tax);
+
+Console.WriteLine(total);        // 10.864125 (exact)
+Console.WriteLine(total.ToString("C"));  // $10.86 (currency format)
+```
+
+Compare with the `double` version:
+
+```csharp
+double priceD = 9.99;
+double taxD = 0.0875;
+double totalD = priceD * (1 + taxD);
+
+Console.WriteLine(totalD);      // 10.864124999999999 (IEEE 754 artifact)
+```
+
+<ConceptCallout type="new">
+There is no equivalent to `decimal` in Dart. If you need financial math in Dart, you either use the `decimal` package from pub.dev, or work in integer cents (e.g., store $9.99 as the integer 999). In C#, use `decimal` for all monetary values — it is a first-class language type with full arithmetic operator support.
+</ConceptCallout>
+
+### decimal performance
+
+`decimal` is significantly slower than `double` for arithmetic — it is software-implemented (no hardware FPU support). Never use `decimal` for geometry, physics, graphics, or performance-critical math. Use it exclusively for monetary/financial calculations where precision is legally required.
+
+```csharp
+// Good uses of decimal
+decimal accountBalance = 10_000.00m;
+decimal interestRate = 0.0425m;
+decimal interest = accountBalance * interestRate;
+
+// Bad uses of decimal (use double instead)
+decimal angle = 1.5707963m;     // No! Use double for trig
+decimal distance = 3.14159m;    // No! Use double for geometry
+```
+
+---
+
+## Numeric Literals: Suffixes and Separators
+
+```csharp
+// Type suffixes
+int    i = 42;
+long   l = 42L;
+float  f = 42.0f;
+double d = 42.0;     // or 42.0d — d suffix is optional
+decimal m = 42.0m;
+
+// Digit separators (same as Dart)
+int million = 1_000_000;
+double pi = 3.141_592_653_589;
+long hex = 0xFF_EC_D1_2E;
+
+// Binary literals (no Dart equivalent)
+int flags = 0b0000_1111_0000_1111;
+
+// Hex literals
+int color = 0xFF5733;
+```
+
+---
+
+## Implicit vs Explicit Conversions
+
+C# has strict rules about which numeric conversions are implicit (automatic) and which require an explicit cast:
+
+```csharp
+// Implicit conversions: no data loss possible
+byte b = 100;
+short s = b;      // byte → short: OK implicit
+int i = s;        // short → int: OK implicit
+long l = i;       // int → long: OK implicit
+float f = l;      // long → float: OK implicit (but precision may be lost!)
+double d = f;     // float → double: OK implicit
+
+// Explicit conversions: potential data loss
+double pi = 3.14159;
+int truncated = (int)pi;        // 3 — truncates decimal part
+long big = 5_000_000_000L;
+int small = (int)big;           // -705032704 — OVERFLOW! wraps around silently
+
+byte overflow = (byte)300;      // 44 — only lower 8 bits kept
+```
+
+<ConceptCallout type="gotcha">
+Explicit casts in C# **do not throw by default on overflow**. They silently truncate/wrap. If you need overflow detection, use the `checked` keyword:
+
+```csharp
+long big = 5_000_000_000L;
+int safe = checked((int)big);   // throws OverflowException
+```
+
+Or enable checked arithmetic for a whole block:
+
+```csharp
+checked
+{
+    int result = int.MaxValue + 1;  // throws OverflowException
+}
+```
+
+In Dart, overflow on native `int` also wraps silently. But Dart's VM `int` is arbitrary precision, so overflow is impossible. On native, Dart's behavior is similar to C#'s unchecked mode.
+</ConceptCallout>
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: only two numeric types
+  int count = 42;              // 64-bit on native
+  double ratio = 3.14;         // 64-bit IEEE 754
+  
+  // Dart int is arbitrary precision on VM
+  int huge = 99999999999999999999999999999999;
+  
+  // Type conversion
+  double d = count.toDouble();
+  int i = ratio.toInt();       // truncates
+  int i2 = ratio.round();      // rounds
+  int i3 = ratio.ceil();       // ceiling
+  
+  // No overflow on VM
+  print(9223372036854775807 + 1);  // big number (arbitrary precision)
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: explicit types for everything
+  int count = 42;              // 32-bit
+  long bigCount = 42L;         // 64-bit
+  double ratio = 3.14;         // 64-bit IEEE 754
+  decimal money = 9.99m;       // 128-bit base-10
+  
+  // For arbitrary precision: BigInteger
+  using System.Numerics;
+  BigInteger huge = BigInteger.Pow(2, 1000);
+  
+  // Type conversion — explicit cast
+  double d = (double)count;    // or: Convert.ToDouble(count)
+  int i = (int)ratio;          // truncates toward zero
+  int i2 = (int)Math.Round(ratio);  // rounds
+  int i3 = (int)Math.Ceiling(ratio); // ceiling
+  
+  // Overflow wraps silently (unchecked mode)
+  int overflow = int.MaxValue + 1;   // -2147483648
+  ```
+  </div>
+</CodeComparison>
+
+---
+
+## BigInteger: Arbitrary Precision
+
+For cases where `long` is not enough, .NET has `System.Numerics.BigInteger`:
+
+```csharp
+using System.Numerics;
+
+BigInteger factorial200 = 1;
+for (int i = 2; i <= 200; i++)
+{
+    factorial200 *= i;
+}
+
+Console.WriteLine(factorial200);
+// 788657867364790503552363213932185062295135977687173263294742533244359449963403342920304284011984623904177212138919638830257642790242637105061926624952829931113462857270763317237396988943922445621451664240254033291864131227428294853277524242407573903240321257405579568660226031904170324062351700858796178922222789623703897374720000000000000000000000000000000000000000000000000
+```
+
+<DartEquivalent>
+Dart's `int` is already arbitrary precision on the VM, so there is no equivalent of `BigInteger` needed in most Dart code. On Dart native (AOT), `int` is 64-bit and can overflow. For truly arbitrary precision in Dart on native, you would reach for a package.
+</DartEquivalent>
+
+---
+
+## Numeric Parsing and Formatting
+
+```csharp
+// Parsing
+int parsed = int.Parse("42");
+double parsedD = double.Parse("3.14");
+decimal parsedM = decimal.Parse("9.99");
+
+// Safe parsing (returns bool, no exceptions)
+if (int.TryParse(userInput, out int value))
+{
+    Console.WriteLine($"Got: {value}");
+}
+
+// Formatting
+double pi = Math.PI;
+Console.WriteLine(pi.ToString("F2"));   // "3.14" — fixed 2 decimal places
+Console.WriteLine(pi.ToString("E3"));   // "3.142E+000" — scientific notation
+Console.WriteLine(pi.ToString("N2"));   // "3.14" — number with thousands separator
+
+decimal price = 1234.56m;
+Console.WriteLine(price.ToString("C")); // "$1,234.56" — currency (locale-aware)
+Console.WriteLine(price.ToString("C", System.Globalization.CultureInfo.GetCultureInfo("de-DE")));
+// "1.234,56 €" — German locale
+```
+
+---
+
+<ExerciseBlock>
+## Exercises
+
+1. **Type overflow exploration**: Write a loop that adds 1 to `int.MaxValue` without `checked`. Print the result. Then wrap it in `checked` and catch the `OverflowException`. What is the value when it wraps?
+
+2. **decimal vs double**: Write a function that calculates compound interest over 30 years with monthly compounding. Run it once with `double` and once with `decimal` for a principal of $10,000 at 5% annual interest. Compare the two results. How large is the discrepancy?
+
+3. **Numeric parsing**: Write a mini calculator that reads two numbers and an operator (+, -, *, /) from the command line. Use `double.TryParse` for input validation. Handle division by zero and invalid input gracefully.
+
+4. **Format strings**: Take the number `1234567.8901m` and print it formatted as: (a) US currency, (b) European currency (use `de-DE` culture), (c) fixed 3 decimal places, (d) scientific notation with 4 significant figures.
+
+5. **BigInteger**: Compute the 100th Fibonacci number using `BigInteger`. Confirm it matches the known value: `354224848179261915075`.
+</ExerciseBlock>

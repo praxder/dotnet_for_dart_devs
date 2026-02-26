@@ -1,0 +1,290 @@
+---
+title: "CQRS and MediatR"
+day: 97
+week: 20
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "BLoC pattern in Flutter, command/event separation"
+csharpConcept: "CQRS, MediatR, IRequest<T>, IRequestHandler<T>, pipeline behaviors, notifications"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+CQRS (Command Query Responsibility Segregation) separates reads from writes. In .NET, MediatR is the standard library that implements this — each operation becomes a self-contained class with a single handler, eliminating bloated service classes.
+
+## CQRS Concept
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Flutter BLoC — similar concept
+  // Events = Commands
+  abstract class OrderEvent {}
+  class PlaceOrderEvent extends OrderEvent {
+    final List<OrderItem> items;
+    PlaceOrderEvent(this.items);
+  }
+
+  // States = Query Results
+  class OrderBloc extends Bloc<OrderEvent, OrderState> {
+    OrderBloc() : super(OrderInitial()) {
+      on<PlaceOrderEvent>(_onPlaceOrder);
+    }
+    // Each event has a dedicated handler
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // CQRS: Commands change state, Queries return data
+  // MediatR routes requests to their handlers
+
+  // Command (write operation)
+  public record PlaceOrderCommand(
+      int CustomerId,
+      List<OrderItemDto> Items) : IRequest<int>;
+
+  // Query (read operation)
+  public record GetOrderQuery(int OrderId) : IRequest<OrderDto?>;
+
+  // Each has exactly one handler — no service bloat
+  ```
+  </div>
+</CodeComparison>
+
+## Setup
+
+```bash
+dotnet add package MediatR
+dotnet add package MediatR.Extensions.Microsoft.DependencyInjection
+```
+
+```csharp
+// Register MediatR in Program.cs
+builder.Services.AddMediatR(cfg =>
+    cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
+```
+
+## Commands — Write Operations
+
+```csharp
+// Command: intent to change state, returns result
+public record PlaceOrderCommand(
+    int CustomerId,
+    List<OrderItemDto> Items) : IRequest<PlaceOrderResult>;
+
+public record PlaceOrderResult(int OrderId, decimal Total);
+
+// Handler: all the business logic for this one operation
+public class PlaceOrderCommandHandler(AppDbContext db) : IRequestHandler<PlaceOrderCommand, PlaceOrderResult>
+{
+    public async Task<PlaceOrderResult> Handle(
+        PlaceOrderCommand request,
+        CancellationToken cancellationToken)
+    {
+        // Validate inventory
+        var productIds = request.Items.Select(i => i.ProductId).ToList();
+        var products = await db.Products
+            .Where(p => productIds.Contains(p.Id))
+            .ToListAsync(cancellationToken);
+
+        foreach (var item in request.Items)
+        {
+            var product = products.First(p => p.Id == item.ProductId);
+            if (product.StockQuantity < item.Quantity)
+                throw new InsufficientStockException(product.Name);
+            product.StockQuantity -= item.Quantity;
+        }
+
+        var order = new Order
+        {
+            CustomerId = request.CustomerId,
+            Lines = request.Items.Select(i => new OrderLine
+            {
+                ProductId = i.ProductId,
+                Quantity = i.Quantity,
+                UnitPrice = products.First(p => p.Id == i.ProductId).Price
+            }).ToList()
+        };
+        order.Total = order.Lines.Sum(l => l.Quantity * l.UnitPrice);
+
+        db.Orders.Add(order);
+        await db.SaveChangesAsync(cancellationToken);
+
+        return new PlaceOrderResult(order.Id, order.Total);
+    }
+}
+```
+
+## Queries — Read Operations
+
+```csharp
+// Query: intent to read, never modifies state
+public record GetOrderQuery(int OrderId) : IRequest<OrderDto?>;
+
+public record OrderDto(
+    int Id,
+    string CustomerName,
+    decimal Total,
+    string Status,
+    List<OrderLineDto> Lines);
+
+public record OrderLineDto(string ProductName, int Quantity, decimal UnitPrice);
+
+public class GetOrderQueryHandler(AppDbContext db) : IRequestHandler<GetOrderQuery, OrderDto?>
+{
+    public async Task<OrderDto?> Handle(GetOrderQuery request, CancellationToken ct)
+        => await db.Orders
+            .AsNoTracking()
+            .Where(o => o.Id == request.OrderId)
+            .Select(o => new OrderDto(
+                o.Id,
+                o.Customer!.Name,
+                o.Total,
+                o.Status.ToString(),
+                o.Lines.Select(l => new OrderLineDto(
+                    l.Product!.Name,
+                    l.Quantity,
+                    l.UnitPrice)).ToList()))
+            .FirstOrDefaultAsync(ct);
+}
+```
+
+## Using MediatR in Controllers / Minimal APIs
+
+```csharp
+// Minimal API — inject IMediator, dispatch requests
+var orders = app.MapGroup("/api/orders");
+
+orders.MapPost("/", async (PlaceOrderCommand command, IMediator mediator) =>
+{
+    var result = await mediator.Send(command);
+    return Results.Created($"/api/orders/{result.OrderId}", result);
+});
+
+orders.MapGet("/{id:int}", async (int id, IMediator mediator) =>
+{
+    var order = await mediator.Send(new GetOrderQuery(id));
+    return order is null ? Results.NotFound() : Results.Ok(order);
+});
+
+// Controller:
+[ApiController, Route("api/[controller]")]
+public class OrdersController(IMediator mediator) : ControllerBase
+{
+    [HttpPost]
+    public async Task<IActionResult> Place(PlaceOrderCommand command)
+    {
+        var result = await mediator.Send(command);
+        return CreatedAtAction(nameof(Get), new { id = result.OrderId }, result);
+    }
+
+    [HttpGet("{id}")]
+    public async Task<ActionResult<OrderDto>> Get(int id)
+    {
+        var order = await mediator.Send(new GetOrderQuery(id));
+        return order is null ? NotFound() : Ok(order);
+    }
+}
+```
+
+## Pipeline Behaviors — Cross-Cutting Concerns
+
+```csharp
+// Behaviors wrap every request — like middleware for MediatR
+// Add validation, logging, timing, caching without touching handlers
+
+// Logging behavior:
+public class LoggingBehavior<TRequest, TResponse>(
+    ILogger<LoggingBehavior<TRequest, TResponse>> logger)
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+{
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken ct)
+    {
+        logger.LogInformation("Handling {RequestType}: {@Request}", typeof(TRequest).Name, request);
+        var sw = Stopwatch.StartNew();
+        var response = await next();  // call the handler
+        logger.LogInformation("Handled in {Elapsed}ms", sw.ElapsedMilliseconds);
+        return response;
+    }
+}
+
+// Validation behavior (with FluentValidation):
+public class ValidationBehavior<TRequest, TResponse>(
+    IEnumerable<IValidator<TRequest>> validators)
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+{
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken ct)
+    {
+        if (!validators.Any()) return await next();
+
+        var context = new ValidationContext<TRequest>(request);
+        var failures = validators
+            .Select(v => v.Validate(context))
+            .SelectMany(r => r.Errors)
+            .Where(e => e is not null)
+            .ToList();
+
+        if (failures.Count > 0)
+            throw new ValidationException(failures);
+
+        return await next();
+    }
+}
+
+// Register behaviors (order matters — outermost first):
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+```
+
+## Notifications — Publish/Subscribe
+
+```csharp
+// Notifications are broadcast to all handlers (events)
+public record OrderPlacedNotification(int OrderId, int CustomerId, decimal Total)
+    : INotification;
+
+// Multiple handlers can respond to the same notification
+public class SendOrderConfirmationEmailHandler(IEmailService email)
+    : INotificationHandler<OrderPlacedNotification>
+{
+    public async Task Handle(OrderPlacedNotification notification, CancellationToken ct)
+        => await email.SendOrderConfirmationAsync(notification.CustomerId, notification.OrderId);
+}
+
+public class UpdateLoyaltyPointsHandler(ILoyaltyService loyalty)
+    : INotificationHandler<OrderPlacedNotification>
+{
+    public async Task Handle(OrderPlacedNotification notification, CancellationToken ct)
+        => await loyalty.AddPointsAsync(notification.CustomerId, notification.Total);
+}
+
+// In the command handler, publish after saving:
+await db.SaveChangesAsync(ct);
+await mediator.Publish(
+    new OrderPlacedNotification(order.Id, order.CustomerId, order.Total), ct);
+```
+
+<ConceptCallout type="tip" title="CQRS vs BLoC">
+Flutter's BLoC pattern is architecturally similar to CQRS: events are commands, states represent query results, and Bloc handlers are like MediatR handlers. The key difference is that MediatR is request/response (one handler per request) while BLoC is more event-driven. Both achieve the same goal: decoupling UI/API from business logic.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Refactor a simple CRUD service into CQRS with MediatR: implement `CreateProductCommand`, `UpdateProductCommand`, `DeleteProductCommand`, and `GetProductQuery`, `ListProductsQuery`. Each as a separate handler class.
+2. Add a `ValidationBehavior` that validates commands using FluentValidation before they reach the handler. Add a validator for `PlaceOrderCommand` that checks: customer ID > 0, items list not empty, quantities > 0.
+3. Implement the Observer pattern with notifications: when an order is placed, publish `OrderPlacedNotification` and handle it in two separate handlers — one sends a confirmation email (log the email), one reserves warehouse stock. Show that both handlers run independently.
+</ExerciseBlock>

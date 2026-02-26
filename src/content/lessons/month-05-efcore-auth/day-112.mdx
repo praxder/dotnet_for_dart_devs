@@ -1,0 +1,252 @@
+---
+title: "Two-Factor Authentication and Account Security"
+day: 112
+week: 23
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "OTP packages in Flutter, authenticator app integration"
+csharpConcept: "TOTP, 2FA with ASP.NET Core Identity, recovery codes, QR code generation"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Two-factor authentication (2FA) dramatically reduces account compromise risk. ASP.NET Core Identity has built-in TOTP (Time-based One-Time Password) support — compatible with Google Authenticator, Authy, and any TOTP app.
+
+## How TOTP Works
+
+```
+User registers 2FA:
+  1. Server generates a secret key (20 random bytes)
+  2. Server encodes secret as QR code (otpauth:// URL)
+  3. User scans with authenticator app
+  4. App stores secret and generates 6-digit codes every 30 seconds
+
+User logs in with 2FA:
+  1. Username + password verified ✓
+  2. User opens authenticator app, gets 6-digit code
+  3. Server verifies: TOTP(secret, currentTime) == code
+  4. Code is valid only within a 30-second window (± 1 window for clock skew)
+```
+
+## Setting Up TOTP with ASP.NET Core Identity
+
+```csharp
+// Identity already includes TOTP support — UserManager has the methods
+
+public class TwoFactorService(
+    UserManager<AppUser> userManager,
+    IDataProtectionProvider dataProtection)
+{
+    // Step 1: Generate authenticator key for the user
+    public async Task<SetupTwoFactorResponse> BeginSetupAsync(string userId)
+    {
+        var user = await userManager.FindByIdAsync(userId)
+            ?? throw new KeyNotFoundException();
+
+        // Reset the key to ensure it's fresh
+        await userManager.ResetAuthenticatorKeyAsync(user);
+        var unformattedKey = await userManager.GetAuthenticatorKeyAsync(user);
+        var email = await userManager.GetEmailAsync(user);
+
+        // Format key in groups of 4 for readability: JBSWY3DP EHPK3PXP
+        var formattedKey = FormatKey(unformattedKey!);
+
+        // Build the otpauth:// URI for QR code
+        var authenticatorUri =
+            $"otpauth://totp/{Uri.EscapeDataString("MyApp")}:{Uri.EscapeDataString(email!)}?" +
+            $"secret={unformattedKey}&issuer={Uri.EscapeDataString("MyApp")}&digits=6&period=30";
+
+        return new SetupTwoFactorResponse(formattedKey, authenticatorUri);
+    }
+
+    // Step 2: Verify and enable 2FA
+    public async Task<EnableTwoFactorResponse> EnableAsync(string userId, string code)
+    {
+        var user = await userManager.FindByIdAsync(userId)
+            ?? throw new KeyNotFoundException();
+
+        // Verify the code before enabling
+        var isValid = await userManager.VerifyTwoFactorTokenAsync(
+            user,
+            userManager.Options.Tokens.AuthenticatorTokenProvider,
+            code.Replace(" ", "").Replace("-", ""));
+
+        if (!isValid)
+            throw new InvalidOperationException("Invalid verification code");
+
+        await userManager.SetTwoFactorEnabledAsync(user, true);
+
+        // Generate recovery codes (one-time use backup codes)
+        var recoveryCodes = await userManager.GenerateNewTwoFactorRecoveryCodesAsync(user, 10);
+
+        return new EnableTwoFactorResponse(
+            RecoveryCodes: recoveryCodes!.ToList(),
+            Message: "Two-factor authentication enabled");
+    }
+
+    private static string FormatKey(string unformattedKey)
+    {
+        var result = new StringBuilder();
+        int currentPosition = 0;
+        while (currentPosition + 4 < unformattedKey.Length)
+        {
+            result.Append(unformattedKey, currentPosition, 4).Append(' ');
+            currentPosition += 4;
+        }
+        if (currentPosition < unformattedKey.Length)
+            result.Append(unformattedKey, currentPosition, unformattedKey.Length - currentPosition);
+        return result.ToString().ToUpperInvariant();
+    }
+}
+```
+
+## Login Flow with 2FA
+
+```csharp
+// Login endpoint — returns partial auth token if 2FA is required
+app.MapPost("/api/auth/login", async (
+    LoginRequest request,
+    UserManager<AppUser> userManager,
+    SignInManager<AppUser> signInManager,
+    JwtTokenService jwtService) =>
+{
+    var user = await userManager.FindByEmailAsync(request.Email);
+    if (user is null) return Results.Unauthorized();
+
+    var passwordResult = await signInManager.CheckPasswordSignInAsync(
+        user, request.Password, lockoutOnFailure: true);
+
+    if (!passwordResult.Succeeded)
+        return passwordResult.IsLockedOut
+            ? Results.Problem("Account locked", statusCode: 429)
+            : Results.Unauthorized();
+
+    // Check if 2FA is required
+    if (await userManager.GetTwoFactorEnabledAsync(user))
+    {
+        // Issue a short-lived pre-auth token (doesn't grant API access)
+        var preAuthToken = jwtService.GeneratePreAuthToken(user.Id);
+        return Results.Ok(new { RequiresTwoFactor = true, PreAuthToken = preAuthToken });
+    }
+
+    // No 2FA — issue full tokens
+    var tokens = await jwtService.GenerateTokensAsync(user);
+    return Results.Ok(new { RequiresTwoFactor = false, tokens.AccessToken, tokens.RefreshToken });
+});
+
+// 2FA verification endpoint
+app.MapPost("/api/auth/verify-2fa", async (
+    TwoFactorRequest request,
+    UserManager<AppUser> userManager,
+    JwtTokenService jwtService,
+    IDataProtectionProvider dataProtection) =>
+{
+    // Validate pre-auth token to get userId
+    var userId = jwtService.ValidatePreAuthToken(request.PreAuthToken);
+    if (userId is null) return Results.Unauthorized();
+
+    var user = await userManager.FindByIdAsync(userId);
+    if (user is null) return Results.Unauthorized();
+
+    // Try TOTP code first
+    bool isValid = await userManager.VerifyTwoFactorTokenAsync(
+        user,
+        userManager.Options.Tokens.AuthenticatorTokenProvider,
+        request.Code);
+
+    // Fall back to recovery code
+    if (!isValid)
+    {
+        var recoveryResult = await userManager.RedeemTwoFactorRecoveryCodeAsync(user, request.Code);
+        isValid = recoveryResult.Succeeded;
+
+        if (isValid && await userManager.CountRecoveryCodesAsync(user) <= 2)
+        {
+            // Warn user they're running low on recovery codes
+            // (notify via push notification, email, etc.)
+        }
+    }
+
+    if (!isValid)
+        return Results.Unauthorized();
+
+    var tokens = await jwtService.GenerateTokensAsync(user);
+    return Results.Ok(tokens);
+});
+```
+
+## Account Security Features
+
+```csharp
+// Active session management — track login sessions
+public class UserSession
+{
+    public int Id { get; set; }
+    public required string UserId { get; set; }
+    public required string RefreshTokenId { get; set; }
+    public required string DeviceInfo { get; set; }
+    public required string IpAddress { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime LastSeenAt { get; set; }
+}
+
+// Security event log
+public class SecurityEvent
+{
+    public long Id { get; set; }
+    public required string UserId { get; set; }
+    public required string EventType { get; set; }  // "Login", "PasswordChange", "2FAEnabled"
+    public required string IpAddress { get; set; }
+    public required string UserAgent { get; set; }
+    public bool WasSuccessful { get; set; }
+    public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
+    public Dictionary<string, string> Metadata { get; set; } = [];
+}
+
+// Endpoints for account security dashboard
+app.MapGet("/api/account/sessions", async (
+    ClaimsPrincipal user,
+    AppDbContext db) =>
+{
+    var userId = user.GetUserId();
+    var sessions = await db.UserSessions
+        .Where(s => s.UserId == userId)
+        .OrderByDescending(s => s.LastSeenAt)
+        .Take(10)
+        .ToListAsync();
+    return Results.Ok(sessions);
+}).RequireAuthorization();
+
+app.MapDelete("/api/account/sessions/{id}", async (
+    int id, ClaimsPrincipal user, AppDbContext db) =>
+{
+    var session = await db.UserSessions
+        .FirstOrDefaultAsync(s => s.Id == id && s.UserId == user.GetUserId());
+    if (session is null) return Results.NotFound();
+
+    // Revoke the associated refresh token
+    var token = await db.RefreshTokens
+        .FirstOrDefaultAsync(t => t.Id.ToString() == session.RefreshTokenId);
+    if (token is not null) token.IsRevoked = true;
+
+    db.UserSessions.Remove(session);
+    await db.SaveChangesAsync();
+    return Results.Ok();
+}).RequireAuthorization();
+```
+
+<ConceptCallout type="tip" title="2FA UX Considerations">
+When building the Flutter client: (1) Detect `RequiresTwoFactor: true` in the login response and show a code entry screen, (2) Store the pre-auth token in memory only (not persistent storage), (3) Add biometric authentication as an alternative to TOTP for mobile (use `local_auth` package + server-side backup). The server should treat biometric auth as the second factor only if the device has a verified biometric credential registered.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Implement the complete 2FA setup flow: `GET /api/account/2fa/setup` returns the QR code URI and formatted key, `POST /api/account/2fa/enable` verifies a code and enables 2FA, returns 10 recovery codes. Simulate the flow with a TOTP library (like `OtpNet`) to generate valid codes in tests.
+2. Build an "account activity" endpoint that shows recent security events: last 10 logins (IP, device, timestamp), password changes, and 2FA status changes. Store events in a `SecurityEvents` table.
+3. Implement "revoke all sessions" (nuclear option): when a user suspects their account is compromised, `POST /api/account/security/revoke-all` revokes all refresh tokens, disables and re-enables 2FA (forcing key reset), and sends a security alert email. The user must log in again everywhere.
+</ExerciseBlock>

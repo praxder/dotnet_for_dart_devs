@@ -1,0 +1,210 @@
+---
+title: "Record Deep Dive: with Expressions and Deconstruction"
+day: 33
+week: 7
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart copyWith() manual pattern, record destructuring"
+csharpConcept: "with expressions, record deconstruction, record inheritance"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+You've seen records at a glance — now let's go deeper on `with` expressions, deconstruction, and record inheritance. These features make records powerful for domain modeling.
+
+## `with` Expressions in Depth
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: manual copyWith (tedious to maintain)
+  class User {
+    final String name;
+    final String email;
+    final bool isAdmin;
+
+    const User({required this.name, required this.email, this.isAdmin = false});
+
+    User copyWith({String? name, String? email, bool? isAdmin}) =>
+      User(
+        name: name ?? this.name,
+        email: email ?? this.email,
+        isAdmin: isAdmin ?? this.isAdmin,
+      );
+  }
+
+  final u = User(name: 'Adam', email: 'a@b.com');
+  final admin = u.copyWith(isAdmin: true);
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: with expression is built-in for records
+  public record User(string Name, string Email, bool IsAdmin = false);
+
+  var u = new User("Adam", "a@b.com");
+  var admin = u with { IsAdmin = true };
+
+  // Chain multiple changes
+  var updated = u with { Email = "new@b.com", IsAdmin = true };
+
+  // Original is unchanged
+  Console.WriteLine(u.IsAdmin);    // False
+  Console.WriteLine(admin.IsAdmin); // True
+  ```
+  </div>
+</CodeComparison>
+
+### `with` on Complex Records
+
+```csharp
+public record Address(string Street, string City, string Country, string PostalCode);
+public record Customer(string Name, Address Address, List<string> Tags);
+
+var customer = new Customer(
+    "Adam",
+    new Address("123 Main St", "Springfield", "US", "12345"),
+    new List<string> { "premium", "early-adopter" });
+
+// Update nested address — create new address, then new customer
+var movedCustomer = customer with
+{
+    Address = customer.Address with { City = "Shelbyville", PostalCode = "67890" }
+};
+
+Console.WriteLine(customer.Address.City);       // Springfield (unchanged)
+Console.WriteLine(movedCustomer.Address.City);   // Shelbyville
+
+// with doesn't deep-copy reference types like List<T>
+// Tags list is SHARED between customer and movedCustomer
+// If you need independence:
+var independentCopy = customer with
+{
+    Tags = new List<string>(customer.Tags) // explicit copy
+};
+```
+
+<ConceptCallout type="gotcha" title="with Performs a Shallow Copy">
+`with` copies the record's properties but doesn't recursively clone reference-type properties. If a record contains a `List<T>`, both the original and the copy share the same list object. For collections, explicitly copy them as shown above.
+</ConceptCallout>
+
+## Deconstruction
+
+Positional records automatically generate a `Deconstruct` method:
+
+```csharp
+public record Point(double X, double Y);
+public record RGB(byte R, byte G, byte B);
+
+var p = new Point(3.0, 4.0);
+
+// Deconstruct into vars
+var (x, y) = p;
+Console.WriteLine($"x={x}, y={y}"); // x=3, y=4
+
+// In foreach
+var points = new[] { new Point(1, 2), new Point(3, 4), new Point(5, 6) };
+foreach (var (px, py) in points)
+    Console.WriteLine($"({px},{py})");
+
+// In switch with deconstruction pattern
+var color = new RGB(255, 0, 128);
+var description = color switch
+{
+    (255, 0, 0) => "Pure red",
+    (0, 255, 0) => "Pure green",
+    (0, 0, 255) => "Pure blue",
+    (var r, 0, var b) when r > b => "Reddish purple",
+    _ => $"Mixed color"
+};
+```
+
+## Record Inheritance
+
+Records can inherit from other records (record classes only, not record structs):
+
+```csharp
+public abstract record Shape(string Color);
+
+public record Circle(double Radius, string Color) : Shape(Color)
+{
+    public double Area => Math.PI * Radius * Radius;
+}
+
+public record Rectangle(double Width, double Height, string Color) : Shape(Color)
+{
+    public double Area => Width * Height;
+}
+
+// Polymorphism works
+Shape s = new Circle(5, "Red");
+Console.WriteLine(s);  // Circle { Radius = 5, Color = Red }
+
+// Pattern matching with deconstruction
+string Describe(Shape shape) => shape switch
+{
+    Circle(var r, var c) => $"Circle r={r} in {c}",
+    Rectangle(var w, var h, var c) => $"Rect {w}x{h} in {c}",
+    _ => "Unknown shape"
+};
+
+// with respects the actual type
+var scaled = (Circle)s with { Radius = 10 };
+Console.WriteLine(scaled);  // Circle { Radius = 10, Color = Red }
+```
+
+## Records as Event Sourcing Backbone
+
+Records shine as immutable events and commands:
+
+```csharp
+// Domain events as records
+public abstract record DomainEvent(Guid Id, DateTime OccurredAt)
+{
+    protected DomainEvent() : this(Guid.NewGuid(), DateTime.UtcNow) {}
+}
+
+public record UserRegistered(
+    Guid UserId,
+    string Email,
+    string Name
+) : DomainEvent;
+
+public record UserEmailChanged(
+    Guid UserId,
+    string OldEmail,
+    string NewEmail
+) : DomainEvent;
+
+public record UserDeactivated(
+    Guid UserId,
+    string Reason
+) : DomainEvent;
+
+// Process events
+UserState Evolve(UserState state, DomainEvent @event) => @event switch
+{
+    UserRegistered e => state with
+    {
+        UserId = e.UserId,
+        Email = e.Email,
+        Name = e.Name,
+        IsActive = true
+    },
+    UserEmailChanged e => state with { Email = e.NewEmail },
+    UserDeactivated => state with { IsActive = false },
+    _ => state,
+};
+```
+
+<ExerciseBlock>
+1. Build an immutable linked list using records: `abstract record List<T>; record Nil<T> : List<T>; record Cons<T>(T Head, List<T> Tail) : List<T>`. Add extension methods `Length()`, `Prepend(T item)`, and `ToArray()`.
+2. Model a configuration change log: `ConfigChange(string Key, string? OldValue, string? NewValue, DateTime ChangedAt, string ChangedBy)`. Write a method that applies a list of changes to an initial `Dictionary<string, string>` and returns the final state.
+3. Create `QueryState(string SearchTerm, int Page, int PageSize, string? SortBy, bool SortAscending)` record. Write `NextPage()`, `PrevPage()`, `WithSearch(string term)`, and `WithSort(string column, bool asc)` methods that each return a `with` copy.
+</ExerciseBlock>

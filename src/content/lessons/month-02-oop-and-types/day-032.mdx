@@ -1,0 +1,184 @@
+---
+title: "Records: Immutable Data Classes"
+day: 32
+week: 7
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart records (int, String), named records, copyWith pattern"
+csharpConcept: "C# record class, positional records, value equality, with expressions"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Records are one of the best additions to C# — they solve the "immutable data class with equality" problem that Dart devs usually solve with `package:equatable` or manual `==`/`hashCode`. C# records do it all automatically.
+
+## C# Records vs Dart Records
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart records — purely structural
+  final point = (x: 10, y: 20);  // anonymous record
+  print(point.x);  // 10
+
+  // Named record type (Dart 3)
+  typedef Point = ({int x, int y});
+  final p = (x: 10, y: 20) as Point;
+
+  // Dart class with manual equality (typical pattern)
+  class User {
+    final String name;
+    final String email;
+    User({required this.name, required this.email});
+
+    User copyWith({String? name, String? email}) =>
+      User(name: name ?? this.name, email: email ?? this.email);
+
+    @override bool operator ==(Object other) =>
+      other is User && name == other.name && email == other.email;
+
+    @override int get hashCode => Object.hash(name, email);
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# record — immutable, equality, ToString, with — all free
+  public record User(string Name, string Email);
+
+  var user = new User("Adam", "adam@example.com");
+  Console.WriteLine(user.Name);   // Adam
+  Console.WriteLine(user);        // User { Name = Adam, Email = adam@example.com }
+
+  // Value equality — automatically compares all properties
+  var u1 = new User("Adam", "adam@example.com");
+  var u2 = new User("Adam", "adam@example.com");
+  Console.WriteLine(u1 == u2);   // True! (reference types normally false)
+
+  // with expression — creates modified copy (replaces copyWith)
+  var updated = user with { Email = "new@example.com" };
+  Console.WriteLine(updated.Email); // new@example.com
+  Console.WriteLine(user.Email);    // adam@example.com — original unchanged
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="tip" title="Records Auto-Generate Everything">
+A single `record` declaration gives you:
+- `init`-only properties
+- Value-based `==` and `!=`
+- `GetHashCode()` based on all properties
+- `ToString()` that prints all properties
+- `with` expression support (non-destructive copy)
+- Deconstruction
+</ConceptCallout>
+
+## Two Record Syntaxes
+
+```csharp
+// POSITIONAL RECORD (primary constructor syntax)
+// Properties are inferred from constructor parameters
+public record Point(double X, double Y);
+public record User(string Name, string Email, DateTime CreatedAt);
+
+// NOMINAL RECORD (property-based)
+// More control over each property
+public record Product
+{
+    public required string Name { get; init; }
+    public required decimal Price { get; init; }
+    public string Category { get; init; } = "General";
+    public bool IsAvailable { get; init; } = true;
+}
+
+// Both support with expressions:
+var p = new Point(1, 2);
+var p2 = p with { Y = 10 };  // Point(1, 10)
+
+var product = new Product { Name = "Widget", Price = 9.99m };
+var discounted = product with { Price = 7.99m };
+```
+
+## Records with Additional Methods
+
+Records can have methods, additional properties, and even custom constructors:
+
+```csharp
+public record Money(decimal Amount, string Currency)
+{
+    // Validation in constructor
+    public Money : this(Amount, Currency)
+    {
+        if (Amount < 0) throw new ArgumentException("Amount cannot be negative");
+        if (string.IsNullOrEmpty(Currency)) throw new ArgumentException("Currency required");
+        Currency = Currency.ToUpper();
+    }
+
+    // Computed properties
+    public bool IsZero => Amount == 0;
+    public Money Negate() => this with { Amount = -Amount };
+
+    // Operators
+    public static Money operator +(Money a, Money b)
+    {
+        if (a.Currency != b.Currency)
+            throw new InvalidOperationException("Cannot add different currencies");
+        return a with { Amount = a.Amount + b.Amount };
+    }
+
+    public static Money operator *(Money m, decimal factor)
+        => m with { Amount = m.Amount * factor };
+
+    // Custom ToString
+    public override string ToString() => $"{Amount:F2} {Currency}";
+}
+
+var price = new Money(9.99m, "usd");
+Console.WriteLine(price);         // 9.99 USD (Currency uppercased)
+var doubled = price * 2;
+Console.WriteLine(doubled);       // 19.98 USD
+```
+
+## `record struct` — Value-Type Records
+
+```csharp
+// record struct — value semantics AND record features
+public record struct Point2D(float X, float Y);
+
+var p = new Point2D(1, 2);
+var copy = p;  // copy semantics (struct behavior)
+copy = copy with { X = 99 };
+Console.WriteLine(p.X);    // 1 — original unchanged
+Console.WriteLine(copy.X); // 99
+
+// readonly record struct — immutable value type record
+public readonly record struct Vector(double X, double Y)
+{
+    public double Magnitude => Math.Sqrt(X * X + Y * Y);
+    public Vector Normalize() => new(X / Magnitude, Y / Magnitude);
+    public static Vector operator +(Vector a, Vector b) => new(a.X + b.X, a.Y + b.Y);
+}
+```
+
+## Records vs Classes vs Structs
+
+| | `class` | `struct` | `record` | `record struct` |
+|---|---|---|---|---|
+| Semantics | Reference | Value | Reference | Value |
+| Equality | Reference | Value (auto) | Value (auto) | Value (auto) |
+| `with` expression | No | No | Yes | Yes |
+| Inheritance | Yes | No | Limited | No |
+| Mutability | Mutable | Mutable/Immutable | Immutable | Immutable |
+| Best for | Complex objects | Small value types | DTOs, events | Small immutable values |
+
+<ExerciseBlock>
+1. Create a full event sourcing setup: define `OrderEvent` as an abstract record, then `OrderPlaced(Guid OrderId, string CustomerId, decimal Total)`, `OrderShipped(Guid OrderId, DateTime ShippedAt)`, and `OrderCancelled(Guid OrderId, string Reason)` as record subclasses. Process them with a switch expression.
+2. Model a `BoundingBox` as a `readonly record struct` with `MinX`, `MinY`, `MaxX`, `MaxY`. Add computed properties `Width`, `Height`, `Area`. Add a `Contains(Point p)` method and a static `Union(BoundingBox a, BoundingBox b)`.
+3. Create a `Page<T>(IReadOnlyList<T> Items, int PageNumber, int PageSize, int TotalCount)` record. Add computed properties: `TotalPages`, `HasNextPage`, `HasPreviousPage`. Test `with` to navigate pages.
+</ExerciseBlock>

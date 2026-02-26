@@ -1,0 +1,194 @@
+---
+title: "Structs: Value-Type Objects"
+day: 31
+week: 7
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "(no Dart equivalent — everything in Dart is a reference type)"
+csharpConcept: "struct, value semantics, copy-on-assign, readonly struct"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Structs are one of C#'s most distinctive features and have no Dart equivalent. They're value types — stack-allocated, copy-on-assign objects. Understanding when to use a struct vs a class is key to writing idiomatic C# and avoiding subtle bugs.
+
+## What Makes a Struct Different
+
+<ConceptCallout type="new" title="Structs Have No Dart Equivalent">
+In Dart, every object — even a `Point` or `Color` — lives on the heap with reference semantics. When you assign `var b = a`, both `a` and `b` point to the same object. C# structs have **copy semantics** — assigning copies the entire value. This is how primitive types like `int`, `double`, and `bool` work in C#.
+</ConceptCallout>
+
+```csharp
+// Reference type (class) — a and b point to the SAME object
+class PointClass { public int X; public int Y; }
+
+var a = new PointClass { X = 10, Y = 20 };
+var b = a;          // b is a reference to the same object
+b.X = 99;
+Console.WriteLine(a.X); // 99 — a was changed!
+
+// Value type (struct) — b is a COPY of a
+struct PointStruct { public int X; public int Y; }
+
+var c = new PointStruct { X = 10, Y = 20 };
+var d = c;          // d is a copy
+d.X = 99;
+Console.WriteLine(c.X); // 10 — c is unchanged
+```
+
+## Defining a Struct
+
+```csharp
+public struct Point
+{
+    public double X { get; }
+    public double Y { get; }
+
+    public Point(double x, double y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public double DistanceTo(Point other)
+    {
+        var dx = X - other.X;
+        var dy = Y - other.Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    public Point Translate(double dx, double dy) => new Point(X + dx, Y + dy);
+
+    public static readonly Point Origin = new(0, 0);
+
+    public override string ToString() => $"({X}, {Y})";
+}
+
+var p1 = new Point(3, 4);
+var p2 = new Point(0, 0);
+Console.WriteLine(p1.DistanceTo(p2));  // 5.0
+Console.WriteLine(p1.Translate(1, 1)); // (4, 5)
+```
+
+## `readonly struct` — Immutable Value Type
+
+```csharp
+// readonly struct — ALL fields must be readonly
+// Compiler enforces immutability, enables JIT optimizations
+public readonly struct Color
+{
+    public byte R { get; }
+    public byte G { get; }
+    public byte B { get; }
+    public byte A { get; }
+
+    public Color(byte r, byte g, byte b, byte a = 255)
+    {
+        R = r; G = g; B = b; A = a;
+    }
+
+    // Static factory methods (no mutable state needed)
+    public static Color FromHex(string hex)
+    {
+        var clean = hex.TrimStart('#');
+        return new Color(
+            Convert.ToByte(clean[0..2], 16),
+            Convert.ToByte(clean[2..4], 16),
+            Convert.ToByte(clean[4..6], 16));
+    }
+
+    public static readonly Color Red = new(255, 0, 0);
+    public static readonly Color Green = new(0, 255, 0);
+    public static readonly Color Blue = new(0, 0, 255);
+    public static readonly Color White = new(255, 255, 255);
+    public static readonly Color Black = new(0, 0, 0);
+    public static readonly Color Transparent = new(0, 0, 0, 0);
+
+    public Color WithAlpha(byte alpha) => new(R, G, B, alpha);
+
+    public Color Blend(Color other, float t)
+    {
+        byte Lerp(byte a, byte b) => (byte)(a + (b - a) * t);
+        return new Color(Lerp(R, other.R), Lerp(G, other.G), Lerp(B, other.B), Lerp(A, other.A));
+    }
+
+    public override string ToString() => $"rgba({R},{G},{B},{A})";
+}
+```
+
+## When to Use a Struct vs Class
+
+| Characteristic | Use Struct | Use Class |
+|---|---|---|
+| Size | Small (< 16 bytes) | Any size |
+| Semantics | Value (copy-on-assign) | Reference (share) |
+| Lifetime | Short-lived | May persist |
+| Allocation | Stack (fast, no GC) | Heap (GC managed) |
+| Inheritance | Cannot inherit | Can inherit |
+| Examples | `Point`, `Color`, `DateTime`, `Guid` | `User`, `Order`, `HttpClient` |
+
+<ConceptCallout type="gotcha" title="Structs Can't Inherit (but Can Implement Interfaces)">
+Structs cannot inherit from other structs or classes (except implicitly from `object`/`ValueType`). However, structs CAN implement interfaces. This means you can have a `Point : IComparable<Point>` struct.
+</ConceptCallout>
+
+## Built-In Struct Examples
+
+The .NET BCL has many important structs you'll use daily:
+
+```csharp
+// DateTime and DateTimeOffset — value types
+DateTime now = DateTime.UtcNow;
+DateTimeOffset offset = DateTimeOffset.Now;
+
+// TimeSpan — duration
+TimeSpan duration = TimeSpan.FromHours(1.5);
+TimeSpan diff = now - new DateTime(2024, 1, 1);
+
+// Guid — globally unique identifier
+Guid id = Guid.NewGuid();
+Guid.TryParse("550e8400-e29b-41d4-a716-446655440000", out var parsed);
+
+// Range and Index — for slicing
+Index last = ^1;                // last element
+Range slice = 1..^1;            // everything except first and last
+string s = "hello";
+char c = s[^1];                 // 'o'
+string middle = s[1..^1];       // "ell"
+
+// KeyValuePair<K,V> — what Dictionary iterations yield
+KeyValuePair<string, int> pair = new("hello", 42);
+```
+
+## Boxing: When Structs Go to the Heap
+
+When a struct is stored as `object` or an interface type, it gets "boxed" — copied to the heap:
+
+```csharp
+Point p = new(10, 20);
+
+// Boxing — creates a heap object wrapping the struct
+object boxed = p;    // BOXED — heap allocation
+
+// Unboxing — extracts value from box
+Point unboxed = (Point)boxed;
+
+// Avoid boxing in performance-sensitive code
+// Using a struct as an interface type causes boxing
+IComparable<int> comparable = 42;  // int gets boxed
+
+// Generic constraints avoid boxing
+void Process<T>(T value) where T : struct { ... }
+// T is always a value type, no boxing needed
+```
+
+<ExerciseBlock>
+1. Create a `readonly struct Vector2` with `X` and `Y` components. Add operator overloads for `+`, `-`, `*` (scalar multiply), and a `Magnitude` property. Make it implement `IEquatable<Vector2>`.
+2. Build a `readonly struct Money` with `Amount` (decimal) and `Currency` (string). Add operators for `+` and `-` that throw if currencies don't match. Add `implicit operator decimal` for easy amount extraction.
+3. Write a benchmark (just using `Stopwatch` and a loop) comparing the performance of creating 1 million `Point` structs vs 1 million `PointClass` reference type instances. Note the difference in allocation speed and GC pressure.
+</ExerciseBlock>

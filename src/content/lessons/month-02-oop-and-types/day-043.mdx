@@ -1,0 +1,212 @@
+---
+title: "LINQ: Where, Select, OrderBy"
+day: 43
+week: 9
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Iterable.where(), .map(), .toList() — same pattern, different names"
+csharpConcept: "LINQ Where, Select, OrderBy, method chaining, deferred execution"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+LINQ (Language Integrated Query) is C#'s answer to Dart's collection methods — and then some. If you've used Dart's `.where()`, `.map()`, `.toList()`, you already understand the mental model. LINQ extends this to databases, XML, and any IEnumerable source.
+
+## Core Operations: Where, Select, OrderBy
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  final products = [
+    Product('Widget', 9.99, 'Electronics'),
+    Product('Gadget', 24.99, 'Electronics'),
+    Product('Donut', 1.49, 'Food'),
+    Product('Coffee', 3.99, 'Food'),
+  ];
+
+  // Filter → map → sort → collect
+  final result = products
+    .where((p) => p.price < 20)
+    .map((p) => p.name.toUpperCase())
+    .toList()
+    ..sort();
+
+  // Or with sorted:
+  final sorted = products
+    .where((p) => p.category == 'Electronics')
+    .toList()
+    ..sort((a, b) => a.price.compareTo(b.price));
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  var products = new[]
+  {
+      new Product("Widget", 9.99m, "Electronics"),
+      new Product("Gadget", 24.99m, "Electronics"),
+      new Product("Donut", 1.49m, "Food"),
+      new Product("Coffee", 3.99m, "Food"),
+  };
+
+  // Filter → project → sort → collect
+  var result = products
+      .Where(p => p.Price < 20)
+      .Select(p => p.Name.ToUpper())
+      .OrderBy(name => name)   // alphabetical
+      .ToList();
+
+  // Sort by multiple keys
+  var sorted = products
+      .Where(p => p.Category == "Electronics")
+      .OrderBy(p => p.Price)          // primary sort
+      .ThenBy(p => p.Name)            // secondary sort
+      .ToList();
+  ```
+  </div>
+</CodeComparison>
+
+## Select — Projection (map equivalent)
+
+```csharp
+var numbers = new[] { 1, 2, 3, 4, 5 };
+
+// Project to new type
+int[] squares = numbers.Select(n => n * n).ToArray();
+// [1, 4, 9, 16, 25]
+
+// Project to anonymous type
+var summaries = products.Select(p => new
+{
+    p.Name,
+    DisplayPrice = $"${p.Price:F2}",
+    IsExpensive = p.Price > 15
+});
+
+// Project to named record/class
+var dtos = products.Select(p => new ProductDto(p.Name, p.Price)).ToList();
+
+// SelectMany — flatten (like Dart's .expand())
+var tags = orders.SelectMany(o => o.Tags).Distinct().ToList();
+
+// Select with index
+var indexed = products.Select((p, i) => $"{i + 1}. {p.Name}").ToList();
+// ["1. Widget", "2. Gadget", "3. Donut", "4. Coffee"]
+```
+
+## Where — Filtering
+
+```csharp
+// Basic filter
+var expensive = products.Where(p => p.Price > 10);
+
+// Compound conditions
+var affordable = products.Where(p => p.Price < 20 && p.Category == "Electronics");
+
+// Where with index
+var evenIndexed = products.Where((p, i) => i % 2 == 0);
+
+// Chained Where — same as AND
+var result = products
+    .Where(p => p.Category == "Electronics")
+    .Where(p => p.Price < 25);
+// More readable than: .Where(p => p.Category == "Electronics" && p.Price < 25)
+```
+
+## OrderBy, ThenBy, Reverse
+
+```csharp
+// Ascending (default)
+var byPrice = products.OrderBy(p => p.Price);
+
+// Descending
+var byPriceDesc = products.OrderByDescending(p => p.Price);
+
+// Multi-key sort
+var sorted = products
+    .OrderBy(p => p.Category)
+    .ThenByDescending(p => p.Price)
+    .ThenBy(p => p.Name);
+
+// Sort strings with culture-aware comparison
+var names = products
+    .Select(p => p.Name)
+    .OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase);
+```
+
+## Terminal Operations — Materializing Results
+
+```csharp
+// Collections
+var list = query.ToList();           // List<T>
+var array = query.ToArray();         // T[]
+var set = query.ToHashSet();         // HashSet<T>
+var dict = query.ToDictionary(p => p.Id, p => p.Name);  // Dictionary<K,V>
+
+// Aggregates
+int count = query.Count();
+int total = query.Count(p => p.Price > 10);  // count with filter
+decimal sum = products.Sum(p => p.Price);
+decimal avg = products.Average(p => p.Price);
+decimal max = products.Max(p => p.Price);
+decimal min = products.Min(p => p.Price);
+
+// Single element
+var first = products.First();                    // throws if empty
+var firstOrNull = products.FirstOrDefault();    // null if empty
+var firstElec = products.First(p => p.Category == "Electronics");
+var single = products.Single(p => p.Id == targetId);  // throws if not exactly one
+
+// Existence
+bool any = products.Any();                        // any items?
+bool anyExpensive = products.Any(p => p.Price > 100);
+bool allCheap = products.All(p => p.Price < 50);
+bool contains = products.Contains(specificProduct);
+```
+
+<ConceptCallout type="tip" title="First vs FirstOrDefault">
+`First()` throws `InvalidOperationException` if no element matches. `FirstOrDefault()` returns `null` (for reference types) or `default` (for value types). Prefer `FirstOrDefault()` when the element might not exist, and let it guide your control flow — then you don't need a try/catch for the common "not found" case.
+</ConceptCallout>
+
+## Combining Operations
+
+```csharp
+// Real-world: process a product catalog
+record Product(string Name, decimal Price, string Category, bool InStock);
+
+var catalog = new List<Product>
+{
+    new("Widget", 9.99m, "Electronics", true),
+    new("Gadget", 24.99m, "Electronics", false),
+    new("Donut", 1.49m, "Food", true),
+    new("Coffee", 3.99m, "Food", true),
+    new("Laptop", 999m, "Electronics", true),
+};
+
+// Find top 3 in-stock electronics, sorted by price, formatted for display
+var topElectronics = catalog
+    .Where(p => p.InStock && p.Category == "Electronics")
+    .OrderByDescending(p => p.Price)
+    .Take(3)
+    .Select(p => $"{p.Name}: ${p.Price:N2}")
+    .ToList();
+
+// [
+//   "Laptop: $999.00",
+//   "Gadget: $24.99",   (out of stock, excluded)
+//   "Widget: $9.99"
+// ]
+// Wait — Gadget is out of stock, so:
+// ["Laptop: $999.00", "Widget: $9.99"]
+```
+
+<ExerciseBlock>
+1. Given a list of `Employee(string Name, string Dept, decimal Salary, int YearsOfService)`, write LINQ queries to: (a) find all employees in "Engineering" with salary > $80k, (b) get names of the top 5 earners sorted by salary descending, (c) calculate average salary per department.
+2. Write a `SelectMany` example: given `Order[]` where each order has `Item[]`, flatten to a single `IEnumerable<Item>` containing all items across all orders.
+3. Chain at least 5 LINQ operations on a dataset of your choice, ending with `.ToDictionary()`. Ensure the result is meaningful (not just a random chain).
+</ExerciseBlock>

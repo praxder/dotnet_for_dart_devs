@@ -1,0 +1,181 @@
+---
+title: "Static Members and the Factory Pattern"
+day: 24
+week: 5
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart factory constructors, static members, static methods"
+csharpConcept: "Static methods, static classes, static factory pattern, static constructors"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart has a dedicated `factory` keyword for constructors that don't always create new instances. C# has no equivalent — you use static factory methods instead. This is a small but important difference that affects how you design APIs.
+
+## Static Factory Methods (C#'s Answer to Dart's `factory`)
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  class Color {
+    final int r, g, b;
+    const Color(this.r, this.g, this.b);
+
+    // factory constructor — can return cached instance
+    factory Color.fromHex(String hex) {
+      final clean = hex.replaceFirst('#', '');
+      return Color(
+        int.parse(clean.substring(0, 2), radix: 16),
+        int.parse(clean.substring(2, 4), radix: 16),
+        int.parse(clean.substring(4, 6), radix: 16),
+      );
+    }
+
+    // Named constructor
+    Color.grey(int value) : this(value, value, value);
+  }
+
+  final red = Color.fromHex('#FF0000');
+  final mid = Color.grey(128);
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  public class Color
+  {
+      public int R { get; }
+      public int G { get; }
+      public int B { get; }
+
+      // Regular constructor (private is common with factory pattern)
+      private Color(int r, int g, int b) { R = r; G = g; B = b; }
+
+      // Static factory — replaces Dart's factory constructor
+      public static Color FromHex(string hex)
+      {
+          var clean = hex.TrimStart('#');
+          return new Color(
+              Convert.ToInt32(clean[0..2], 16),
+              Convert.ToInt32(clean[2..4], 16),
+              Convert.ToInt32(clean[4..6], 16));
+      }
+
+      // Static factory — replaces Dart's named constructor
+      public static Color Grey(int value) => new Color(value, value, value);
+
+      // Static factories enable validation and caching
+      private static readonly Color _white = new Color(255, 255, 255);
+      public static Color White => _white;
+  }
+
+  var red = Color.FromHex("#FF0000");
+  var mid = Color.Grey(128);
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="No Named Constructors in C#">
+Dart has named constructors like `Color.fromHex()` and `Color.grey()`. C# has no equivalent syntax. The idiomatic replacement is static factory methods. The naming convention: `Color.FromHex()`, `Color.Create()`, `Color.Parse()` — Pascal case like all public methods.
+</ConceptCallout>
+
+## Static Classes — Pure Utility
+
+A `static class` can only contain static members and cannot be instantiated. It's the C# equivalent of a Dart class where all methods are static with a private constructor:
+
+```csharp
+// Static utility class — cannot be instantiated or subclassed
+public static class MathUtils
+{
+    public const double Tau = 2 * Math.PI;
+
+    public static double Lerp(double a, double b, double t) => a + (b - a) * t;
+    public static double InverseLerp(double a, double b, double v)
+        => (v - a) / (b - a);
+    public static double Remap(double v, double iMin, double iMax, double oMin, double oMax)
+        => Lerp(oMin, oMax, InverseLerp(iMin, iMax, v));
+    public static bool ApproxEqual(double a, double b, double eps = 1e-9)
+        => Math.Abs(a - b) < eps;
+}
+
+// Extension methods go in static classes too (non-static keyword applied)
+public static class StringExtensions
+{
+    public static string Repeat(this string s, int n)
+        => string.Concat(Enumerable.Repeat(s, n));
+}
+```
+
+## Static Constructors
+
+A static constructor runs exactly once, before the first use of the class. It's for initializing complex static state:
+
+```csharp
+public class CurrencyConverter
+{
+    private static readonly Dictionary<string, decimal> _rates;
+
+    // Static constructor — runs once before first use
+    static CurrencyConverter()
+    {
+        // Load rates from embedded resource, config, etc.
+        _rates = LoadRatesFromFile("rates.json");
+        Console.WriteLine("CurrencyConverter initialized");
+    }
+
+    public static decimal Convert(decimal amount, string from, string to)
+    {
+        var inUsd = amount / _rates[from];
+        return inUsd * _rates[to];
+    }
+
+    private static Dictionary<string, decimal> LoadRatesFromFile(string path)
+        => new() { ["USD"] = 1m, ["EUR"] = 0.92m, ["GBP"] = 0.79m };
+}
+```
+
+<ConceptCallout type="gotcha" title="Static Constructor Timing">
+A static constructor runs the first time the class is accessed — before any static or instance member is used. If it throws, the class becomes permanently unusable (`TypeInitializationException`). Keep static constructors simple and free of I/O where possible.
+</ConceptCallout>
+
+## Full Factory Pattern Example
+
+```csharp
+public abstract class Database
+{
+    public abstract IDbConnection CreateConnection();
+
+    // Factory method — choose implementation at runtime
+    public static Database Create(string provider, string connectionString)
+        => provider.ToLower() switch
+        {
+            "sqlite" => new SqliteDatabase(connectionString),
+            "postgres" => new PostgresDatabase(connectionString),
+            "sqlserver" => new SqlServerDatabase(connectionString),
+            _ => throw new ArgumentException($"Unknown provider: {provider}"),
+        };
+}
+
+public class SqliteDatabase : Database
+{
+    private readonly string _path;
+    public SqliteDatabase(string path) { _path = path; }
+    public override IDbConnection CreateConnection()
+        => new SqliteConnection($"Data Source={_path}");
+}
+
+// Usage
+var db = Database.Create("sqlite", "app.db");
+using var conn = db.CreateConnection();
+```
+
+<ExerciseBlock>
+1. Create a `Temperature` class with a private constructor and static factories: `Temperature.FromCelsius(double c)`, `Temperature.FromFahrenheit(double f)`, `Temperature.FromKelvin(double k)`. Store internally as Kelvin and provide properties for each scale.
+2. Build a `static class StringValidator` with static methods `IsEmail(string s)`, `IsUrl(string s)`, `IsPhoneNumber(string s)` using simple regex checks.
+3. Implement the Singleton pattern using a static constructor and `static readonly`: `class AppSettings` that loads from a config file exactly once.
+</ExerciseBlock>

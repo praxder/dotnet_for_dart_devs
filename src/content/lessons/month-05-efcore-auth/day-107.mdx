@@ -1,0 +1,263 @@
+---
+title: "JWT Authentication Deep Dive"
+day: 107
+week: 22
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "JWT in Dart http package, token storage in Flutter"
+csharpConcept: "JwtSecurityToken, signing keys, refresh tokens, token validation, Claims"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+JWT (JSON Web Tokens) is the standard for stateless API authentication. The server signs a token containing user claims; clients include it in every request. The server verifies the signature — no database lookup needed per request.
+
+## JWT Structure
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9     ← Header (base64)
+.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ  ← Payload (base64)
+.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c  ← Signature (HMAC-SHA256 or RS256)
+
+// Payload (decoded):
+{
+  "sub": "user-id-123",         // subject (user ID)
+  "email": "user@example.com",
+  "role": ["Author", "User"],
+  "tenant_id": "acme",
+  "iat": 1516239022,            // issued at
+  "exp": 1516242622             // expires at
+}
+```
+
+## Generating JWT Tokens
+
+```csharp
+// appsettings.json:
+// "Jwt": { "Key": "your-256-bit-secret-key-here", "Issuer": "myapp", "Audience": "myapp-clients" }
+
+public class JwtTokenService(IConfiguration config, UserManager<AppUser> userManager)
+{
+    public async Task<TokenResponse> GenerateTokensAsync(AppUser user)
+    {
+        var key = new SymmetricSecurityKey(
+            Encoding.UTF8.GetBytes(config["Jwt:Key"]!));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+        // Collect claims from Identity
+        var userClaims = await userManager.GetClaimsAsync(user);
+        var roles = await userManager.GetRolesAsync(user);
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, user.Id),
+            new(JwtRegisteredClaimNames.Email, user.Email!),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),  // unique ID
+            new(JwtRegisteredClaimNames.Iat,
+                DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+                ClaimValueTypes.Integer64),
+            new("display_name", user.DisplayName)
+        };
+
+        // Add role claims
+        claims.AddRange(roles.Select(r => new Claim(ClaimTypes.Role, r)));
+        // Add custom claims
+        claims.AddRange(userClaims);
+
+        var accessToken = new JwtSecurityToken(
+            issuer: config["Jwt:Issuer"],
+            audience: config["Jwt:Audience"],
+            claims: claims,
+            notBefore: DateTime.UtcNow,
+            expires: DateTime.UtcNow.AddMinutes(15),  // short-lived!
+            signingCredentials: credentials);
+
+        // Generate refresh token (random, stored in DB)
+        var refreshToken = new RefreshToken
+        {
+            Token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64)),
+            UserId = user.Id,
+            ExpiresAt = DateTime.UtcNow.AddDays(30),
+            CreatedAt = DateTime.UtcNow
+        };
+
+        return new TokenResponse(
+            AccessToken: new JwtSecurityTokenHandler().WriteToken(accessToken),
+            RefreshToken: refreshToken.Token,
+            ExpiresAt: accessToken.ValidTo);
+    }
+}
+
+public record TokenResponse(string AccessToken, string RefreshToken, DateTime ExpiresAt);
+```
+
+## Token Validation Setup
+
+```csharp
+// Program.cs
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+
+            ValidateAudience = true,
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero,  // default is 5 min; set to 0 for precise expiry
+
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+        };
+
+        // For SignalR — token comes from query string, not header
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+                    context.Token = accessToken;
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+builder.Services.AddAuthorization();
+
+// In middleware pipeline:
+app.UseAuthentication();   // must be before UseAuthorization
+app.UseAuthorization();
+```
+
+## Refresh Token Flow
+
+```csharp
+public class RefreshToken
+{
+    public int Id { get; set; }
+    public required string Token { get; set; }
+    public required string UserId { get; set; }
+    public DateTime ExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public bool IsRevoked { get; set; }
+    public string? ReplacedByToken { get; set; }  // token rotation
+}
+
+// Refresh endpoint — exchange refresh token for new token pair
+app.MapPost("/api/auth/refresh", async (
+    RefreshRequest request,
+    AppDbContext db,
+    UserManager<AppUser> userManager,
+    JwtTokenService jwtService) =>
+{
+    // Validate refresh token
+    var storedToken = await db.RefreshTokens
+        .FirstOrDefaultAsync(t => t.Token == request.RefreshToken && !t.IsRevoked);
+
+    if (storedToken is null || storedToken.ExpiresAt < DateTime.UtcNow)
+        return Results.Unauthorized();
+
+    var user = await userManager.FindByIdAsync(storedToken.UserId);
+    if (user is null || !user.IsActive)
+        return Results.Unauthorized();
+
+    // Rotate: revoke old token, issue new pair
+    storedToken.IsRevoked = true;
+    storedToken.ReplacedByToken = "pending";
+
+    var newTokens = await jwtService.GenerateTokensAsync(user);
+
+    // Save new refresh token
+    var newRefresh = new RefreshToken
+    {
+        Token = newTokens.RefreshToken,
+        UserId = user.Id,
+        ExpiresAt = DateTime.UtcNow.AddDays(30),
+        CreatedAt = DateTime.UtcNow
+    };
+    storedToken.ReplacedByToken = newRefresh.Token;
+
+    db.RefreshTokens.Add(newRefresh);
+    await db.SaveChangesAsync();
+
+    return Results.Ok(newTokens);
+});
+
+// Revoke (logout)
+app.MapPost("/api/auth/logout", async (
+    RevokeRequest request,
+    AppDbContext db,
+    ClaimsPrincipal user) =>
+{
+    var token = await db.RefreshTokens
+        .FirstOrDefaultAsync(t => t.Token == request.RefreshToken
+            && t.UserId == user.FindFirstValue(ClaimTypes.NameIdentifier));
+
+    if (token is not null)
+    {
+        token.IsRevoked = true;
+        await db.SaveChangesAsync();
+    }
+
+    return Results.Ok();
+}).RequireAuthorization();
+```
+
+## Reading Claims in Endpoints
+
+```csharp
+// Access user info from the JWT in any endpoint
+app.MapGet("/api/me", (ClaimsPrincipal user) =>
+{
+    var id = user.FindFirstValue(ClaimTypes.NameIdentifier);
+    var email = user.FindFirstValue(ClaimTypes.Email);
+    var roles = user.FindAll(ClaimTypes.Role).Select(c => c.Value);
+    var displayName = user.FindFirstValue("display_name");
+
+    return Results.Ok(new { id, email, displayName, roles });
+}).RequireAuthorization();
+
+// Extension method for cleaner access:
+public static class ClaimsPrincipalExtensions
+{
+    public static string GetUserId(this ClaimsPrincipal principal)
+        => principal.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? throw new InvalidOperationException("User ID claim missing");
+
+    public static string GetEmail(this ClaimsPrincipal principal)
+        => principal.FindFirstValue(ClaimTypes.Email)!;
+
+    public static bool IsAdmin(this ClaimsPrincipal principal)
+        => principal.IsInRole("Admin");
+}
+
+// Usage:
+app.MapDelete("/api/posts/{id}", async (int id, ClaimsPrincipal user, IMediator m) =>
+    await m.Send(new DeletePostCommand(id, user.GetUserId())))
+    .RequireAuthorization();
+```
+
+<ConceptCallout type="gotcha" title="JWT Security Pitfalls">
+1. **Never put secrets in JWT** — tokens are only base64 encoded, not encrypted. Anyone can decode the payload.
+2. **Keep access tokens short-lived** (5–15 minutes). Long-lived JWTs can't be revoked if stolen.
+3. **Store refresh tokens securely** — HttpOnly cookies on the web, Keychain/Keystore on mobile.
+4. **Use RS256 for distributed systems** — HMAC (HS256) requires all services to share the secret. RSA lets any service verify tokens without the signing key.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Implement the complete auth flow with token rotation: register → login (get access + refresh token) → call protected endpoint → let access token expire → refresh → verify new tokens work → logout (revoke refresh token) → verify refresh fails.
+2. Add RS256 signing: generate an RSA key pair (use `RSA.Create()`), sign tokens with the private key, verify with the public key. Expose `GET /.well-known/jwks.json` with the public key for external service verification.
+3. Simulate a token theft scenario: after logout, attempt to use the revoked refresh token. Implement "refresh token reuse detection" — if a revoked token is used, revoke all tokens in that user's family (the whole chain).
+</ExerciseBlock>

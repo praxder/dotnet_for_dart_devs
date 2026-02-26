@@ -1,0 +1,201 @@
+---
+title: "EF Core: Advanced Querying"
+day: 93
+week: 19
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "drift queries, isar queries"
+csharpConcept: "Include, ThenInclude, projection, compiled queries, split queries, no-tracking"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Querying is the most important EF Core skill. The difference between a 5ms and 5000ms response often comes down to how you structure LINQ queries against a DbContext — specifically around loading related data, projections, and tracking behavior.
+
+## Loading Related Data — Three Approaches
+
+```csharp
+// 1. Eager Loading — Include() joins related data in the SQL
+var ordersWithCustomer = await db.Orders
+    .Include(o => o.Customer)        // JOIN customers
+    .Include(o => o.Lines)           // JOIN order_lines
+        .ThenInclude(l => l.Product) // JOIN products (nested)
+    .Where(o => o.Status == OrderStatus.Pending)
+    .ToListAsync();
+
+// 2. Explicit Loading — load related data for a specific entity
+var order = await db.Orders.FindAsync(orderId);
+if (order is not null)
+{
+    await db.Entry(order).Collection(o => o.Lines).LoadAsync();
+    await db.Entry(order).Reference(o => o.Customer).LoadAsync();
+}
+
+// 3. Lazy Loading — loaded on first access (requires proxy)
+// dotnet add package Microsoft.EntityFrameworkCore.Proxies
+// options.UseLazyLoadingProxies()
+// ⚠️ Can cause N+1 problems — avoid in web APIs
+var order = await db.Orders.FindAsync(orderId);
+var lines = order!.Lines;  // SQL executed HERE if lazy loading enabled
+```
+
+<ConceptCallout type="gotcha" title="N+1 Query Problem">
+The most common EF Core performance bug: loading a list, then accessing a navigation property in a loop. Each iteration triggers a new SQL query. Fix: always `Include()` what you need, or use projections with `Select()`.
+```csharp
+// N+1: 1 query for orders + N queries for customers
+var orders = await db.Orders.ToListAsync();
+foreach (var order in orders)
+    Console.WriteLine(order.Customer!.Name);  // N SQL queries!
+
+// Fixed: 1 query with JOIN
+var orders = await db.Orders.Include(o => o.Customer).ToListAsync();
+```
+</ConceptCallout>
+
+## Projections — Select What You Need
+
+```csharp
+// BAD: loads entire entity including unnecessary columns
+var products = await db.Products.Where(p => p.CategoryId == 1).ToListAsync();
+
+// GOOD: project to DTO — only queries needed columns
+var productSummaries = await db.Products
+    .Where(p => p.CategoryId == 1 && p.IsActive)
+    .Select(p => new ProductSummaryDto
+    {
+        Id = p.Id,
+        Name = p.Name,
+        Price = p.Price,
+        CategoryName = p.Category!.Name  // EF auto-joins
+    })
+    .ToListAsync();
+
+// Anonymous type projection
+var report = await db.Orders
+    .Where(o => o.CreatedAt > DateTime.UtcNow.AddDays(-30))
+    .GroupBy(o => o.Customer!.Country)
+    .Select(g => new
+    {
+        Country = g.Key,
+        Count = g.Count(),
+        Revenue = g.Sum(o => o.Total),
+        Avg = g.Average(o => o.Total)
+    })
+    .OrderByDescending(r => r.Revenue)
+    .ToListAsync();
+```
+
+## No-Tracking Queries — Read-Only Performance
+
+```csharp
+// By default, EF Core tracks loaded entities for change detection
+// For read-only queries, disable tracking:
+
+// Per-query (preferred for APIs)
+var products = await db.Products
+    .AsNoTracking()
+    .Where(p => p.IsActive)
+    .ToListAsync();
+
+// Globally in DbContext (for read-only DbContext)
+optionsBuilder.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
+
+// AsNoTrackingWithIdentityResolution — no tracking, but same instance for same PK
+// (useful when the result contains duplicate related entities)
+var orders = await db.Orders
+    .AsNoTrackingWithIdentityResolution()
+    .Include(o => o.Lines)
+    .ThenInclude(l => l.Product)  // same Product instance reused if appears multiple times
+    .ToListAsync();
+```
+
+## Split Queries — Avoid Cartesian Explosion
+
+```csharp
+// Problem: Including multiple collections → Cartesian product (huge result set)
+// Order with 100 lines and 50 tags → 5000 rows returned from DB!
+var orders = await db.Orders
+    .Include(o => o.Lines)  // 100 rows
+    .Include(o => o.Tags)   // 50 rows
+    .ToListAsync();
+// SQL returns 100 * 50 = 5000 rows! Most are duplicates
+
+// Fix: split into separate queries
+var orders2 = await db.Orders
+    .Include(o => o.Lines)
+    .Include(o => o.Tags)
+    .AsSplitQuery()  // 3 separate SQL queries instead of 1 massive one
+    .ToListAsync();
+
+// Set globally:
+optionsBuilder.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
+```
+
+## Compiled Queries — Maximum Performance
+
+```csharp
+// For hot-path queries, compile them once and reuse
+private static readonly Func<AppDbContext, int, Task<Product?>> GetProductById =
+    EF.CompileAsyncQuery((AppDbContext db, int id) =>
+        db.Products.AsNoTracking().FirstOrDefault(p => p.Id == id));
+
+private static readonly Func<AppDbContext, decimal, IAsyncEnumerable<Product>> GetAffordable =
+    EF.CompileAsyncQuery((AppDbContext db, decimal maxPrice) =>
+        db.Products.AsNoTracking().Where(p => p.Price <= maxPrice && p.IsActive));
+
+// Usage — no LINQ translation overhead
+var product = await GetProductById(db, 42);
+await foreach (var p in GetAffordable(db, 50m))
+    Console.WriteLine(p.Name);
+```
+
+## Filtering with Dynamic Queries
+
+```csharp
+// Build queries conditionally — all evaluated server-side
+public async Task<List<Product>> SearchAsync(ProductFilter filter)
+{
+    IQueryable<Product> query = db.Products.AsNoTracking();
+
+    if (!string.IsNullOrEmpty(filter.Name))
+        query = query.Where(p => p.Name.Contains(filter.Name));
+
+    if (filter.CategoryId.HasValue)
+        query = query.Where(p => p.CategoryId == filter.CategoryId);
+
+    if (filter.MinPrice.HasValue)
+        query = query.Where(p => p.Price >= filter.MinPrice);
+
+    if (filter.MaxPrice.HasValue)
+        query = query.Where(p => p.Price <= filter.MaxPrice);
+
+    if (filter.InStockOnly)
+        query = query.Where(p => p.StockQuantity > 0);
+
+    // Dynamic ordering
+    query = filter.SortBy switch
+    {
+        "price_asc" => query.OrderBy(p => p.Price),
+        "price_desc" => query.OrderByDescending(p => p.Price),
+        "name" => query.OrderBy(p => p.Name),
+        _ => query.OrderByDescending(p => p.CreatedAt)
+    };
+
+    return await query
+        .Skip((filter.Page - 1) * filter.PageSize)
+        .Take(filter.PageSize)
+        .ToListAsync();
+}
+```
+
+<ExerciseBlock>
+1. Demonstrate the N+1 problem: load 20 orders without `Include`, then access `order.Customer.Name` in a loop. Enable EF Core logging to count the SQL queries. Then fix it with `Include` and confirm it's one query.
+2. Write a reporting query that uses `GroupBy`, `Select` with aggregations, and `OrderBy` to generate a "sales by month" report — executed entirely in SQL. Log the generated SQL and verify it's a single query.
+3. Benchmark `AsNoTracking()` vs default tracking for loading 1000 products, reading their properties, and discarding the results. Use `Stopwatch` and `GC.GetTotalAllocatedBytes()` to compare memory and time.
+</ExerciseBlock>

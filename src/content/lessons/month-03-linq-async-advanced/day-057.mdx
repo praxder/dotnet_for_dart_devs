@@ -1,0 +1,213 @@
+---
+title: "Reflection and Attributes"
+day: 57
+week: 12
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "dart:mirrors (deprecated), @annotation metadata"
+csharpConcept: "Type, MethodInfo, PropertyInfo, Attribute, custom attributes, [CallerMemberName]"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Reflection lets you inspect and invoke types at runtime. Attributes let you annotate types and members with metadata that other code can read. Together they power serialization, dependency injection, validation, ORMs, and countless other frameworks.
+
+## Reflection Basics
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: dart:mirrors (not available in Flutter/AOT)
+  // Modern Dart uses code generation instead (build_runner)
+  // @annotation metadata is read at build time
+
+  @JsonSerializable()
+  class User {
+    final String name;
+    final int age;
+    User(this.name, this.age);
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: runtime reflection — always available
+  Type type = typeof(string);
+
+  // Get type from instance
+  object obj = "hello";
+  Type runtimeType = obj.GetType();
+
+  // Properties
+  PropertyInfo[] props = typeof(Person).GetProperties();
+  foreach (var prop in props)
+      Console.WriteLine($"{prop.Name}: {prop.PropertyType.Name}");
+
+  // Methods
+  MethodInfo[] methods = typeof(string).GetMethods();
+  MethodInfo toUpper = typeof(string).GetMethod("ToUpper", Type.EmptyTypes)!;
+
+  // Invoke dynamically
+  string result = (string)toUpper.Invoke("hello", null)!;
+  Console.WriteLine(result);  // "HELLO"
+  ```
+  </div>
+</CodeComparison>
+
+## Reading Type Information
+
+```csharp
+var type = typeof(List<string>);
+
+Console.WriteLine(type.Name);           // "List`1"
+Console.WriteLine(type.FullName);       // "System.Collections.Generic.List`1[[System.String...]]"
+Console.WriteLine(type.IsGenericType);  // true
+Console.WriteLine(type.GetGenericTypeDefinition()); // List`1
+Console.WriteLine(type.GenericTypeArguments[0]);    // System.String
+
+// Check interfaces
+bool isEnumerable = typeof(List<string>).IsAssignableTo(typeof(IEnumerable<string>));
+
+// All properties with their values
+public static Dictionary<string, object?> ToDictionary(object obj)
+{
+    return obj.GetType()
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => p.CanRead)
+        .ToDictionary(p => p.Name, p => p.GetValue(obj));
+}
+
+var dict = ToDictionary(new Person { Name = "Alice", Age = 30 });
+// { "Name": "Alice", "Age": 30 }
+```
+
+## Custom Attributes
+
+```csharp
+// Define a custom attribute
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
+public class RequiredAttribute : Attribute
+{
+    public string ErrorMessage { get; init; } = "This field is required.";
+}
+
+[AttributeUsage(AttributeTargets.Property)]
+public class RangeAttribute : Attribute
+{
+    public int Min { get; }
+    public int Max { get; }
+    public RangeAttribute(int min, int max) { Min = min; Max = max; }
+}
+
+// Apply attributes
+public class CreateUserRequest
+{
+    [Required(ErrorMessage = "Name cannot be empty")]
+    public string Name { get; set; } = "";
+
+    [Required]
+    [Range(0, 150)]
+    public int Age { get; set; }
+
+    public string? Email { get; set; }  // optional
+}
+
+// Read attributes at runtime
+public static List<string> Validate(object obj)
+{
+    var errors = new List<string>();
+    var type = obj.GetType();
+
+    foreach (var prop in type.GetProperties())
+    {
+        var value = prop.GetValue(obj);
+
+        // Check [Required]
+        var required = prop.GetCustomAttribute<RequiredAttribute>();
+        if (required != null && value is null or "")
+            errors.Add($"{prop.Name}: {required.ErrorMessage}");
+
+        // Check [Range]
+        if (value is int intValue)
+        {
+            var range = prop.GetCustomAttribute<RangeAttribute>();
+            if (range != null && (intValue < range.Min || intValue > range.Max))
+                errors.Add($"{prop.Name}: must be between {range.Min} and {range.Max}");
+        }
+    }
+
+    return errors;
+}
+```
+
+## Caller Information Attributes
+
+```csharp
+// Special built-in attributes — compiler fills these in automatically
+using System.Runtime.CompilerServices;
+
+public void Log(
+    string message,
+    [CallerMemberName] string memberName = "",
+    [CallerFilePath] string sourceFile = "",
+    [CallerLineNumber] int sourceLineNumber = 0)
+{
+    Console.WriteLine($"[{sourceFile}:{sourceLineNumber} {memberName}] {message}");
+}
+
+// Caller writes:
+Log("Something happened");
+// Output: [/src/MyClass.cs:42 DoWork] Something happened
+
+// CallerMemberName — used in MVVM for property change notification
+protected void OnPropertyChanged([CallerMemberName] string? name = null)
+    => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+// In a property setter:
+set { _name = value; OnPropertyChanged(); }  // "Name" filled in automatically
+```
+
+## Reflection for Dynamic Object Mapping
+
+```csharp
+// Simple object mapper (like a basic AutoMapper)
+public static TDest Map<TSource, TDest>(TSource source) where TDest : new()
+{
+    var dest = new TDest();
+    var sourceProps = typeof(TSource).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+    var destProps = typeof(TDest).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => p.CanWrite)
+        .ToDictionary(p => p.Name);
+
+    foreach (var sourceProp in sourceProps)
+    {
+        if (destProps.TryGetValue(sourceProp.Name, out var destProp)
+            && destProp.PropertyType.IsAssignableFrom(sourceProp.PropertyType))
+        {
+            destProp.SetValue(dest, sourceProp.GetValue(source));
+        }
+    }
+
+    return dest;
+}
+
+// Usage
+var user = new UserEntity { Id = 1, Name = "Alice", PasswordHash = "..." };
+var dto = Map<UserEntity, UserDto>(user);  // copies Name, skips PasswordHash
+```
+
+<ConceptCallout type="gotcha" title="Reflection Is Slow — Use Source Generators for Production">
+Reflection bypasses compile-time optimizations and is significantly slower than direct property access. For production serialization, validation, and mapping, prefer source generators (`.NET 6+` System.Text.Json, Mapster) which generate the equivalent code at compile time. Use reflection for tools, tests, and low-frequency operations.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Build a `SimpleSerializer` that uses reflection to serialize any object to a `Dictionary<string, string>` and deserialize it back. Handle strings, ints, booleans, and `DateTime` values.
+2. Create a `[Description("...")]` attribute and a `GetDescription<TEnum>(TEnum value)` helper that reads the attribute from an enum member. Use it to display user-friendly names for an enum without a switch statement.
+3. Implement a `DependencyContainer` that registers types with `Register<TInterface, TImpl>()` and resolves them with `Resolve<T>()`, using reflection to call the constructor with injected dependencies.
+</ExerciseBlock>

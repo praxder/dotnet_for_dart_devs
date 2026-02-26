@@ -1,0 +1,464 @@
+---
+title: "Dictionary<K,V> and HashSet<T>"
+day: 37
+week: 8
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Dart Map<K,V>, Set<T>"
+csharpConcept: "Dictionary<K,V>, HashSet<T>, SortedDictionary, SortedSet"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+`Dictionary<K,V>` is C#'s `Map<K,V>`. `HashSet<T>` is C#'s `Set<T>`. If you're comfortable with those Dart types, you already understand the data structures. The focus today is on the C#-specific API differences — particularly `TryGetValue`, which is a pattern you'll use constantly, and the sorted variants that Dart has no equivalent for.
+
+## Dictionary&lt;K,V&gt; Basics
+
+<CodeComparison>
+```dart
+// Dart Map
+final scores = <String, int>{};
+scores['Alice'] = 95;
+scores['Bob'] = 87;
+
+// Reading
+print(scores['Alice']);      // 95
+print(scores['Missing']);    // null (no exception)
+
+// Checking
+print(scores.containsKey('Bob'));   // true
+print(scores.containsValue(87));    // true
+
+// Iterating
+for (final entry in scores.entries) {
+  print('${entry.key}: ${entry.value}');
+}
+
+scores.remove('Bob');
+print(scores.length);  // 1
+```
+
+```csharp
+// C# Dictionary
+var scores = new Dictionary<string, int>();
+scores["Alice"] = 95;
+scores["Bob"] = 87;
+
+// Reading
+Console.WriteLine(scores["Alice"]);    // 95
+// scores["Missing"] throws KeyNotFoundException!
+
+// Checking
+Console.WriteLine(scores.ContainsKey("Bob"));   // true
+Console.WriteLine(scores.ContainsValue(87));    // true
+
+// Iterating
+foreach (var (key, value) in scores)  // deconstruct KeyValuePair
+{
+    Console.WriteLine($"{key}: {value}");
+}
+
+scores.Remove("Bob");
+Console.WriteLine(scores.Count);  // 1
+```
+</CodeComparison>
+
+<ConceptCallout type="gotcha">
+This is the single biggest behavioral difference between Dart `Map` and C# `Dictionary`: reading a missing key. In Dart, `map['missing']` returns `null`. In C#, `dict["missing"]` **throws a `KeyNotFoundException`**. This will cause runtime crashes if you migrate Dart code patterns directly. Always check before reading, or use `TryGetValue`.
+</ConceptCallout>
+
+## The TryGetValue Pattern — Use This Always
+
+Because index access throws on a missing key, C# has `TryGetValue`, which is the idiomatic safe read:
+
+```csharp
+var scores = new Dictionary<string, int>
+{
+    ["Alice"] = 95,
+    ["Bob"] = 87,
+};
+
+// WRONG (throws if key missing):
+// int score = scores["Charlie"];
+
+// OK but inefficient (two lookups):
+if (scores.ContainsKey("Charlie"))
+{
+    int score = scores["Charlie"];
+    Console.WriteLine(score);
+}
+
+// CORRECT — single lookup, idiomatic C#:
+if (scores.TryGetValue("Charlie", out int charliScore))
+{
+    Console.WriteLine($"Found: {charliScore}");
+}
+else
+{
+    Console.WriteLine("Not found");
+}
+
+// C# 8+ pattern — get or default:
+int aliceScore = scores.GetValueOrDefault("Alice");       // 95
+int missing = scores.GetValueOrDefault("Charlie");        // 0 (default(int))
+int withFallback = scores.GetValueOrDefault("Charlie", -1); // -1
+```
+
+<ConceptCallout type="tip">
+Internalize the `TryGetValue` pattern immediately. It performs a **single hash lookup** and is both safer and faster than the `ContainsKey` + index double-lookup pattern. The `out` parameter receives the value if found. `GetValueOrDefault` is the clean one-liner when you want a fallback value.
+</ConceptCallout>
+
+<DartEquivalent>
+```dart
+// Dart's equivalent of TryGetValue
+final score = scores['Charlie'];  // null if missing
+if (score != null) {
+  print('Found: $score');
+}
+
+// Or with null-coalescing
+final score = scores['Charlie'] ?? -1;
+```
+Dart's approach works because Map returns `null` for missing keys.  
+C# can't do that for value types (`int`, `bool`, etc.) since they can't be null  
+unless wrapped in `int?`. `TryGetValue` is the universal solution that works  
+for both value types and reference types.
+</DartEquivalent>
+
+## Dictionary Initialization Patterns
+
+```csharp
+// Collection initializer (classic)
+var config = new Dictionary<string, string>
+{
+    { "host", "localhost" },
+    { "port", "5432" },
+    { "db", "myapp" },
+};
+
+// Index initializer (C# 6+ — more readable, same result)
+var config2 = new Dictionary<string, string>
+{
+    ["host"] = "localhost",
+    ["port"] = "5432",
+    ["db"] = "myapp",
+};
+
+// C# 12 collection expression (new syntax, same type)
+// Note: Dictionary doesn't support collection expression syntax directly yet
+// but you can use it with spread from another dictionary
+var extra = new Dictionary<string, string> { ["timeout"] = "30" };
+// var merged = new Dictionary<string, string> { ..config, ..extra }; // not yet in C#
+// Use this instead:
+var merged = new Dictionary<string, string>(config);
+foreach (var kv in extra) merged[kv.Key] = kv.Value;
+```
+
+## AddOrUpdate Patterns
+
+A very common operation: add a key if it doesn't exist, or update if it does.
+
+```csharp
+var wordCount = new Dictionary<string, int>();
+var words = "the quick brown fox the quick fox fox".Split();
+
+foreach (var word in words)
+{
+    // Pattern 1: TryGetValue + assign
+    if (wordCount.TryGetValue(word, out int count))
+        wordCount[word] = count + 1;
+    else
+        wordCount[word] = 1;
+
+    // Pattern 2: index read (returns default for missing) — int defaults to 0
+    // NOTE: This still throws for missing keys for non-value types!
+    // Don't use this for Dictionary<string, string>
+
+    // Pattern 3: GetValueOrDefault (cleanest for value types)
+    wordCount[word] = wordCount.GetValueOrDefault(word) + 1;
+}
+
+// Pattern 4: CollectionsMarshal.GetValueRefOrAddDefault (advanced, .NET 6+)
+// For high-performance scenarios avoiding double-lookup on update
+```
+
+## Iterating Dictionaries
+
+```csharp
+var scores = new Dictionary<string, int>
+{
+    ["Alice"] = 95, ["Bob"] = 87, ["Carol"] = 92
+};
+
+// Iterate KeyValuePair<K,V> — classic
+foreach (KeyValuePair<string, int> kv in scores)
+{
+    Console.WriteLine($"{kv.Key}: {kv.Value}");
+}
+
+// Deconstruct to (key, value) — modern, cleaner
+foreach (var (name, score) in scores)
+{
+    Console.WriteLine($"{name}: {score}");
+}
+
+// Keys only
+foreach (string name in scores.Keys)
+    Console.WriteLine(name);
+
+// Values only
+foreach (int score in scores.Values)
+    Console.WriteLine(score);
+
+// Keys and Values as collections
+List<string> allNames = scores.Keys.ToList();
+List<int> allScores = scores.Values.ToList();
+```
+
+<ConceptCallout type="same">
+Iterating over `.Keys`, `.Values`, and `.entries` (C# calls it the dictionary itself, yielding `KeyValuePair`) works identically to Dart. The deconstruction syntax `var (key, value) in dict` is equivalent to Dart's `for (var MapEntry(key: k, value: v) in map.entries)` pattern.
+</ConceptCallout>
+
+## HashSet&lt;T&gt;: Fast Membership Testing
+
+`HashSet<T>` is C#'s `Set<T>`. Same concept: stores unique elements, O(1) add/contains/remove.
+
+<CodeComparison>
+```dart
+// Dart Set
+final visited = <String>{};
+visited.add('home');
+visited.add('about');
+visited.add('home');  // duplicate ignored
+
+print(visited.contains('home'));  // true
+print(visited.length);            // 2
+
+// Set operations
+final a = {1, 2, 3, 4};
+final b = {3, 4, 5, 6};
+
+print(a.intersection(b));        // {3, 4}
+print(a.union(b));               // {1, 2, 3, 4, 5, 6}
+print(a.difference(b));          // {1, 2}
+```
+
+```csharp
+// C# HashSet
+var visited = new HashSet<string>();
+visited.Add("home");
+visited.Add("about");
+visited.Add("home");  // duplicate ignored, returns false
+
+Console.WriteLine(visited.Contains("home"));  // true
+Console.WriteLine(visited.Count);             // 2
+
+// Set operations (mutating — modifies visited in place)
+var a = new HashSet<int> { 1, 2, 3, 4 };
+var b = new HashSet<int> { 3, 4, 5, 6 };
+
+var intersection = new HashSet<int>(a);
+intersection.IntersectWith(b);   // a ∩ b = {3, 4}
+
+var union = new HashSet<int>(a);
+union.UnionWith(b);              // a ∪ b = {1, 2, 3, 4, 5, 6}
+
+var diff = new HashSet<int>(a);
+diff.ExceptWith(b);              // a \ b = {1, 2}
+
+// Non-mutating (LINQ-based)
+var intersect2 = a.Intersect(b).ToHashSet();  // new set
+```
+</CodeComparison>
+
+<ConceptCallout type="different">
+Dart's set operations (`intersection`, `union`, `difference`) return **new sets** without modifying the originals. C#'s `HashSet` methods (`IntersectWith`, `UnionWith`, `ExceptWith`) **mutate in place**. To get new sets without mutation, use LINQ: `a.Intersect(b).ToHashSet()`. This is a common gotcha.
+</ConceptCallout>
+
+## HashSet Return Values Matter
+
+```csharp
+var seen = new HashSet<string>();
+
+// Add returns bool — true if added (new), false if already existed
+bool isNew = seen.Add("Alice");   // true
+bool isDup = seen.Add("Alice");   // false — already in set
+
+// This is very useful for duplicate detection:
+var items = new List<string> { "a", "b", "a", "c", "b", "d" };
+var duplicates = new List<string>();
+var seenSoFar = new HashSet<string>();
+
+foreach (var item in items)
+{
+    if (!seenSoFar.Add(item))  // if Add returns false, it's a duplicate
+        duplicates.Add(item);
+}
+
+Console.WriteLine(string.Join(", ", duplicates));  // a, b
+```
+
+<ConceptCallout type="tip">
+`HashSet.Add()` returning `bool` is a clean way to do duplicate detection in a single pass. Dart's `Set.add()` also returns `bool`, so this pattern is identical in both languages. Use it.
+</ConceptCallout>
+
+## SortedDictionary and SortedSet
+
+These have no direct Dart equivalent. They maintain keys/elements in sorted order at all times:
+
+```csharp
+// SortedDictionary — like Dictionary but keys are always sorted
+var sorted = new SortedDictionary<string, int>
+{
+    ["Charlie"] = 85,
+    ["Alice"] = 95,
+    ["Bob"] = 87,
+};
+
+// Iteration is always in key-sorted order
+foreach (var (name, score) in sorted)
+    Console.WriteLine($"{name}: {score}");
+// Output: Alice: 95, Bob: 87, Charlie: 85  (alphabetical!)
+
+// SortedSet — like HashSet but elements always sorted
+var sortedNames = new SortedSet<string> { "Charlie", "Alice", "Bob" };
+Console.WriteLine(string.Join(", ", sortedNames));  // Alice, Bob, Charlie
+
+// GetViewBetween — get a range of elements (no equivalent in HashSet)
+var bToC = sortedNames.GetViewBetween("B", "C");
+// Returns a live view of elements in ["B", "C") range
+
+// SortedSet with custom comparer
+var caseInsensitive = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+caseInsensitive.Add("banana");
+caseInsensitive.Add("Apple");
+caseInsensitive.Add("cherry");
+// Sorted: Apple, banana, cherry (case-insensitive)
+```
+
+<ConceptCallout type="new">
+**SortedDictionary and SortedSet** are backed by a **balanced binary tree** (red-black tree), not a hash table. This gives O(log n) operations instead of O(1), but ensures elements are always in sorted order. There is no Dart equivalent — in Dart you would need to manually sort a Map's keys when iterating. Use these when you need to iterate in order frequently, or when you need range queries.
+</ConceptCallout>
+
+## Performance Comparison Table
+
+| Type | Add | Lookup | Iteration | Sorted? |
+|------|-----|--------|-----------|---------|
+| `Dictionary<K,V>` | O(1) avg | O(1) avg | O(n) random order | No |
+| `SortedDictionary<K,V>` | O(log n) | O(log n) | O(n) sorted | Yes |
+| `HashSet<T>` | O(1) avg | O(1) avg | O(n) random order | No |
+| `SortedSet<T>` | O(log n) | O(log n) | O(n) sorted | Yes |
+
+## ConcurrentDictionary Teaser
+
+For multi-threaded scenarios (ASP.NET route handlers, background services), `Dictionary<K,V>` is **not thread-safe**. The solution is `ConcurrentDictionary<K,V>`:
+
+```csharp
+using System.Collections.Concurrent;
+
+// Thread-safe dictionary — safe to use from multiple threads simultaneously
+var cache = new ConcurrentDictionary<string, User>();
+
+// GetOrAdd — atomic: get existing or add new (great for caches)
+var user = cache.GetOrAdd("user-123", id => LoadUserFromDatabase(id));
+
+// AddOrUpdate — atomic update
+cache.AddOrUpdate(
+    key: "user-123",
+    addValue: new User("New User"),
+    updateValueFactory: (key, existing) => existing with { LastSeen = DateTime.Now }
+);
+
+// TryRemove
+if (cache.TryRemove("user-123", out User? removed))
+    Console.WriteLine($"Removed {removed.Name}");
+```
+
+<ConceptCallout type="info">
+`ConcurrentDictionary` will be covered in depth during the async/concurrency module. For now, know it exists and is the go-to for any shared-state dictionary in multi-threaded code. Regular `Dictionary` in ASP.NET controllers is fine because each request gets its own scope — but static/singleton dictionaries need `ConcurrentDictionary`.
+</ConceptCallout>
+
+## Complete Working Example
+
+```csharp
+using System;
+using System.Collections.Generic;
+
+// Inventory management system demonstrating Dictionary and HashSet
+var inventory = new Dictionary<string, Product>
+{
+    ["SKU-001"] = new("Widget A", 100, 9.99m),
+    ["SKU-002"] = new("Gadget B", 50, 24.99m),
+    ["SKU-003"] = new("Doohickey C", 200, 4.99m),
+};
+
+var discontinuedSkus = new HashSet<string> { "SKU-002" };
+var lowStockThreshold = 75;
+
+// Add a new product
+inventory["SKU-004"] = new("Thingamajig D", 30, 14.99m);
+
+// Update quantity safely
+if (inventory.TryGetValue("SKU-001", out var widget))
+{
+    inventory["SKU-001"] = widget with { Quantity = widget.Quantity - 10 };
+}
+
+// Report: active products sorted by name
+var activeSorted = new SortedDictionary<string, Product>();
+foreach (var (sku, product) in inventory)
+{
+    if (!discontinuedSkus.Contains(sku))
+        activeSorted[product.Name] = product;
+}
+
+Console.WriteLine("=== Active Inventory ===");
+foreach (var (name, product) in activeSorted)
+{
+    string stockStatus = product.Quantity <= lowStockThreshold ? " [LOW STOCK]" : "";
+    Console.WriteLine($"{name,-20} Qty: {product.Quantity,4}  Price: ${product.Price:F2}{stockStatus}");
+}
+
+// Total inventory value
+decimal totalValue = 0;
+foreach (var (sku, product) in inventory)
+{
+    if (!discontinuedSkus.Contains(sku))
+        totalValue += product.Quantity * product.Price;
+}
+Console.WriteLine($"\nTotal active inventory value: ${totalValue:F2}");
+
+record Product(string Name, int Quantity, decimal Price);
+```
+
+<ExerciseBlock>
+**Exercise: Word Frequency Counter**
+
+Write a program that reads a paragraph of text and produces a word frequency report.
+
+Requirements:
+1. Split the input text into words (use `.Split()` on spaces and punctuation)
+2. Normalize: convert to lowercase, strip punctuation
+3. Count occurrences using `Dictionary<string, int>` with `GetValueOrDefault`
+4. Store "stop words" (the, a, an, is, it, in, on, at, to, of) in a `HashSet<string>`
+5. Filter out stop words from results
+6. Use `SortedDictionary<int, List<string>>` to group words by frequency
+7. Print the top 5 most frequent non-stop words with their counts
+
+Extension: Find all words that appear more than once and store them in a `HashSet<string>`. Then report how many unique non-stop words appear exactly once vs. more than once.
+</ExerciseBlock>
+
+## Key Takeaways
+
+- `Dictionary<K,V>` index access **throws** on missing keys — always use `TryGetValue` or `GetValueOrDefault`
+- `TryGetValue` is a single lookup: prefer it over `ContainsKey` + index
+- `HashSet.Add()` returns `bool` — use this for duplicate detection
+- Set operations in C# (`IntersectWith`, `UnionWith`) **mutate in place** — copy first if you need the originals
+- `SortedDictionary` and `SortedSet` maintain sorted order via a binary tree (O(log n) ops) — no Dart equivalent
+- For thread-safe scenarios, use `ConcurrentDictionary` (covered in depth later)

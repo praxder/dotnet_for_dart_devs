@@ -1,0 +1,345 @@
+---
+title: "Pattern Matching Deep Dive"
+day: 12
+week: 3
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart 3 patterns: type, record, list patterns"
+csharpConcept: "C# patterns: type, property, relational, logical, positional"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Yesterday you saw switch expressions in action. Today we go deep on the **pattern system** that powers them. C# has a rich set of patterns that go beyond what Dart 3 offers — particularly property patterns, which let you match on object structure in an incredibly readable way.
+
+## The Pattern Landscape
+
+C# patterns can be grouped into categories. Here's the full map we'll work through today:
+
+| Pattern | Example | Dart Equivalent |
+|---------|---------|----------------|
+| Type pattern | `is Dog d` | `case Dog d:` |
+| Declaration pattern | `Dog d` in switch | same |
+| Var pattern | `var x` | `var x` in switch |
+| Constant pattern | `42`, `"hello"`, `null` | constant values |
+| Relational pattern | `> 0`, `<= 100` | `> 0` (Dart 3) |
+| Logical pattern | `and`, `or`, `not` | `&&`, `\|\|`, `!` |
+| Property pattern | `{ Name: "Rex" }` | partial record matching (limited) |
+| Positional pattern | `(var x, var y)` | record destructuring |
+| List pattern | `[1, 2, ..]` | list patterns (Dart 3) |
+| Var pattern with guard | `var x when x > 0` | `x when x > 0` |
+
+## Type Patterns
+
+The type pattern tests whether a value is of a specific type and optionally **binds** it to a new variable:
+
+```csharp
+object obj = GetSomething();
+
+// is-expression with type pattern (inline, outside switch)
+if (obj is string s)
+{
+    Console.WriteLine(s.ToUpper()); // s is in scope here
+}
+
+// In a switch expression
+string Describe(object obj) => obj switch
+{
+    string s => $"String of length {s.Length}",
+    int i    => $"Integer: {i}",
+    bool b   => $"Boolean: {b}",
+    null     => "null",
+    _        => "Something else"
+};
+```
+
+<ConceptCallout type="tip">
+The `is` expression with a pattern binding is one of the most common C# idioms you'll encounter. `if (obj is string s)` both tests the type **and** binds the cast result in one step. No separate cast needed.
+</ConceptCallout>
+
+<DartEquivalent>
+Dart 3 type patterns look nearly the same:
+
+```dart
+String describe(Object? obj) => switch (obj) {
+  String s => 'String of length ${s.length}',
+  int i    => 'Integer: $i',
+  bool b   => 'Boolean: $b',
+  null     => 'null',
+  _        => 'Something else',
+};
+```
+
+The main difference: Dart uses `Object?` (nullable) while C# uses `object` (which already includes null in reference types).
+</DartEquivalent>
+
+## Relational Patterns
+
+Relational patterns test a value against a constant using comparison operators. These compose beautifully with logical patterns.
+
+```csharp
+string ClassifyTemperature(double celsius) => celsius switch
+{
+    < 0    => "Freezing",
+    < 10   => "Cold",
+    < 20   => "Cool",
+    < 30   => "Warm",
+    >= 30  => "Hot",
+    _      => "Unknown"  // unreachable but satisfies compiler for non-enums
+};
+```
+
+<ConceptCallout type="same">
+Dart 3 added relational patterns in the same release as switch expressions. The syntax is identical: `> 0`, `<= 100`, `== "hello"` all work the same in both languages.
+</ConceptCallout>
+
+## Logical Patterns: `and`, `or`, `not`
+
+C# logical patterns use the **keywords** `and`, `or`, `not` rather than symbols. This reads more naturally in pattern context:
+
+```csharp
+string ClassifyAge(int age) => age switch
+{
+    < 0             => throw new ArgumentException("Invalid age"),
+    >= 0 and < 13   => "Child",
+    >= 13 and < 18  => "Teenager",
+    >= 18 and < 65  => "Adult",
+    >= 65           => "Senior",
+};
+```
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  String classifyAge(int age) => switch (age) {
+    < 0             => throw ArgumentException('Invalid age'),
+    >= 0 && < 13    => 'Child',
+    >= 13 && < 18   => 'Teenager',
+    >= 18 && < 65   => 'Adult',
+    >= 65           => 'Senior',
+    _               => 'Unknown',
+  };
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  string ClassifyAge(int age) => age switch
+  {
+      < 0             => throw new ArgumentException("Invalid age"),
+      >= 0 and < 13   => "Child",
+      >= 13 and < 18  => "Teenager",
+      >= 18 and < 65  => "Adult",
+      >= 65           => "Senior",
+  };
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different">
+Dart uses `&&` and `||` for logical patterns. C# uses the keywords `and`, `or`, `not`. This is intentional — using symbols in pattern context would create ambiguity with the bitwise operators. The keywords make patterns self-documenting.
+</ConceptCallout>
+
+The `not` pattern is especially useful for null checking:
+
+```csharp
+// not null pattern — very common in C# code
+if (value is not null)
+{
+    // value is guaranteed non-null here
+}
+
+// In a switch
+string Process(string? input) => input switch
+{
+    null    => "No input",
+    not ""  => $"Got: {input}",
+    ""      => "Empty string",
+};
+```
+
+## Property Patterns
+
+This is where C# **really shines** over Dart. Property patterns let you match on the properties of an object without manually destructuring it:
+
+```csharp
+public record Person(string Name, int Age, string City);
+
+string Greet(Person person) => person switch
+{
+    { Name: "Alice", City: "NYC" } => "Hey Alice from New York!",
+    { Age: < 18 }                  => $"Hey young {person.Name}!",
+    { Name: var name, Age: > 65 }  => $"Good day, {name}",
+    { City: "London" }             => "Cheerio from London!",
+    var p                          => $"Hello, {p.Name}!"
+};
+```
+
+You can nest property patterns for deep matching:
+
+```csharp
+public record Address(string City, string Country);
+public record Employee(string Name, Address Address, decimal Salary);
+
+string Describe(Employee emp) => emp switch
+{
+    { Address: { Country: "USA" }, Salary: > 100_000 } 
+        => $"{emp.Name} is a high earner in the US",
+    { Address: { City: "London" } } 
+        => $"{emp.Name} works in London",
+    _ => $"{emp.Name} works somewhere else"
+};
+```
+
+<ConceptCallout type="new">
+Property patterns have no direct Dart equivalent. Dart 3 can do similar things with record patterns, but only on Dart `Record` types — not on arbitrary classes. In C#, property patterns work on **any type**, including classes with properties, records, and structs.
+</ConceptCallout>
+
+## Positional Patterns
+
+Positional patterns work with types that have a `Deconstruct` method — including tuples and records with positional parameters:
+
+```csharp
+public record Point(int X, int Y);
+
+string DescribePoint(Point p) => p switch
+{
+    (0, 0)           => "Origin",
+    (var x, 0)       => $"On X-axis at {x}",
+    (0, var y)       => $"On Y-axis at {y}",
+    (var x, var y) when x == y => $"On diagonal at {x}",
+    (var x, var y)   => $"Point ({x}, {y})"
+};
+```
+
+<DartEquivalent>
+Dart 3 record destructuring in switch patterns is essentially positional matching:
+
+```dart
+String describePoint((int, int) p) => switch (p) {
+  (0, 0)           => 'Origin',
+  (var x, 0)       => 'On X-axis at $x',
+  (0, var y)       => 'On Y-axis at $y',
+  (var x, var y) when x == y => 'On diagonal at $x',
+  (var x, var y)   => 'Point ($x, $y)',
+};
+```
+
+Very similar! C# positional patterns work on any type with `Deconstruct`, while Dart record patterns only work on Dart records.
+</DartEquivalent>
+
+## List Patterns (C# 11+)
+
+C# 11 added list patterns for matching on arrays and lists. This is one of the newer pattern types:
+
+```csharp
+int[] numbers = { 1, 2, 3, 4, 5 };
+
+string Describe(int[] arr) => arr switch
+{
+    []           => "Empty",
+    [var only]   => $"Single element: {only}",
+    [var first, var second] => $"Two elements: {first}, {second}",
+    [1, 2, ..]   => "Starts with 1, 2",
+    [.., 5]      => "Ends with 5",
+    [var h, ..var tail] => $"Head: {h}, tail has {tail.Length} items"
+};
+```
+
+<ConceptCallout type="same">
+Dart 3's list patterns are nearly identical in capability! The `..` rest pattern in C# matches `...rest` in Dart. Both allow slicing and head/tail decomposition.
+</ConceptCallout>
+
+## Combining Patterns: A Real-World Example
+
+Here's a complete example that combines multiple pattern types to process a simple command system:
+
+```csharp
+public abstract record Command;
+public record MoveCommand(string Direction, int Steps) : Command;
+public record AttackCommand(string Target, int Damage) : Command;
+public record HealCommand(int Amount) : Command;
+public record QuitCommand : Command;
+
+string ProcessCommand(Command cmd) => cmd switch
+{
+    MoveCommand { Direction: "north", Steps: > 0 } mc
+        => $"Moving north {mc.Steps} steps",
+
+    MoveCommand { Direction: var dir } mc when mc.Steps <= 0
+        => $"Invalid step count for direction {dir}",
+
+    MoveCommand(var dir, var steps)
+        => $"Moving {dir} by {steps}",
+
+    AttackCommand { Target: "boss", Damage: > 50 }
+        => "Powerful attack on the boss!",
+
+    AttackCommand(var target, var dmg)
+        => $"Attacking {target} for {dmg} damage",
+
+    HealCommand { Amount: < 0 }
+        => throw new ArgumentException("Heal amount cannot be negative"),
+
+    HealCommand(var amount)
+        => $"Healing for {amount} HP",
+
+    QuitCommand
+        => "Goodbye!",
+
+    null
+        => throw new ArgumentNullException(nameof(cmd))
+};
+```
+
+This single switch expression uses: type patterns, property patterns, positional patterns, relational patterns, logical patterns (via `when`), and exception throwing.
+
+<ExerciseBlock>
+**Exercise 1: HTTP Response Classifier**
+
+Create a record `HttpResponse(int StatusCode, string Body, bool HasContent)`. Write a method `ClassifyResponse(HttpResponse response)` using a switch expression with property patterns that:
+- Matches `{ StatusCode: 200, HasContent: true }` → "Success with data"
+- Matches `{ StatusCode: 200, HasContent: false }` → "Success, no data"
+- Matches `{ StatusCode: >= 400 and < 500 }` → "Client error: {code}"
+- Matches `{ StatusCode: >= 500 }` → "Server error: {code}"
+- Default → "Unexpected response"
+
+**Exercise 2: Expression Tree Evaluator**
+
+Define:
+```csharp
+abstract record Expr;
+record Num(double Value) : Expr;
+record Add(Expr Left, Expr Right) : Expr;
+record Mul(Expr Left, Expr Right) : Expr;
+record Neg(Expr Operand) : Expr;
+```
+
+Write a recursive `double Evaluate(Expr expr)` method using switch expression with positional patterns. For example, `Evaluate(Add(Num(3), Mul(Num(2), Num(4))))` should return `11`.
+
+**Exercise 3: List Pattern Challenges**
+
+Write a method `DescribeSequence(int[] arr)` that uses list patterns to detect:
+- Empty array → "empty"
+- Single element → "singleton: {n}"
+- Two identical elements `[n, n]` → "pair of {n}"
+- Starts with 0 → "zero-prefixed sequence"
+- Ends with 0 → "zero-terminated sequence"
+- Strictly increasing first three `[a, b, c, ..]` where `b > a && c > b` — use a `when` guard → "increasing start"
+- Everything else → "general sequence of length {n}"
+</ExerciseBlock>
+
+## Key Takeaways
+
+- **Type patterns** (`is Dog d`, `Dog d` in switch) bind and cast simultaneously
+- **Relational patterns** (`> 0`, `<= 100`) work identically to Dart 3
+- **Logical patterns** use keywords `and`/`or`/`not` instead of `&&`/`||`/`!`
+- **Property patterns** (`{ Name: "Rex" }`) are a C# superpower with no direct Dart equivalent on arbitrary classes
+- **Positional patterns** work on anything with a `Deconstruct` method
+- **List patterns** use `..` as the rest/spread operator, similar to Dart 3
+- Patterns can be **nested and combined** to create expressive, readable matching logic

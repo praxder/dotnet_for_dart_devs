@@ -1,0 +1,214 @@
+---
+title: "ASP.NET Core: Minimal APIs"
+day: 73
+week: 15
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "shelf, dart_frog — Dart HTTP server packages"
+csharpConcept: "Minimal API, MapGet/Post, route parameters, IResult, OpenAPI/Swagger"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Minimal APIs are the modern, concise way to build HTTP APIs in .NET 6+. They're inspired by frameworks like Express.js and Dart's `shelf` — route + handler, with all the .NET infrastructure (DI, middleware, OpenAPI) available.
+
+## Your First Minimal API
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: dart_frog
+  import 'package:dart_frog/dart_frog.dart';
+
+  Handler get onRequest => (context) async {
+    return Response.json(body: {'message': 'Hello, World!'});
+  };
+
+  // Or with shelf:
+  var handler = (Request req) => Response.ok('Hello!');
+  await shelf_io.serve(handler, 'localhost', 8080);
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Program.cs — entire working API in ~10 lines
+  var builder = WebApplication.CreateBuilder(args);
+  builder.Services.AddEndpointsApiExplorer();
+  builder.Services.AddSwaggerGen();
+
+  var app = builder.Build();
+  app.UseSwagger();
+  app.UseSwaggerUI();
+
+  app.MapGet("/", () => "Hello, World!");
+  app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
+  await app.RunAsync();
+  ```
+  </div>
+</CodeComparison>
+
+## Route Parameters and Return Types
+
+```csharp
+// Route parameters — embedded in URL
+app.MapGet("/users/{id:int}", (int id) =>
+{
+    var user = userService.GetById(id);
+    return user is not null ? Results.Ok(user) : Results.NotFound();
+});
+
+// Query string parameters — optional by default
+app.MapGet("/products", (
+    string? category,     // ?category=electronics
+    decimal? maxPrice,    // ?maxPrice=99.99
+    int page = 1,         // ?page=2 (default: 1)
+    int pageSize = 20) => // ?pageSize=50
+{
+    return Results.Ok(productService.Search(category, maxPrice, page, pageSize));
+});
+
+// Route constraints
+app.MapGet("/orders/{id:guid}",     (Guid id) => GetOrder(id));
+app.MapGet("/report/{year:int:min(2020)}", (int year) => GetReport(year));
+
+// Multiple HTTP methods
+app.MapGet("/items/{id}", GetItem);
+app.MapPost("/items", CreateItem);
+app.MapPut("/items/{id}", UpdateItem);
+app.MapDelete("/items/{id}", DeleteItem);
+```
+
+## IResult — Rich Responses
+
+```csharp
+// Results — static factory for HTTP responses
+app.MapGet("/users/{id}", async (int id, IUserService users) =>
+{
+    var user = await users.GetByIdAsync(id);
+
+    return user switch
+    {
+        null => Results.NotFound(new { message = $"User {id} not found" }),
+        _    => Results.Ok(user)
+    };
+});
+
+// Typed results — better OpenAPI documentation
+app.MapPost("/users", async (CreateUserRequest request, IUserService users)
+    => TypedResults.Created($"/users/{request.Id}", await users.CreateAsync(request)));
+
+// Common IResult types:
+Results.Ok(data)              // 200 with body
+Results.Created(uri, data)    // 201 with Location header
+Results.NoContent()           // 204
+Results.BadRequest(errors)    // 400
+Results.Unauthorized()        // 401
+Results.Forbidden()           // 403
+Results.NotFound()            // 404
+Results.Conflict(message)     // 409
+Results.UnprocessableEntity(errors)  // 422
+Results.Problem(detail)       // RFC 7807 Problem Details
+```
+
+## Request Body Binding
+
+```csharp
+// JSON body — automatic deserialization
+app.MapPost("/orders", async (CreateOrderRequest request, IOrderService orders) =>
+{
+    var order = await orders.PlaceAsync(request);
+    return Results.Created($"/orders/{order.Id}", order);
+});
+
+// With validation
+app.MapPost("/products", async (
+    CreateProductRequest request,
+    IValidator<CreateProductRequest> validator,
+    IProductService products) =>
+{
+    var validation = await validator.ValidateAsync(request);
+    if (!validation.IsValid)
+        return Results.ValidationProblem(validation.ToDictionary());
+
+    var product = await products.CreateAsync(request);
+    return TypedResults.Created($"/products/{product.Id}", product);
+});
+```
+
+## Route Groups — Organizing Endpoints
+
+```csharp
+// Group related endpoints — add common prefix and middleware
+var api = app.MapGroup("/api/v1")
+    .RequireAuthorization()      // apply to all routes in group
+    .WithOpenApi();
+
+var users = api.MapGroup("/users");
+users.MapGet("", GetAllUsers);
+users.MapGet("{id}", GetUser);
+users.MapPost("", CreateUser);
+users.MapPut("{id}", UpdateUser);
+users.MapDelete("{id}", DeleteUser);
+
+var orders = api.MapGroup("/orders");
+orders.MapGet("", GetAllOrders);
+orders.MapPost("", CreateOrder);
+// ...
+
+// Even better: use extension methods to organize
+app.MapUserEndpoints()
+   .MapOrderEndpoints()
+   .MapProductEndpoints();
+
+// Extension methods in separate files
+public static class UserEndpoints
+{
+    public static IEndpointRouteBuilder MapUserEndpoints(this IEndpointRouteBuilder routes)
+    {
+        var group = routes.MapGroup("/api/users").WithTags("Users");
+        group.MapGet("", GetAll).WithName("GetAllUsers");
+        group.MapGet("{id:int}", GetById).WithName("GetUser");
+        group.MapPost("", Create).WithName("CreateUser").ProducesValidationProblem();
+        return routes;
+    }
+    // handlers as private static methods...
+}
+```
+
+## OpenAPI / Swagger
+
+```csharp
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "MyApp API",
+        Version = "v1",
+        Description = "Description here"
+    });
+});
+
+// Annotate endpoints for better docs
+app.MapGet("/orders/{id}", GetOrder)
+    .WithName("GetOrder")
+    .WithSummary("Get an order by ID")
+    .WithDescription("Returns the order with all line items")
+    .Produces<Order>(200)
+    .Produces(404)
+    .WithTags("Orders")
+    .WithOpenApi();
+```
+
+<ExerciseBlock>
+1. Build a complete CRUD API for a `Todo` resource (in-memory storage with `ConcurrentDictionary`). Implement all 5 endpoints: list all, get by ID, create, update, delete. Add Swagger documentation and test with the Swagger UI.
+2. Add request validation using `FluentValidation`: `CreateTodoRequest` requires non-empty `Title` (max 200 chars), optional `Description` (max 1000 chars), and `DueDate` must be in the future. Return 422 with the validation errors.
+3. Organize the API into route groups with `/api/v1` prefix. Add a `/health` check endpoint outside the group. Add a middleware that logs all requests with their duration using `ILogger`.
+</ExerciseBlock>

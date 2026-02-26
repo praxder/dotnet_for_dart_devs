@@ -1,0 +1,228 @@
+---
+title: "Caching: IMemoryCache and IDistributedCache"
+day: 82
+week: 17
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "SharedPreferences, Hive, custom cache implementations"
+csharpConcept: "IMemoryCache, IDistributedCache, Redis, output caching, cache stampede prevention"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+.NET has two caching abstractions: `IMemoryCache` (in-process, single server) and `IDistributedCache` (cross-server, Redis/SQL). Understanding when to use each — and the patterns that prevent cache stampedes — is essential for building fast APIs.
+
+## IMemoryCache — In-Process Caching
+
+```csharp
+// Register
+builder.Services.AddMemoryCache();
+
+// Use
+public class ProductService(IMemoryCache cache, IProductRepository repo)
+{
+    public async Task<Product?> GetByIdAsync(int id)
+    {
+        string key = $"product:{id}";
+
+        // GetOrCreateAsync — avoids double-checking
+        return await cache.GetOrCreateAsync(key, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+            entry.SlidingExpiration = TimeSpan.FromMinutes(1);
+            entry.Size = 1;  // for size-limited cache
+
+            return await repo.GetByIdAsync(id);
+        });
+    }
+
+    public void Invalidate(int id)
+        => cache.Remove($"product:{id}");
+}
+
+// Configure memory limits
+builder.Services.AddMemoryCache(options =>
+{
+    options.SizeLimit = 1024;           // max 1024 "units"
+    options.CompactionPercentage = 0.25; // remove 25% when full
+});
+```
+
+## Cache Entry Options
+
+```csharp
+var entry = new MemoryCacheEntryOptions()
+    // Absolute expiry — always expires at this time
+    .SetAbsoluteExpiration(TimeSpan.FromMinutes(10))
+
+    // Sliding expiry — expires if not accessed for this duration
+    .SetSlidingExpiration(TimeSpan.FromMinutes(2))
+
+    // Priority — what gets evicted first
+    .SetPriority(CacheItemPriority.Low)  // Low, Normal, High, NeverRemove
+
+    // Size — for size-limited cache
+    .SetSize(1)
+
+    // Callbacks — notification when evicted
+    .RegisterPostEvictionCallback((key, value, reason, state) =>
+        Console.WriteLine($"Evicted {key}: {reason}"));
+
+cache.Set("key", value, entry);
+```
+
+## IDistributedCache — Redis / Cross-Server Caching
+
+```bash
+dotnet add package Microsoft.Extensions.Caching.StackExchangeRedis
+```
+
+```csharp
+// Register Redis
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("Redis");
+    options.InstanceName = "MyApp:";  // key prefix
+});
+
+// Use IDistributedCache — stores bytes, so you serialize/deserialize
+public class ProductCache(IDistributedCache cache)
+{
+    private readonly JsonSerializerOptions _jsonOpts = new();
+
+    public async Task<Product?> GetAsync(int id, CancellationToken ct = default)
+    {
+        var bytes = await cache.GetAsync($"product:{id}", ct);
+        if (bytes is null) return null;
+
+        return JsonSerializer.Deserialize<Product>(bytes, _jsonOpts);
+    }
+
+    public async Task SetAsync(Product product, CancellationToken ct = default)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(product, _jsonOpts);
+        await cache.SetAsync(
+            $"product:{product.Id}",
+            bytes,
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10)
+            },
+            ct);
+    }
+
+    public async Task RemoveAsync(int id, CancellationToken ct = default)
+        => await cache.RemoveAsync($"product:{id}", ct);
+}
+```
+
+## Cache-Aside Pattern (Standard)
+
+```csharp
+// The standard pattern: check cache → miss → load from DB → cache → return
+public async Task<Product?> GetProductAsync(int id, CancellationToken ct = default)
+{
+    // 1. Try cache first
+    var cached = await _cache.GetAsync(id, ct);
+    if (cached is not null) return cached;
+
+    // 2. Cache miss — load from DB
+    var product = await _db.Products.FindAsync([id], ct);
+    if (product is null) return null;
+
+    // 3. Cache the result
+    await _cache.SetAsync(product, ct);
+
+    return product;
+}
+```
+
+## Preventing Cache Stampede
+
+```csharp
+// Problem: 1000 requests simultaneously miss the cache → 1000 DB queries
+// Solution: SemaphoreSlim to serialize cache misses
+
+public class StampedeProtectedCache<T>(IDistributedCache cache)
+{
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
+
+    public async Task<T?> GetOrCreateAsync(
+        string key,
+        Func<Task<T>> factory,
+        DistributedCacheEntryOptions? options = null,
+        CancellationToken ct = default)
+    {
+        // Try cache without lock first (fast path)
+        var cached = await cache.GetStringAsync(key, ct);
+        if (cached is not null)
+            return JsonSerializer.Deserialize<T>(cached);
+
+        // Acquire per-key lock to serialize misses
+        var semaphore = _locks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync(ct);
+        try
+        {
+            // Double-check inside lock (another thread may have populated)
+            cached = await cache.GetStringAsync(key, ct);
+            if (cached is not null)
+                return JsonSerializer.Deserialize<T>(cached);
+
+            // Still miss — actually load
+            var value = await factory();
+            if (value is not null)
+            {
+                var serialized = JsonSerializer.Serialize(value);
+                await cache.SetStringAsync(key, serialized, options ?? new(), ct);
+            }
+            return value;
+        }
+        finally
+        {
+            semaphore.Release();
+            _locks.TryRemove(key, out _);
+        }
+    }
+}
+```
+
+## Output Caching (.NET 7+)
+
+```csharp
+// Cache entire HTTP responses
+builder.Services.AddOutputCache(options =>
+{
+    options.AddBasePolicy(builder => builder.Expire(TimeSpan.FromSeconds(60)));
+    options.AddPolicy("ProductsPage", builder =>
+        builder.Expire(TimeSpan.FromMinutes(5))
+               .SetVaryByQuery("category", "page")
+               .Tag("products"));
+});
+
+app.UseOutputCache();
+
+// Apply to endpoints
+app.MapGet("/api/products", GetProducts)
+    .CacheOutput("ProductsPage");
+
+// Invalidate on mutation
+app.MapPost("/api/products", async (CreateProductRequest req,
+    IOutputCacheStore store, CancellationToken ct) =>
+{
+    var product = await CreateProductAsync(req);
+    await store.EvictByTagAsync("products", ct);  // invalidate cache
+    return Results.Created($"/api/products/{product.Id}", product);
+});
+```
+
+<ExerciseBlock>
+1. Implement a `CategoryTreeCache` that caches a deeply-nested product category tree. Use `IMemoryCache` with a sliding expiration of 30 minutes. Add a `Refresh()` method that forces a reload from the database. Verify via logging that the database isn't hit on cache hits.
+2. Set up Redis locally (via Docker: `docker run -d -p 6379:6379 redis`) and implement `IDistributedCache`-based caching for a user profile service. Include `GetAsync`, `SetAsync`, and `InvalidateAsync` methods.
+3. Demonstrate the cache stampede: create a fake slow database (200ms delay), run 100 concurrent requests for the same uncached resource, and show how many DB calls are made. Then add the `SemaphoreSlim` protection and show only 1 DB call.
+</ExerciseBlock>

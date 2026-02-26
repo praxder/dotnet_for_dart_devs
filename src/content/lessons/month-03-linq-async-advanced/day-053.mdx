@@ -1,0 +1,208 @@
+---
+title: "Delegates, Func, and Action"
+day: 53
+week: 11
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Function types, typedef, Function.apply()"
+csharpConcept: "delegate, Func<T,TResult>, Action<T>, Predicate<T>, multicast delegates"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart treats functions as first-class objects natively. C# does too, but through an explicit **delegate** system. Understanding delegates is essential because they underpin events, callbacks, LINQ lambdas, and async patterns throughout the BCL.
+
+## Delegates vs Dart Function Types
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: functions are first-class natively
+  typedef Transformer = String Function(String input);
+
+  void apply(String text, Transformer t) => print(t(text));
+  apply('hello', (s) => s.toUpperCase()); // 'HELLO'
+
+  // Store a function
+  Transformer upper = (s) => s.toUpperCase();
+  Transformer lower = (s) => s.toLowerCase();
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: custom delegate type
+  delegate string Transformer(string input);
+
+  void Apply(string text, Transformer t) => Console.WriteLine(t(text));
+  Apply("hello", s => s.ToUpper());  // 'HELLO'
+
+  // Or use built-in generic delegate types (preferred)
+  Func<string, string> upper = s => s.ToUpper();
+  Func<string, string> lower = s => s.ToLower();
+  ```
+  </div>
+</CodeComparison>
+
+## The Built-In Delegate Types
+
+```csharp
+// Func<TResult> — takes no args, returns TResult
+Func<int> getCount = () => _items.Count;
+
+// Func<T, TResult> — takes T, returns TResult (like Dart's T Function(T))
+Func<int, int> square = n => n * n;
+Func<string, bool> isLong = s => s.Length > 10;
+
+// Func<T1, T2, TResult> — up to 16 type parameters
+Func<int, int, int> add = (a, b) => a + b;
+Func<string, int, string> repeat = (s, n) => string.Concat(Enumerable.Repeat(s, n));
+
+// Action — returns void
+Action greet = () => Console.WriteLine("Hello");
+Action<string> print = s => Console.WriteLine(s);
+Action<int, int> printSum = (a, b) => Console.WriteLine(a + b);
+
+// Predicate<T> — Func<T, bool> alias (mostly used with List.FindAll etc.)
+Predicate<int> isEven = n => n % 2 == 0;
+List<int> evens = numbers.FindAll(isEven);
+```
+
+## Custom Delegate Types
+
+Define custom delegates when:
+1. The signature doesn't fit `Func`/`Action` (e.g., `ref` or `out` parameters)
+2. You want a meaningful name for a specific concept
+
+```csharp
+// Custom delegate with ref parameter (can't use Func)
+delegate bool TryParse<T>(string input, out T result);
+
+// Event handler pattern — always use EventHandler<T> but understand the type
+delegate void EventHandler<TEventArgs>(object? sender, TEventArgs e);
+
+// Named delegate for clarity in complex APIs
+delegate Money DiscountCalculator(Order order, Customer customer);
+
+// Usage
+DiscountCalculator loyaltyDiscount = (order, customer) =>
+    customer.IsLoyalMember
+        ? order.Subtotal * 0.10m
+        : Money.Zero;
+```
+
+## Multicast Delegates
+
+```csharp
+// C# delegates can hold MULTIPLE methods (unlike Dart)
+Action<string> log = s => Console.WriteLine($"LOG: {s}");
+Action<string> audit = s => File.AppendAllText("audit.log", s + "\n");
+
+// Combine with + or +=
+Action<string> combined = log + audit;
+combined("User logged in");
+// Calls log("User logged in") then audit("User logged in")
+
+// Remove with - or -=
+Action<string> logOnly = combined - audit;
+logOnly("Debug info");  // only logs to console
+
+// Check invocation list
+var list = combined.GetInvocationList();
+Console.WriteLine(list.Length);  // 2
+
+// Return value for multicast: only LAST delegate's return value is used
+Func<int, int> first = n => n + 1;
+Func<int, int> second = n => n * 2;
+Func<int, int> both = first + second;
+int result = both(5);  // 10 (second's result — 5*2)
+// first(5) = 6 is discarded!
+```
+
+<ConceptCallout type="gotcha" title="Multicast Return Value">
+When a multicast delegate has a return type, only the LAST method's return value is captured. If you need all results, iterate `GetInvocationList()` and call each individually, or use a custom invocation loop.
+</ConceptCallout>
+
+## Delegates as Strategy Pattern
+
+```csharp
+// Strategy pattern — inject behavior as a delegate
+public class DataProcessor
+{
+    private readonly Func<string, string> _transform;
+    private readonly Predicate<string> _filter;
+    private readonly Action<string> _output;
+
+    public DataProcessor(
+        Func<string, string> transform,
+        Predicate<string> filter,
+        Action<string> output)
+    {
+        _transform = transform;
+        _filter = filter;
+        _output = output;
+    }
+
+    public void Process(IEnumerable<string> items)
+    {
+        foreach (var item in items)
+        {
+            var transformed = _transform(item);
+            if (_filter(transformed))
+                _output(transformed);
+        }
+    }
+}
+
+// Configure behavior via delegates
+var processor = new DataProcessor(
+    transform: s => s.Trim().ToUpper(),
+    filter: s => s.Length > 3,
+    output: s => Console.WriteLine($">> {s}")
+);
+
+processor.Process(new[] { "  hello  ", "hi", "  world  " });
+// >> HELLO
+// >> WORLD
+```
+
+## Higher-Order Functions
+
+```csharp
+// Function that returns a function
+Func<int, int> Multiplier(int factor) => n => n * factor;
+
+var double_ = Multiplier(2);
+var triple = Multiplier(3);
+Console.WriteLine(double_(5));  // 10
+Console.WriteLine(triple(5));   // 15
+
+// Function composition
+Func<T, TResult> Compose<T, TMid, TResult>(
+    Func<T, TMid> first,
+    Func<TMid, TResult> second)
+    => input => second(first(input));
+
+var parseAndDouble = Compose<string, int, int>(int.Parse, n => n * 2);
+Console.WriteLine(parseAndDouble("21"));  // 42
+
+// Partial application
+Func<T1, Func<T2, TResult>> Curry<T1, T2, TResult>(Func<T1, T2, TResult> f)
+    => a => b => f(a, b);
+
+var curriedAdd = Curry<int, int, int>((a, b) => a + b);
+var addFive = curriedAdd(5);
+Console.WriteLine(addFive(3));   // 8
+Console.WriteLine(addFive(10));  // 15
+```
+
+<ExerciseBlock>
+1. Implement a `Pipeline<T>` class that holds a `List<Func<T, T>>` of transformations. Add `AddStep(Func<T, T>)` and `Execute(T input)` methods. Use it to build a string processing pipeline: trim, uppercase, replace spaces with underscores, add prefix.
+2. Write a `Memoize<T, TResult>(Func<T, TResult> func)` that wraps any `Func` with caching. Verify it calls the underlying function only once per unique input.
+3. Create a multicast `Action<LogEntry>` that writes to console, a file, and a list buffer simultaneously. Use `GetInvocationList()` to verify all three are registered. Then demonstrate removing one handler.
+</ExerciseBlock>

@@ -1,0 +1,363 @@
+---
+title: "Exception Handling and Exception Filters"
+day: 13
+week: 3
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart try/catch/finally, on Type catch(e)"
+csharpConcept: "C# try/catch/finally, catch(Exception e) when (filter)"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Exception handling in C# will feel familiar coming from Dart — the structure is the same. But C# adds two powerful features Dart lacks: **exception filters** with `when`, and a distinct behavior when **re-throwing** exceptions. Understanding these differences is critical for writing correct, debuggable C# code.
+
+## The Exception Hierarchy
+
+In Dart, anything can be thrown. In C#, everything thrown must derive from `System.Exception`. This is a fundamental difference.
+
+```
+System.Exception
+├── System.SystemException
+│   ├── System.ArgumentException
+│   │   └── System.ArgumentNullException
+│   │   └── System.ArgumentOutOfRangeException
+│   ├── System.InvalidOperationException
+│   ├── System.NullReferenceException
+│   ├── System.IndexOutOfRangeException
+│   ├── System.NotImplementedException
+│   ├── System.NotSupportedException
+│   ├── System.OverflowException
+│   └── System.IO.IOException
+│       └── System.IO.FileNotFoundException
+└── System.ApplicationException (don't use — legacy)
+```
+
+<ConceptCallout type="different">
+In Dart you can `throw` any object — strings, numbers, custom classes that don't extend anything. In C#, you **must** throw an object that derives from `System.Exception`. The compiler enforces this. Custom exceptions should extend `Exception` (or a subclass).
+</ConceptCallout>
+
+## Basic try/catch/finally
+
+The structure is nearly identical to Dart:
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  try {
+    final result = int.parse(userInput);
+    print('Parsed: $result');
+  } on FormatException catch (e) {
+    print('Bad format: ${e.message}');
+  } on RangeError catch (e) {
+    print('Out of range: $e');
+  } catch (e, stackTrace) {
+    print('Unknown error: $e');
+    print(stackTrace);
+  } finally {
+    print('Always runs');
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  try
+  {
+      int result = int.Parse(userInput);
+      Console.WriteLine($"Parsed: {result}");
+  }
+  catch (FormatException e)
+  {
+      Console.WriteLine($"Bad format: {e.Message}");
+  }
+  catch (OverflowException e)
+  {
+      Console.WriteLine($"Out of range: {e.Message}");
+  }
+  catch (Exception e)
+  {
+      Console.WriteLine($"Unknown error: {e.Message}");
+      Console.WriteLine(e.StackTrace);
+  }
+  finally
+  {
+      Console.WriteLine("Always runs");
+  }
+  ```
+  </div>
+</CodeComparison>
+
+Key syntax differences:
+- Dart: `on FormatException catch (e)` — type before `catch`
+- C#: `catch (FormatException e)` — type inside `catch` parens
+- The **most specific** exception types must come first in both languages
+
+## The Exception Object
+
+Every C# exception has standard properties you'll use constantly:
+
+```csharp
+catch (Exception e)
+{
+    Console.WriteLine(e.Message);       // Human-readable description
+    Console.WriteLine(e.StackTrace);    // Full stack trace as string
+    Console.WriteLine(e.GetType().Name); // "FormatException"
+    
+    // Inner exception — the cause when wrapping exceptions
+    if (e.InnerException != null)
+    {
+        Console.WriteLine($"Caused by: {e.InnerException.Message}");
+    }
+}
+```
+
+## Exception Filters: The `when` Clause
+
+This is a C# feature with **no Dart equivalent**. Exception filters let you add a boolean condition to a catch block — the catch only executes if the condition is true:
+
+```csharp
+try
+{
+    await CallExternalApiAsync();
+}
+catch (HttpRequestException e) when (e.StatusCode == HttpStatusCode.NotFound)
+{
+    Console.WriteLine("Resource not found");
+}
+catch (HttpRequestException e) when (e.StatusCode == HttpStatusCode.Unauthorized)
+{
+    Console.WriteLine("Not authorized");
+}
+catch (HttpRequestException e)
+{
+    Console.WriteLine($"Other HTTP error: {e.StatusCode}");
+}
+```
+
+This is cleaner than nesting `if` statements inside a single catch block. But there's a **critical behavioral difference** beyond just syntax:
+
+<ConceptCallout type="new">
+**Exception filters do not unwind the stack before the filter evaluates.** This means if the filter's condition is false, the exception continues propagating as if this catch block didn't exist — and the original stack trace is preserved. If you caught-and-rethrew instead, you'd lose the original stack trace. Filters are the idiomatic way to do conditional catching in C#.
+</ConceptCallout>
+
+```csharp
+// Approach 1: Filter (GOOD — preserves full stack trace on failure)
+catch (SqlException e) when (e.Number == 1205) // deadlock
+{
+    await RetryAsync();
+}
+
+// Approach 2: Catch-and-rethrow (BAD — if condition false, stack trace is already partially unwound)
+catch (SqlException e)
+{
+    if (e.Number != 1205) throw; // throw without ex preserves trace
+    await RetryAsync();
+}
+```
+
+Filters can also be used for logging without catching:
+
+```csharp
+// This NEVER catches — the filter always returns false
+// But the side effect (logging) still runs before the exception propagates
+catch (Exception e) when (LogException(e) == false)
+{
+    // Never reached
+}
+
+bool LogException(Exception e)
+{
+    _logger.LogError(e, "Unhandled exception");
+    return false; // Always return false to let exception propagate
+}
+```
+
+<ConceptCallout type="gotcha">
+The logging-via-filter trick is a real pattern in production C# code. It lets you inspect exceptions at every level of the call stack without catching them, which is invaluable for debugging. You'll see it in framework code.
+</ConceptCallout>
+
+## Re-throwing: `throw` vs `throw ex`
+
+This is one of the most important gotchas for C# newcomers. There are two ways to re-throw an exception, and they behave very differently:
+
+```csharp
+// Method A: Re-throw with throw (CORRECT — preserves original stack trace)
+catch (Exception e)
+{
+    LogError(e);
+    throw;  // <-- no variable! preserves the ORIGINAL stack trace
+}
+
+// Method B: Re-throw with throw ex (WRONG — resets stack trace to THIS line)
+catch (Exception e)
+{
+    LogError(e);
+    throw e;  // <-- with variable! stack trace now starts HERE, losing origin info
+}
+```
+
+<ConceptCallout type="gotcha">
+`throw e` (with the variable) **destroys the original stack trace**. The exception's `StackTrace` property is reset to the current location. This makes debugging much harder. Always use bare `throw` when you want to re-throw the same exception. In Dart, `rethrow` is the equivalent of C#'s bare `throw`.
+</ConceptCallout>
+
+<DartEquivalent>
+Dart's `rethrow` keyword is equivalent to C#'s bare `throw`:
+
+```dart
+// Dart
+try {
+  doSomething();
+} catch (e) {
+  logError(e);
+  rethrow; // preserves original stack trace
+}
+```
+
+```csharp
+// C# equivalent
+try
+{
+    DoSomething();
+}
+catch (Exception e)
+{
+    LogError(e);
+    throw; // bare throw — same as Dart's rethrow
+}
+```
+</DartEquivalent>
+
+## Wrapping Exceptions
+
+When you catch a low-level exception and want to throw a higher-level one, use `InnerException` to preserve the cause:
+
+```csharp
+public User LoadUser(int id)
+{
+    try
+    {
+        return _database.GetUser(id);
+    }
+    catch (SqlException ex)
+    {
+        // Wrap the low-level exception in a domain-level one
+        throw new UserNotFoundException($"User {id} could not be loaded", ex);
+    }
+}
+
+// Custom exception class
+public class UserNotFoundException : Exception
+{
+    public UserNotFoundException(string message, Exception innerException)
+        : base(message, innerException) { }
+}
+```
+
+## Creating Custom Exceptions
+
+The .NET convention for custom exceptions is to follow this pattern:
+
+```csharp
+public class PaymentFailedException : Exception
+{
+    public decimal Amount { get; }
+    public string Reason { get; }
+
+    public PaymentFailedException() : base() { }
+    
+    public PaymentFailedException(string message) : base(message) { }
+    
+    public PaymentFailedException(string message, Exception inner) 
+        : base(message, inner) { }
+    
+    public PaymentFailedException(decimal amount, string reason)
+        : base($"Payment of {amount:C} failed: {reason}")
+    {
+        Amount = amount;
+        Reason = reason;
+    }
+}
+```
+
+<ConceptCallout type="tip">
+The convention is to provide three standard constructors (parameterless, message-only, message + inner) plus any domain-specific ones. Many code analyzers will warn you if you skip the standard constructors. This is boilerplate — in modern C# you can reduce it, but knowing the pattern is important for reading existing code.
+</ConceptCallout>
+
+## The `using` Statement and IDisposable (Preview)
+
+C# has a `using` statement for objects that hold unmanaged resources (files, database connections, network sockets). This ensures `Dispose()` is called even if an exception occurs:
+
+```csharp
+// Old syntax — using block
+using (var file = new StreamReader("data.txt"))
+{
+    string content = file.ReadToEnd();
+} // file.Dispose() called automatically here, even if exception thrown
+
+// Modern syntax — using declaration (C# 8+)
+using var file = new StreamReader("data.txt");
+string content = file.ReadToEnd();
+// file.Dispose() called when 'file' goes out of scope (end of method/block)
+```
+
+<ConceptCallout type="info">
+`using` is roughly analogous to Dart's `finally` for resource cleanup, but it's automatic — you don't write the cleanup code yourself. `IDisposable` is the interface that enables this pattern. We'll cover it in depth when we get to interfaces and resource management.
+</ConceptCallout>
+
+## Common .NET Exceptions You'll Encounter
+
+| Exception | When | Common Cause |
+|-----------|------|--------------|
+| `NullReferenceException` | Accessing member on null ref | Forgetting null check (use null operators) |
+| `ArgumentNullException` | Null passed where disallowed | Input validation |
+| `ArgumentOutOfRangeException` | Index or value out of bounds | Off-by-one errors |
+| `InvalidOperationException` | Object in wrong state | Calling method at wrong time |
+| `NotImplementedException` | Method not implemented yet | Placeholder code |
+| `FormatException` | String parse fails | `int.Parse("abc")` |
+| `OverflowException` | Arithmetic overflow | `checked` arithmetic |
+| `IOException` / `FileNotFoundException` | File operations fail | Missing files, permissions |
+| `HttpRequestException` | HTTP call fails | Network errors, bad status codes |
+
+<ExerciseBlock>
+**Exercise 1: Robust Parser**
+
+Write a method `ParseConfig(string input)` that parses a string in the format `"key=value"`. It should:
+- Throw `ArgumentNullException` if input is null (use `ArgumentNullException.ThrowIfNull`)
+- Throw `FormatException` with a helpful message if the string doesn't contain `=`
+- Return a `(string Key, string Value)` tuple
+
+Wrap it in a method `TryParseConfig(string input, out (string, string) result)` that returns bool and uses a try/catch to avoid throwing.
+
+**Exercise 2: Exception Filter Usage**
+
+Write a method `FetchData(string url)` that simulates HTTP calls. Create a custom `ApiException` with an `int StatusCode` property. Use exception filters to:
+- Catch `ApiException` with status 429 (rate limit) and wait then retry
+- Catch `ApiException` with status 503 (unavailable) and throw a new `ServiceUnavailableException`  
+- Let all other `ApiException`s propagate unchanged
+- Add a logging-via-filter catch that logs all exceptions but never catches them
+
+**Exercise 3: Custom Exception Hierarchy**
+
+Design an exception hierarchy for a banking application:
+- `BankingException` (base, extends Exception)
+- `InsufficientFundsException` (has `decimal Balance` and `decimal Requested`)
+- `AccountLockedException` (has `DateTime UnlockTime`)
+- `DailyLimitExceededException` (has `decimal DailyLimit` and `decimal Attempted`)
+
+Write a `ProcessWithdrawal(decimal amount, Account account)` method that throws the appropriate exception. Demonstrate catching each type with appropriate messages.
+</ExerciseBlock>
+
+## Key Takeaways
+
+- C# exception syntax is `catch (ExceptionType e)` — type goes inside the parens
+- The `when` filter clause enables conditional catching **without unwinding the stack** — no Dart equivalent
+- **Always use bare `throw`** to re-throw — `throw ex` destroys the stack trace (use `rethrow` in Dart)
+- Wrap exceptions using the `innerException` constructor parameter to preserve cause chains
+- `using` provides automatic cleanup for `IDisposable` resources (preview of a larger topic)
+- Everything thrown in C# must derive from `System.Exception`

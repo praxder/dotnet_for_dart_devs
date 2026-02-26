@@ -1,0 +1,227 @@
+---
+title: "Local Functions and Expression-Bodied Members"
+day: 18
+week: 4
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart nested functions, => shorthand syntax"
+csharpConcept: "Local functions, static local functions, expression-bodied members"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# has two features for making code more concise that feel familiar from Dart: local functions (nested functions inside methods) and expression-bodied members (the `=>` shorthand). The C# versions have some important additions, especially `static` local functions.
+
+## Local Functions
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  List<int> processNumbers(List<int> input) {
+    // Nested function — can access outer scope
+    int square(int n) => n * n;
+    bool isEven(int n) => n % 2 == 0;
+
+    return input
+      .where(isEven)
+      .map(square)
+      .toList();
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  List<int> ProcessNumbers(List<int> input)
+  {
+      // Local functions — same as Dart nested functions
+      int Square(int n) => n * n;
+      bool IsEven(int n) => n % 2 == 0;
+
+      return input
+          .Where(IsEven)
+          .Select(Square)
+          .ToList();
+  }
+  ```
+  </div>
+</CodeComparison>
+
+Local functions can capture variables from the enclosing scope (closures) and can call each other (unlike lambdas, they support mutual recursion):
+
+```csharp
+IEnumerable<long> FibSequence(int count)
+{
+    return Generate(0, 1, count);
+
+    // Recursive local function — lambdas can't do this as cleanly
+    IEnumerable<long> Generate(long a, long b, int remaining)
+    {
+        if (remaining <= 0) yield break;
+        yield return a;
+        foreach (var n in Generate(b, a + b, remaining - 1))
+            yield return n;
+    }
+}
+
+foreach (var n in FibSequence(10))
+    Console.Write($"{n} ");
+// 0 1 1 2 3 5 8 13 21 34
+```
+
+## `static` Local Functions
+
+A `static` local function cannot capture any variables from the enclosing scope. This is a C#-specific optimization with no Dart equivalent — it prevents accidental closures and avoids heap allocation for the captured context:
+
+```csharp
+decimal CalculateTotal(IEnumerable<OrderItem> items)
+{
+    var taxRate = 0.08m;
+    var discountThreshold = 100m;
+
+    // Static local — cannot accidentally capture taxRate etc.
+    // No closure allocation — better performance in hot paths
+    static decimal ComputeLineTotal(OrderItem item)
+        => item.Quantity * item.UnitPrice;
+
+    // Non-static — CAN capture from outer scope
+    decimal ApplyDiscount(decimal subtotal)
+        => subtotal > discountThreshold
+            ? subtotal * (1 - 0.05m)
+            : subtotal;
+
+    var subtotal = items.Sum(ComputeLineTotal);
+    var discounted = ApplyDiscount(subtotal);
+    return discounted * (1 + taxRate);
+}
+```
+
+<ConceptCallout type="new" title="static Local Functions Prevent Accidental Captures">
+Mark a local function `static` when it doesn't need to access the outer scope. The compiler will error if you accidentally try to use an outer variable, making the independence explicit. This is a good defensive pattern for any local function that is conceptually pure.
+</ConceptCallout>
+
+## Expression-Bodied Members
+
+The `=>` shorthand works on methods, properties, constructors, finalizers, and indexers — not just for lambdas like in Dart:
+
+```csharp
+public class Circle
+{
+    public double Radius { get; }
+
+    // Expression-bodied constructor
+    public Circle(double radius) => Radius = radius;
+
+    // Expression-bodied read-only property
+    public double Diameter => Radius * 2;
+    public double Area => Math.PI * Radius * Radius;
+    public double Circumference => Math.PI * Diameter;
+
+    // Expression-bodied method
+    public Circle Scale(double factor) => new Circle(Radius * factor);
+
+    // Expression-bodied override
+    public override string ToString() => $"Circle(r={Radius:F2})";
+
+    // Expression-bodied finalizer (rare)
+    // ~Circle() => Cleanup();
+}
+
+// Expression-bodied static methods
+public static class MathHelpers
+{
+    public static double DegToRad(double degrees) => degrees * Math.PI / 180;
+    public static double RadToDeg(double radians) => radians * 180 / Math.PI;
+    public static double Lerp(double a, double b, double t) => a + (b - a) * t;
+    public static int Clamp(int value, int min, int max) => Math.Max(min, Math.Min(max, value));
+}
+```
+
+<ConceptCallout type="same" title="Expression-Bodied Is Identical to Dart's => Shorthand">
+Dart's `double get area => pi * radius * radius;` maps directly to C#'s `public double Area => Math.PI * Radius * Radius;`. The concept is identical — single-expression body without braces.
+</ConceptCallout>
+
+## Combining Local Functions with Iterators
+
+Local functions with `yield` create elegant streaming algorithms:
+
+```csharp
+IEnumerable<string> ReadLines(string path)
+{
+    // Validate eagerly (local functions let you separate concerns)
+    if (!File.Exists(path))
+        throw new FileNotFoundException(path);
+
+    // Yield lazily in the local function
+    return ReadLazily();
+
+    IEnumerable<string> ReadLazily()
+    {
+        using var reader = File.OpenText(path);
+        while (reader.ReadLine() is string line)
+            yield return line;
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Validate-Then-Yield Pattern">
+If you use `yield return` directly in a method, validation at the start won't execute until the first `MoveNext()` call. By putting the `yield` in a local function and validating before calling it, you get eager validation with lazy streaming — a common .NET pattern.
+</ConceptCallout>
+
+## Putting It Together
+
+```csharp
+public class QueryBuilder
+{
+    private readonly List<string> _conditions = new();
+    private int? _limit;
+    private string? _orderBy;
+
+    // Expression-bodied fluent builder methods
+    public QueryBuilder Where(string condition)
+    {
+        _conditions.Add(condition);
+        return this;
+    }
+
+    public QueryBuilder Limit(int n) { _limit = n; return this; }
+    public QueryBuilder OrderBy(string column) { _orderBy = column; return this; }
+
+    public string Build()
+    {
+        var query = BuildCore();
+        return query;
+
+        // Local function handles the actual building
+        string BuildCore()
+        {
+            var parts = new List<string> { "SELECT * FROM items" };
+            if (_conditions.Count > 0)
+                parts.Add("WHERE " + string.Join(" AND ", _conditions));
+            if (_orderBy is not null)
+                parts.Add($"ORDER BY {_orderBy}");
+            if (_limit.HasValue)
+                parts.Add($"LIMIT {_limit}");
+            return string.Join("\n", parts);
+        }
+    }
+}
+
+var sql = new QueryBuilder()
+    .Where("active = 1")
+    .Where("price > 10")
+    .OrderBy("name")
+    .Limit(50)
+    .Build();
+```
+
+<ExerciseBlock>
+1. Rewrite a method that validates inputs at the top and yields results lazily using the validate-then-yield local function pattern. Start with: a method that takes a file path and int maxLines, validates both, and streams the first maxLines lines.
+2. Convert this class to use expression-bodied members everywhere possible: a `Temperature` class with `Celsius` property, computed `Fahrenheit` and `Kelvin` properties, a `ToString()` override, and a `static FromFahrenheit(double f)` factory.
+3. Write a `static` local function inside a `ProcessOrders` method that computes the order tax. Intentionally try to capture a variable from the outer scope — observe the compile error.
+</ExerciseBlock>

@@ -1,0 +1,357 @@
+---
+title: "Setting Up .NET and Your First Console App"
+day: 1
+week: 1
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "dart CLI, dart create, pubspec.yaml"
+csharpConcept: "dotnet CLI, dotnet new, .csproj"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+# Setting Up .NET and Your First Console App
+
+You already know how to spin up a Dart project, navigate its structure, and get something running in seconds. The .NET toolchain follows a very similar philosophy — a first-class CLI, a manifest file for the project, a package registry — but with its own conventions and vocabulary. This lesson maps every step you know from Dart onto its C# equivalent so you can be productive immediately.
+
+---
+
+## Installing the .NET SDK
+
+<DartEquivalent>
+In Dart, you install the Dart SDK (or get it bundled with Flutter). The `dart` binary is your entry point for everything: creating projects, running code, compiling, formatting, and managing packages.
+</DartEquivalent>
+
+In .NET, you install the **.NET SDK**, which gives you the `dotnet` CLI. A single SDK installation can target multiple runtime versions, and .NET is cross-platform — Windows, macOS, and Linux are all first-class citizens.
+
+### Install via the official installer
+
+Go to [https://dotnet.microsoft.com/download](https://dotnet.microsoft.com/download) and grab the latest **.NET SDK** (not just the runtime — you need the full SDK for development).
+
+Alternatively, on macOS with Homebrew:
+
+```bash
+brew install dotnet
+```
+
+On Linux (Ubuntu/Debian):
+
+```bash
+sudo apt-get update && sudo apt-get install -y dotnet-sdk-9.0
+```
+
+Verify the installation:
+
+```bash
+dotnet --version
+# 9.0.100
+
+dotnet --info
+# Prints SDK version, runtime info, installed workloads, and OS details
+```
+
+<ConceptCallout type="tip">
+Unlike Dart, which has one SDK version at a time, you can have **multiple .NET SDK versions** installed side-by-side. The `dotnet --info` command shows all of them. A `global.json` file in your repo can pin a specific SDK version — the equivalent of specifying an SDK constraint in a Flutter project's `.fvm` config.
+</ConceptCallout>
+
+---
+
+## Creating a New Project
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Create a new Dart console app
+  dart create my_app
+
+  // Or with an explicit template
+  dart create --template console my_app
+  ```
+  </div>
+  <div slot="csharp">
+  ```bash
+  # Create a new C# console app
+  dotnet new console -n MyApp
+
+  # Or create it in the current directory
+  dotnet new console
+  ```
+  </div>
+</CodeComparison>
+
+The `dotnet new` command uses **templates**. `console` is just one of many:
+
+```bash
+dotnet new list          # See all available templates
+dotnet new console       # Console application
+dotnet new classlib      # Class library (no entry point)
+dotnet new webapi        # ASP.NET Core Web API
+dotnet new blazor        # Blazor web app
+dotnet new xunit         # xUnit test project
+```
+
+<DartEquivalent>
+`dotnet new list` is the equivalent of browsing the starters on `dart.dev` or running `flutter create --list-samples`. The template system is more expansive in .NET because the ecosystem covers everything from console tools to web servers to mobile apps (via MAUI).
+</DartEquivalent>
+
+---
+
+## Anatomy of a New Console Project
+
+After running `dotnet new console -n MyApp`, you get:
+
+```
+MyApp/
+├── MyApp.csproj       ← Project manifest (like pubspec.yaml)
+├── Program.cs         ← Entry point
+└── obj/               ← Build metadata (like .dart_tool/)
+```
+
+<ConceptCallout type="different">
+Dart generates a `bin/` directory with your main file and a `lib/` directory for library code. .NET puts everything at the project root by default. There is no enforced `lib/` vs `bin/` split — the project type (console vs classlib) determines whether there is an entry point.
+</ConceptCallout>
+
+### The .csproj file
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>
+```
+
+We will cover `.csproj` in depth in Day 2. For now, just note:
+- `OutputType>Exe` means this is a runnable program (vs a library)
+- `TargetFramework` pins the .NET version
+- `Nullable>enable` turns on C#'s null safety warnings (more on this in Day 6)
+- `ImplicitUsings>enable` auto-imports the most common namespaces so you do not have to write `using System;` at the top of every file
+
+---
+
+## Program.cs: Top-Level Statements
+
+When you open `Program.cs`, you might be surprised by how minimal it is:
+
+```csharp
+// Program.cs (C# 10+ top-level statements)
+Console.WriteLine("Hello, World!");
+```
+
+That is the entire file. No `class Program`, no `static void Main(string[] args)`. This is **top-level statements**, introduced in C# 9.
+
+<DartEquivalent>
+This is exactly how Dart works. Your `main.dart` is:
+
+```dart
+void main() {
+  print('Hello, World!');
+}
+```
+
+C# top-level statements are even more stripped down — you do not even need the `main()` function wrapper. The compiler generates the `Main` method for you behind the scenes.
+</DartEquivalent>
+
+### The traditional class-based form
+
+Before C# 9 (and still valid today), the entry point looked like this:
+
+```csharp
+using System;
+
+namespace MyApp
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.WriteLine("Hello, World!");
+        }
+    }
+}
+```
+
+You will encounter this form constantly in older codebases, Stack Overflow answers, and documentation. The two forms compile to identical IL (Intermediate Language). Modern code uses top-level statements for new projects; enterprise codebases often stick with the explicit form.
+
+<ConceptCallout type="tip">
+You can access the command-line arguments in top-level statements via the magic `args` variable, which the compiler injects for you:
+
+```csharp
+// Top-level — args is available automatically
+Console.WriteLine($"Arguments: {string.Join(", ", args)}");
+```
+
+In the class-based form, `args` comes from `Main(string[] args)`.
+</ConceptCallout>
+
+---
+
+## Running Your App
+
+<CodeComparison>
+  <div slot="dart">
+  ```bash
+  # Run directly
+  dart run
+
+  # Run a specific file
+  dart run bin/main.dart
+
+  # Compile to native executable
+  dart compile exe bin/main.dart -o my_app
+  ```
+  </div>
+  <div slot="csharp">
+  ```bash
+  # Run the project in the current directory
+  dotnet run
+
+  # Run with arguments passed to your program
+  dotnet run -- arg1 arg2
+
+  # Build without running
+  dotnet build
+
+  # Publish a self-contained executable
+  dotnet publish -c Release -r osx-arm64 --self-contained
+  ```
+  </div>
+</CodeComparison>
+
+`dotnet run` is the development command. It compiles and runs in one step. Under the hood it does a `dotnet build` first, then executes the output.
+
+<ConceptCallout type="gotcha">
+`dotnet run` always recompiles if any source files have changed. For a tight edit-run loop, this is fast enough. But for hot-reload style development, use `dotnet watch run` — this is the .NET equivalent of `dart run` with a file watcher, and it supports **hot reload** for console apps and **hot restart** for web apps.
+
+```bash
+dotnet watch run
+```
+</ConceptCallout>
+
+### Build output
+
+After `dotnet run` or `dotnet build`, a `bin/` folder appears:
+
+```
+MyApp/
+├── bin/
+│   └── Debug/
+│       └── net9.0/
+│           ├── MyApp.dll        ← The compiled assembly
+│           ├── MyApp.exe        ← Platform launcher (Windows) or symlink (Linux/macOS)
+│           └── MyApp.runtimeconfig.json
+└── obj/                         ← Intermediate build files (never commit this)
+```
+
+<DartEquivalent>
+In Dart, `dart compile exe` produces a single native binary. In .NET, `dotnet build` produces a `.dll` (a managed assembly). The `.dll` requires the .NET runtime to execute. To get a single-file native-ish binary, use `dotnet publish --self-contained` which bundles the runtime alongside your app — similar to Dart's AOT compilation.
+</DartEquivalent>
+
+---
+
+## The dotnet CLI: Your Daily Commands
+
+Here is a quick reference mapping the commands you already use in Dart:
+
+| Task | Dart | C# |
+|------|------|----|
+| Create project | `dart create` | `dotnet new console` |
+| Run | `dart run` | `dotnet run` |
+| Build | `dart compile` | `dotnet build` |
+| Watch/hot-reload | `dart run` (no built-in watch) | `dotnet watch run` |
+| Add package | `dart pub add <pkg>` | `dotnet add package <pkg>` |
+| Restore packages | `dart pub get` | `dotnet restore` |
+| Format code | `dart format .` | `dotnet format` |
+| Run tests | `dart test` | `dotnet test` |
+| Analyze/lint | `dart analyze` | `dotnet build` (warnings) / Roslyn analyzers |
+
+---
+
+## Namespaces and File-Scoped Namespaces
+
+Every type in C# lives in a **namespace**. This is conceptually similar to Dart's library/import system, but namespaces are purely organizational — they do not map 1:1 to files.
+
+```csharp
+// Traditional namespace block (wraps entire file)
+namespace MyApp.Models
+{
+    class User
+    {
+        public string Name { get; set; } = "";
+    }
+}
+```
+
+C# 10 introduced **file-scoped namespaces** — the modern style:
+
+```csharp
+// File-scoped namespace (no braces, applies to whole file)
+namespace MyApp.Models;
+
+class User
+{
+    public string Name { get; set; } = "";
+}
+```
+
+<ConceptCallout type="tip">
+Use file-scoped namespaces in all new code. They reduce indentation by one level across the entire file and are now the default in `dotnet new` templates. Most style guides (including Microsoft's own) recommend them.
+</ConceptCallout>
+
+---
+
+## A Complete First Program
+
+Let us write something more interesting than "Hello, World!" to confirm your setup works:
+
+```csharp
+// Program.cs
+using System.Diagnostics;
+
+var stopwatch = Stopwatch.StartNew();
+
+Console.WriteLine("=== .NET Environment Info ===");
+Console.WriteLine($"Runtime:     {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}");
+Console.WriteLine($"OS:          {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
+Console.WriteLine($"Processor:   {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}");
+Console.WriteLine($"CPU cores:   {Environment.ProcessorCount}");
+Console.WriteLine($"Working dir: {Environment.CurrentDirectory}");
+Console.WriteLine($"Args:        {string.Join(", ", args.Length == 0 ? new[] { "(none)" } : args)}");
+
+stopwatch.Stop();
+Console.WriteLine($"\nStartup time: {stopwatch.ElapsedMilliseconds}ms");
+```
+
+Run it:
+
+```bash
+dotnet run
+dotnet run -- foo bar baz
+```
+
+---
+
+<ExerciseBlock>
+## Exercises
+
+1. **Install and verify**: Install the .NET SDK, run `dotnet --info`, and identify the SDK version and the list of installed runtimes.
+
+2. **Create and explore**: Run `dotnet new console -n DartDevIntro`. Open `DartDevIntro.csproj` and identify each XML property. What does `TargetFramework` control? What happens if you change `net9.0` to `net8.0`?
+
+3. **Classic vs modern**: Rewrite the generated `Program.cs` in the old-style class-based form with an explicit `static void Main`. Confirm it still compiles and runs with `dotnet run`.
+
+4. **Watch mode**: Add a `Console.ReadLine()` call so the program waits for input. Run with `dotnet watch run`, then edit a string in the output while it is running. Observe how hot reload updates the running app.
+
+5. **CLI exploration**: Run `dotnet new list` and find three project templates you did not know existed. What does `dotnet new globaljson` create and why would you use it?
+</ExerciseBlock>

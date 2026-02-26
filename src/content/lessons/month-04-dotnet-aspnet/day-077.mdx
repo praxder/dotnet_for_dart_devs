@@ -1,0 +1,230 @@
+---
+title: "Controllers, Model Binding, and Validation"
+day: 77
+week: 16
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "shelf/dart_frog request parsing, query parameters"
+csharpConcept: "[ApiController], model binding, [FromBody]/[FromQuery]/[FromRoute], FluentValidation"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Controllers are the traditional way to build REST APIs in ASP.NET Core. While Minimal APIs (Day 73) are preferred for new code, controllers are still widely used and you'll encounter them constantly. This lesson covers the full controller model.
+
+## Your First Controller
+
+```csharp
+// Must inherit ControllerBase (or Controller for MVC with views)
+// [ApiController] enables automatic 400 responses, binding source inference, etc.
+[ApiController]
+[Route("api/[controller]")]  // [controller] → class name without "Controller"
+public class ProductsController : ControllerBase
+{
+    private readonly IProductService _products;
+    private readonly ILogger<ProductsController> _logger;
+
+    // Constructor injection works exactly like regular classes
+    public ProductsController(IProductService products, ILogger<ProductsController> logger)
+    {
+        _products = products;
+        _logger = logger;
+    }
+
+    // GET /api/products
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<ProductDto>>> GetAll()
+    {
+        var products = await _products.GetAllAsync();
+        return Ok(products);
+    }
+
+    // GET /api/products/42
+    [HttpGet("{id:int}")]
+    public async Task<ActionResult<ProductDto>> GetById(int id)
+    {
+        var product = await _products.GetByIdAsync(id);
+        return product is not null ? Ok(product) : NotFound();
+    }
+
+    // POST /api/products
+    [HttpPost]
+    public async Task<ActionResult<ProductDto>> Create(CreateProductRequest request)
+    {
+        var product = await _products.CreateAsync(request);
+        return CreatedAtAction(nameof(GetById), new { id = product.Id }, product);
+    }
+
+    // PUT /api/products/42
+    [HttpPut("{id:int}")]
+    public async Task<IActionResult> Update(int id, UpdateProductRequest request)
+    {
+        var updated = await _products.UpdateAsync(id, request);
+        return updated ? NoContent() : NotFound();
+    }
+
+    // DELETE /api/products/42
+    [HttpDelete("{id:int}")]
+    public async Task<IActionResult> Delete(int id)
+    {
+        var deleted = await _products.DeleteAsync(id);
+        return deleted ? NoContent() : NotFound();
+    }
+}
+```
+
+## Model Binding — Where Data Comes From
+
+```csharp
+// [ApiController] infers sources automatically:
+// Complex types from body → [FromBody]
+// Simple types from route → [FromRoute]
+// Simple types from query → [FromQuery]
+
+// Explicit binding attributes:
+[HttpGet]
+public IActionResult Search(
+    [FromQuery] string? q,           // ?q=laptop
+    [FromQuery] int page = 1,        // ?page=2
+    [FromQuery] int pageSize = 20,   // ?pageSize=50
+    [FromHeader(Name = "X-Client")] string? client = null,  // header
+    [FromRoute] int? categoryId = null) // route parameter
+{ ... }
+
+// Body binding
+[HttpPost]
+public IActionResult Create([FromBody] CreateProductRequest request) { ... }
+
+// Form binding
+[HttpPost("upload")]
+public IActionResult Upload(
+    [FromForm] string name,
+    IFormFile file) { ... }
+
+// Complex: multiple sources
+[HttpPost("{orderId:guid}/items")]
+public IActionResult AddItem(
+    [FromRoute] Guid orderId,        // from URL
+    [FromBody] AddItemRequest item,  // from JSON body
+    [FromHeader] string? idempotencyKey = null)  // from header
+{ ... }
+```
+
+## Model Validation
+
+```csharp
+// Data Annotations — built-in validation
+public class CreateProductRequest
+{
+    [Required, StringLength(200, MinimumLength = 1)]
+    public required string Name { get; init; }
+
+    [Required, StringLength(2000)]
+    public string? Description { get; init; }
+
+    [Range(0.01, 999999.99)]
+    public required decimal Price { get; init; }
+
+    [Range(0, 100000)]
+    public int StockQuantity { get; init; }
+
+    [Required]
+    public required string CategoryId { get; init; }
+}
+
+// [ApiController] automatically validates and returns 400 if invalid
+// No need to check ModelState.IsValid manually!
+
+// Manual check (without [ApiController] or when customizing):
+[HttpPost]
+public IActionResult Create(CreateProductRequest request)
+{
+    if (!ModelState.IsValid)
+        return ValidationProblem(ModelState);  // 422 with details
+
+    // ... proceed
+}
+```
+
+## FluentValidation Integration
+
+```csharp
+// dotnet add package FluentValidation.AspNetCore
+
+// Validator
+public class CreateProductRequestValidator : AbstractValidator<CreateProductRequest>
+{
+    private readonly IProductRepository _repo;
+
+    public CreateProductRequestValidator(IProductRepository repo)
+    {
+        _repo = repo;
+
+        RuleFor(x => x.Name)
+            .NotEmpty()
+            .MaximumLength(200)
+            .MustAsync(BeUniqueName).WithMessage("Product name must be unique");
+
+        RuleFor(x => x.Price)
+            .GreaterThan(0)
+            .LessThan(1_000_000);
+
+        RuleFor(x => x.CategoryId)
+            .NotEmpty()
+            .MustAsync(CategoryExists).WithMessage("Category not found");
+    }
+
+    private Task<bool> BeUniqueName(string name, CancellationToken ct)
+        => _repo.IsNameAvailableAsync(name, ct);
+
+    private Task<bool> CategoryExists(string id, CancellationToken ct)
+        => _repo.CategoryExistsAsync(id, ct);
+}
+
+// Register in Program.cs
+builder.Services.AddFluentValidationAutoValidation();
+builder.Services.AddValidatorsFromAssemblyContaining<CreateProductRequestValidator>();
+```
+
+## ActionResult and Return Types
+
+```csharp
+// ActionResult<T> — most flexible return type
+public async Task<ActionResult<ProductDto>> GetById(int id)
+{
+    var product = await _products.GetByIdAsync(id);
+    return product is not null
+        ? Ok(product)        // 200 with product in body
+        : NotFound();        // 404 with empty body
+}
+
+// Common action results (all from ControllerBase):
+Ok(data)               // 200
+Created(uri, data)     // 201
+CreatedAtAction(...)   // 201 with Location header pointing to GET endpoint
+NoContent()            // 204
+BadRequest(message)    // 400
+Unauthorized()         // 401
+Forbid()               // 403
+NotFound()             // 404
+Conflict(message)      // 409
+UnprocessableEntity()  // 422
+Problem(title, detail) // RFC 7807
+StatusCode(503)        // arbitrary status code
+```
+
+<ConceptCallout type="tip" title="Prefer Minimal APIs for New Code">
+Minimal APIs (Day 73) are the recommended approach for new .NET 6+ projects. They're simpler, have less ceremony, and are equally powerful. Learn controllers because you'll maintain existing code that uses them — but start new services with Minimal APIs.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Build a full CRUD `OrdersController` with proper route templates, all 5 HTTP methods, and appropriate action result types. Use `CreatedAtAction` for POST responses that point to the GET endpoint.
+2. Add a custom `[ValidateRequest]` filter attribute that runs FluentValidation against the request body and returns a structured 422 response with all field errors. Apply it to all POST and PUT endpoints.
+3. Create an `IActionFilter` that logs the controller name, action name, method, and duration for every request. Register it globally. Verify the log output includes all fields.
+</ExerciseBlock>

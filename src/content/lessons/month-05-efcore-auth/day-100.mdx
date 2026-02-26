@@ -1,0 +1,341 @@
+---
+title: "Mini-Project: Blog API with EF Core"
+day: 100
+week: 20
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "Flutter blog app backend, sqflite data layer"
+csharpConcept: "EF Core + Minimal APIs + CQRS + Repository, complete data layer"
+estimatedMinutes: 45
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This capstone for the EF Core module brings together everything from days 91–99: DbContext, relationships, migrations, advanced querying, transactions, CQRS with MediatR, and performance patterns. You'll build a complete blog API with a proper data layer.
+
+## Project: Blog API — Data Layer
+
+A fully-featured blog backend with authors, posts, tags, comments, and analytics.
+
+### Domain Model
+
+```csharp
+// Entities
+public class Author
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public required string Email { get; set; }
+    public string Bio { get; set; } = "";
+    public string? AvatarUrl { get; set; }
+    public DateTime JoinedAt { get; set; } = DateTime.UtcNow;
+    public bool IsActive { get; set; } = true;
+
+    public List<Post> Posts { get; set; } = [];
+}
+
+public class Post
+{
+    public int Id { get; set; }
+    public required string Title { get; set; }
+    public required string Slug { get; set; }
+    public string Summary { get; set; } = "";
+    public required string Body { get; set; }
+    public PostStatus Status { get; set; } = PostStatus.Draft;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? PublishedAt { get; set; }
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+    public int ViewCount { get; set; }
+    public int AuthorId { get; set; }
+    public Author? Author { get; set; }
+
+    public List<Tag> Tags { get; set; } = [];
+    public List<Comment> Comments { get; set; } = [];
+}
+
+public enum PostStatus { Draft, Published, Archived }
+
+public class Tag
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public required string Slug { get; set; }
+    public List<Post> Posts { get; set; } = [];
+}
+
+public class Comment
+{
+    public int Id { get; set; }
+    public required string AuthorName { get; set; }
+    public required string AuthorEmail { get; set; }
+    public required string Body { get; set; }
+    public bool IsApproved { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public int PostId { get; set; }
+    public Post? Post { get; set; }
+    public int? ParentCommentId { get; set; }
+    public Comment? ParentComment { get; set; }
+    public List<Comment> Replies { get; set; } = [];
+}
+```
+
+### DbContext and Configuration
+
+```csharp
+public class BlogDbContext(DbContextOptions<BlogDbContext> options) : DbContext(options)
+{
+    public DbSet<Author> Authors { get; set; }
+    public DbSet<Post> Posts { get; set; }
+    public DbSet<Tag> Tags { get; set; }
+    public DbSet<Comment> Comments { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken ct = default)
+    {
+        // Auto-update UpdatedAt on Post entities
+        foreach (var entry in ChangeTracker.Entries<Post>()
+            .Where(e => e.State == EntityState.Modified))
+        {
+            entry.Entity.UpdatedAt = DateTime.UtcNow;
+        }
+        return base.SaveChangesAsync(ct);
+    }
+}
+
+// Separate configuration classes
+public class PostConfiguration : IEntityTypeConfiguration<Post>
+{
+    public void Configure(EntityTypeBuilder<Post> builder)
+    {
+        builder.ToTable("posts");
+        builder.Property(p => p.Title).HasMaxLength(500).IsRequired();
+        builder.Property(p => p.Slug).HasMaxLength(500).IsRequired();
+        builder.Property(p => p.Body).IsRequired();
+
+        builder.HasIndex(p => p.Slug).IsUnique();
+        builder.HasIndex(p => new { p.Status, p.PublishedAt });
+        builder.HasIndex(p => p.AuthorId);
+
+        builder.HasQueryFilter(p => p.Status != PostStatus.Archived);
+
+        // Relationship
+        builder.HasOne(p => p.Author)
+            .WithMany(a => a.Posts)
+            .HasForeignKey(p => p.AuthorId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Many-to-many Tags
+        builder.HasMany(p => p.Tags)
+            .WithMany(t => t.Posts)
+            .UsingEntity(j => j.ToTable("post_tags"));
+    }
+}
+
+public class CommentConfiguration : IEntityTypeConfiguration<Comment>
+{
+    public void Configure(EntityTypeBuilder<Comment> builder)
+    {
+        builder.ToTable("comments");
+        builder.Property(c => c.Body).HasMaxLength(5000).IsRequired();
+
+        // Self-referencing (threaded comments)
+        builder.HasOne(c => c.ParentComment)
+            .WithMany(c => c.Replies)
+            .HasForeignKey(c => c.ParentCommentId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasQueryFilter(c => c.IsApproved);
+    }
+}
+```
+
+### CQRS Queries
+
+```csharp
+// List posts with pagination and filtering
+public record ListPostsQuery(
+    string? Tag = null,
+    int? AuthorId = null,
+    string? Search = null,
+    int Page = 1,
+    int PageSize = 20,
+    string? AfterSlug = null)  // cursor
+    : IRequest<PagedResult<PostSummaryDto>>;
+
+public class ListPostsHandler(BlogDbContext db) : IRequestHandler<ListPostsQuery, PagedResult<PostSummaryDto>>
+{
+    public async Task<PagedResult<PostSummaryDto>> Handle(ListPostsQuery request, CancellationToken ct)
+    {
+        var query = db.Posts
+            .AsNoTracking()
+            .Where(p => p.Status == PostStatus.Published);
+
+        if (request.Tag is not null)
+            query = query.Where(p => p.Tags.Any(t => t.Slug == request.Tag));
+
+        if (request.AuthorId.HasValue)
+            query = query.Where(p => p.AuthorId == request.AuthorId);
+
+        if (request.Search is { Length: > 0 } s)
+            query = query.Where(p => p.Title.Contains(s) || p.Summary.Contains(s));
+
+        var total = await query.CountAsync(ct);
+
+        var posts = await query
+            .OrderByDescending(p => p.PublishedAt)
+            .Skip((request.Page - 1) * request.PageSize)
+            .Take(request.PageSize)
+            .Select(p => new PostSummaryDto(
+                p.Id,
+                p.Title,
+                p.Slug,
+                p.Summary,
+                p.Author!.Name,
+                p.PublishedAt!.Value,
+                p.ViewCount,
+                p.Tags.Select(t => t.Name).ToList(),
+                p.Comments.Count))
+            .ToListAsync(ct);
+
+        return new PagedResult<PostSummaryDto>(posts, total, request.Page, request.PageSize);
+    }
+}
+
+// Get single post — increments view count
+public record GetPostQuery(string Slug) : IRequest<PostDetailDto?>;
+
+public class GetPostHandler(BlogDbContext db) : IRequestHandler<GetPostQuery, PostDetailDto?>
+{
+    public async Task<PostDetailDto?> Handle(GetPostQuery request, CancellationToken ct)
+    {
+        var post = await db.Posts
+            .Include(p => p.Author)
+            .Include(p => p.Tags)
+            .Include(p => p.Comments.Where(c => c.ParentCommentId == null))
+                .ThenInclude(c => c.Replies)
+            .FirstOrDefaultAsync(p => p.Slug == request.Slug && p.Status == PostStatus.Published, ct);
+
+        if (post is null) return null;
+
+        // Increment view count without loading all fields
+        await db.Posts
+            .Where(p => p.Id == post.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.ViewCount, p => p.ViewCount + 1), ct);
+
+        return MapToDto(post);
+    }
+
+    private static PostDetailDto MapToDto(Post post) => new(
+        post.Id, post.Title, post.Slug, post.Summary, post.Body,
+        post.Author!.Name, post.Author.AvatarUrl,
+        post.PublishedAt!.Value, post.ViewCount,
+        post.Tags.Select(t => t.Name).ToList(),
+        post.Comments.Select(MapComment).ToList());
+
+    private static CommentDto MapComment(Comment c) => new(
+        c.Id, c.AuthorName, c.Body, c.CreatedAt,
+        c.Replies.Select(MapComment).ToList());
+}
+```
+
+### CQRS Commands
+
+```csharp
+public record PublishPostCommand(int PostId, int RequestingAuthorId) : IRequest<bool>;
+
+public class PublishPostHandler(BlogDbContext db) : IRequestHandler<PublishPostCommand, bool>
+{
+    public async Task<bool> Handle(PublishPostCommand request, CancellationToken ct)
+    {
+        var post = await db.Posts
+            .IgnoreQueryFilters()  // bypass the status filter
+            .FirstOrDefaultAsync(p => p.Id == request.PostId, ct);
+
+        if (post is null || post.AuthorId != request.RequestingAuthorId)
+            return false;
+
+        post.Status = PostStatus.Published;
+        post.PublishedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+}
+
+// Analytics query
+public record GetBlogStatsQuery(DateTime From, DateTime To) : IRequest<BlogStatsDto>;
+
+public class GetBlogStatsHandler(BlogDbContext db) : IRequestHandler<GetBlogStatsQuery, BlogStatsDto>
+{
+    public async Task<BlogStatsDto> Handle(GetBlogStatsQuery request, CancellationToken ct)
+    {
+        var stats = await db.Posts
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .Where(p => p.PublishedAt >= request.From && p.PublishedAt <= request.To)
+            .GroupBy(p => 1)
+            .Select(g => new
+            {
+                TotalPosts = g.Count(),
+                TotalViews = g.Sum(p => p.ViewCount),
+                AvgViews = g.Average(p => p.ViewCount),
+                TopPost = g.OrderByDescending(p => p.ViewCount).First().Title
+            })
+            .FirstOrDefaultAsync(ct);
+
+        var topAuthors = await db.Authors
+            .AsNoTracking()
+            .Select(a => new
+            {
+                a.Name,
+                PostCount = a.Posts.Count(p => p.Status == PostStatus.Published),
+                TotalViews = a.Posts.Sum(p => p.ViewCount)
+            })
+            .OrderByDescending(a => a.TotalViews)
+            .Take(5)
+            .ToListAsync(ct);
+
+        return new BlogStatsDto(/* ... */);
+    }
+}
+```
+
+### Minimal API Endpoints
+
+```csharp
+var blog = app.MapGroup("/api/blog");
+
+blog.MapGet("/posts", async (
+    [AsParameters] ListPostsQuery query,
+    IMediator mediator) => Results.Ok(await mediator.Send(query)));
+
+blog.MapGet("/posts/{slug}", async (string slug, IMediator mediator) =>
+{
+    var post = await mediator.Send(new GetPostQuery(slug));
+    return post is null ? Results.NotFound() : Results.Ok(post);
+});
+
+blog.MapPost("/posts/{id}/publish", async (
+    int id,
+    IMediator mediator,
+    ClaimsPrincipal user) =>
+{
+    var authorId = int.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var success = await mediator.Send(new PublishPostCommand(id, authorId));
+    return success ? Results.Ok() : Results.Forbid();
+}).RequireAuthorization();
+```
+
+<ExerciseBlock>
+1. Add a `CreatePostCommand` and `UpdatePostCommand` with full validation (title required, slug auto-generated from title, body min 100 chars). Include a MediatR validation behavior that runs FluentValidation automatically.
+2. Implement an `AddCommentCommand` that (a) saves the comment as unapproved, (b) publishes an `CommentAddedNotification`, (c) has a notification handler that auto-approves comments from known email addresses.
+3. Add a reporting endpoint: `GET /api/blog/analytics/top-posts?days=30` that returns the top 10 posts by views in the last N days, with tag breakdown. Implement using LINQ aggregations — verify it generates a single SQL query via logging.
+4. Write integration tests using `WebApplicationFactory` with a SQLite in-memory database: test that (a) creating and publishing a post via commands works end-to-end, (b) the view count increments on each request, (c) archived posts are excluded from listings.
+</ExerciseBlock>

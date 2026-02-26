@@ -1,0 +1,233 @@
+---
+title: "Custom LINQ Operators and Functional Patterns"
+day: 47
+week: 10
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Dart extension methods on Iterable, functional programming with collections"
+csharpConcept: "LINQ extension methods, custom operators, functional composition"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+You can extend LINQ with your own operators using extension methods on `IEnumerable<T>`. This is how the BCL itself adds `Where`, `Select`, and friends — they're all extension methods on `IEnumerable<T>`. Once you grasp this, you can build fluent pipelines for any domain.
+
+## How LINQ Extension Methods Work
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart extension methods on Iterable
+  extension IterableX<T> on Iterable<T> {
+    Iterable<T> whereNot(bool Function(T) predicate) =>
+      where((e) => !predicate(e));
+
+    T? firstWhereOrNull(bool Function(T) predicate) {
+      for (final e in this) {
+        if (predicate(e)) return e;
+      }
+      return null;
+    }
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# extension methods on IEnumerable<T>
+  // (these are how all LINQ methods are defined in the BCL)
+  public static class EnumerableExtensions
+  {
+      public static IEnumerable<T> WhereNot<T>(
+          this IEnumerable<T> source,
+          Func<T, bool> predicate)
+          => source.Where(item => !predicate(item));
+
+      public static T? FirstWhereOrNull<T>(
+          this IEnumerable<T> source,
+          Func<T, bool> predicate) where T : class
+          => source.FirstOrDefault(predicate);
+  }
+
+  // Usage — looks like a built-in LINQ method:
+  var nonAdmins = users.WhereNot(u => u.IsAdmin);
+  ```
+  </div>
+</CodeComparison>
+
+## Building Custom LINQ Operators
+
+```csharp
+public static class LinqExtensions
+{
+    // Batch/chunk without .NET 6 Chunk()
+    public static IEnumerable<IReadOnlyList<T>> Batch<T>(
+        this IEnumerable<T> source, int size)
+    {
+        var batch = new List<T>(size);
+        foreach (var item in source)
+        {
+            batch.Add(item);
+            if (batch.Count == size)
+            {
+                yield return batch;
+                batch = new List<T>(size);
+            }
+        }
+        if (batch.Count > 0)
+            yield return batch;
+    }
+
+    // Flatten one level (like SelectMany(x => x))
+    public static IEnumerable<T> Flatten<T>(
+        this IEnumerable<IEnumerable<T>> source)
+        => source.SelectMany(x => x);
+
+    // Running/cumulative sum
+    public static IEnumerable<decimal> RunningSum(
+        this IEnumerable<decimal> source)
+    {
+        decimal sum = 0;
+        foreach (var item in source)
+        {
+            sum += item;
+            yield return sum;
+        }
+    }
+
+    // Zip with index (without the tuple overhead of Select with index)
+    public static IEnumerable<(int Index, T Item)> Indexed<T>(
+        this IEnumerable<T> source)
+        => source.Select((item, i) => (i, item));
+
+    // ForEach — not in BCL (by design), but useful
+    public static void ForEach<T>(
+        this IEnumerable<T> source,
+        Action<T> action)
+    {
+        foreach (var item in source)
+            action(item);
+    }
+
+    // MinBy/MaxBy — .NET 6 built-in, but here's the pattern:
+    public static T? MinByKey<T, TKey>(
+        this IEnumerable<T> source,
+        Func<T, TKey> keySelector) where TKey : IComparable<TKey>
+        => source.Aggregate((min, next) =>
+            keySelector(next).CompareTo(keySelector(min)) < 0 ? next : min);
+}
+```
+
+## Functional Composition Patterns
+
+```csharp
+// Pipe operator pattern — functional composition
+// Instead of: f(g(h(x)))
+// Write: x |> h |> g |> f (F# style)
+
+// C# doesn't have |> but you can simulate with extension methods:
+public static TResult Pipe<T, TResult>(this T source, Func<T, TResult> transform)
+    => transform(source);
+
+// Usage:
+var result = "  hello world  "
+    .Pipe(s => s.Trim())
+    .Pipe(s => s.Split(' '))
+    .Pipe(words => words.Select(w => char.ToUpper(w[0]) + w[1..]))
+    .Pipe(words => string.Join(" ", words));
+// "Hello World"
+```
+
+## Memoization for Expensive Computations
+
+```csharp
+// Memoize a function (cache results)
+public static Func<T, TResult> Memoize<T, TResult>(
+    this Func<T, TResult> func) where T : notnull
+{
+    var cache = new Dictionary<T, TResult>();
+    return arg =>
+    {
+        if (!cache.TryGetValue(arg, out var result))
+            cache[arg] = result = func(arg);
+        return result;
+    };
+}
+
+// Usage
+Func<int, long> fib = null!;
+fib = Memoize<int, long>(n =>
+    n <= 1 ? n : fib(n - 1) + fib(n - 2));
+
+Console.WriteLine(fib(50));  // 12586269025 — fast with memoization
+```
+
+## Fluent Builder Pattern Using LINQ-Style Chaining
+
+```csharp
+// Build a query object using fluent API — same pattern as LINQ
+public class ProductQuery
+{
+    private readonly IEnumerable<Product> _source;
+    private Func<Product, bool>? _filter;
+    private Func<IEnumerable<Product>, IEnumerable<Product>>? _sorter;
+    private int? _limit;
+
+    private ProductQuery(IEnumerable<Product> source) => _source = source;
+
+    public static ProductQuery From(IEnumerable<Product> products)
+        => new(products);
+
+    public ProductQuery InCategory(string category)
+    {
+        _filter = _filter is null
+            ? p => p.Category == category
+            : p => _filter(p) && p.Category == category;
+        return this;
+    }
+
+    public ProductQuery PricedBelow(decimal max)
+    {
+        _filter = _filter is null
+            ? p => p.Price < max
+            : p => _filter(p) && p.Price < max;
+        return this;
+    }
+
+    public ProductQuery SortedBy(Func<Product, object> keySelector)
+    {
+        _sorter = seq => seq.OrderBy(keySelector);
+        return this;
+    }
+
+    public ProductQuery Limit(int count) { _limit = count; return this; }
+
+    public IReadOnlyList<Product> Execute()
+    {
+        var query = _source.AsEnumerable();
+        if (_filter != null) query = query.Where(_filter);
+        if (_sorter != null) query = _sorter(query);
+        if (_limit.HasValue) query = query.Take(_limit.Value);
+        return query.ToList();
+    }
+}
+
+// Usage
+var results = ProductQuery.From(products)
+    .InCategory("Electronics")
+    .PricedBelow(100m)
+    .SortedBy(p => p.Price)
+    .Limit(5)
+    .Execute();
+```
+
+<ExerciseBlock>
+1. Implement a `Partition<T>(this IEnumerable<T> source, Func<T, bool> predicate)` extension method that returns `(IReadOnlyList<T> Matching, IReadOnlyList<T> NotMatching)` in a single pass.
+2. Write a `Retry<T>(this IEnumerable<Func<T>> attempts, int maxRetries)` extension that tries each function and returns the first successful result (no exception thrown), trying each up to `maxRetries` times.
+3. Build a fluent query builder for filtering `LogEntry(DateTime Timestamp, string Level, string Message, string Source)` records — with methods `After(DateTime)`, `Before(DateTime)`, `WithLevel(string)`, `FromSource(string)`, `Containing(string searchTerm)`, and `Execute()`.
+</ExerciseBlock>

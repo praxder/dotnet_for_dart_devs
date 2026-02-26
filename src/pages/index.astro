@@ -1,0 +1,173 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Header from '../components/layout/Header.astro';
+import ProgressBar from '../components/progress/ProgressBar';
+import ContinueButton from '../components/progress/ContinueButton';
+import { getAllLessons } from '../lib/lessons';
+import { MODULES, TOTAL_LESSONS } from '../lib/curriculum';
+
+const allLessons = await getAllLessons();
+const projectLessons = allLessons.filter(l => l.data.isProject);
+---
+
+<BaseLayout title="Dashboard">
+  <Header />
+
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-10">
+
+    <!-- Hero -->
+    <section class="mb-12">
+      <div class="flex flex-col sm:flex-row sm:items-end gap-6">
+        <div class="flex-1">
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-950 border border-indigo-800 text-indigo-300 text-xs font-medium mb-4">
+            <span>🎯</span> Dart/Flutter → C# &amp; .NET
+          </div>
+          <h1 class="text-3xl sm:text-4xl font-bold text-white leading-tight mb-3">
+            C# for Flutter Developers
+          </h1>
+          <p class="text-slate-400 text-base max-w-xl leading-relaxed">
+            A 6-month, 130-lesson curriculum designed specifically for professional Dart/Flutter developers learning C#, .NET, and ASP.NET. 30 minutes a day, 5 days a week.
+          </p>
+        </div>
+        <div class="shrink-0">
+          <ContinueButton client:load />
+        </div>
+      </div>
+    </section>
+
+    <div class="grid lg:grid-cols-3 gap-8">
+
+      <!-- Progress panel -->
+      <div class="lg:col-span-1">
+        <div class="sticky top-20">
+          <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4">Your Progress</h2>
+          <ProgressBar client:load />
+        </div>
+      </div>
+
+      <!-- Curriculum overview -->
+      <div class="lg:col-span-2 space-y-8">
+
+        <!-- Phase 1 -->
+        <section>
+          <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <span class="w-5 h-5 rounded bg-indigo-900 text-indigo-300 text-[10px] flex items-center justify-center font-bold">1</span>
+            Phase 1 · C# Language (Weeks 1–13)
+          </h2>
+          <div class="space-y-3">
+            {MODULES.filter(m => m.phase === 'csharp').map(mod => {
+              const count = allLessons.filter(l => l.data.module === mod.id).length;
+              const firstLesson = allLessons.find(l => l.data.module === mod.id);
+              const firstDayStr = firstLesson ? String(firstLesson.data.day).padStart(3, '0') : '001';
+              return (
+                <a
+                  href={`/modules/${mod.slug}`}
+                  class="flex items-center gap-4 p-4 rounded-xl border border-slate-800 hover:border-slate-600 hover:bg-slate-800/30 transition-all group"
+                >
+                  <span class="text-xl shrink-0">{mod.icon}</span>
+                  <div class="flex-1 min-w-0">
+                    <p class="font-medium text-sm text-slate-300 group-hover:text-white transition-colors">{mod.name}</p>
+                    <p class="text-xs text-slate-600 mt-0.5">Weeks {mod.weeks[0]}–{mod.weeks[1]} · Days {mod.days[0]}–{mod.days[1]}</p>
+                  </div>
+                  <div class="flex items-center gap-3 shrink-0">
+                    <span class="text-xs text-slate-600">{count} lessons</span>
+                    <a
+                      href={`/lessons/day-${firstDayStr}`}
+                      class="text-xs px-2.5 py-1 rounded-lg bg-indigo-900/50 text-indigo-400 hover:bg-indigo-800 hover:text-indigo-200 transition-colors"
+                      onclick="event.stopPropagation()"
+                    >
+                      Start →
+                    </a>
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        </section>
+
+        <!-- Phase 2 -->
+        <section>
+          <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <span class="w-5 h-5 rounded bg-sky-900 text-sky-300 text-[10px] flex items-center justify-center font-bold">2</span>
+            Phase 2 · .NET &amp; ASP.NET (Weeks 14–26)
+          </h2>
+          <div class="space-y-3">
+            {MODULES.filter(m => m.phase === 'dotnet').map(mod => {
+              const count = allLessons.filter(l => l.data.module === mod.id).length;
+              const firstLesson = allLessons.find(l => l.data.module === mod.id);
+              const firstDayStr = firstLesson ? String(firstLesson.data.day).padStart(3, '0') : '001';
+              return (
+                <a
+                  href={`/modules/${mod.slug}`}
+                  class="flex items-center gap-4 p-4 rounded-xl border border-slate-800 hover:border-slate-600 hover:bg-slate-800/30 transition-all group"
+                >
+                  <span class="text-xl shrink-0">{mod.icon}</span>
+                  <div class="flex-1 min-w-0">
+                    <p class="font-medium text-sm text-slate-300 group-hover:text-white transition-colors">{mod.name}</p>
+                    <p class="text-xs text-slate-600 mt-0.5">Weeks {mod.weeks[0]}–{mod.weeks[1]} · Days {mod.days[0]}–{mod.days[1]}</p>
+                  </div>
+                  <div class="flex items-center gap-3 shrink-0">
+                    <span class="text-xs text-slate-600">{count} lessons</span>
+                    <a
+                      href={`/lessons/day-${firstDayStr}`}
+                      class="text-xs px-2.5 py-1 rounded-lg bg-sky-900/50 text-sky-400 hover:bg-sky-800 hover:text-sky-200 transition-colors"
+                      onclick="event.stopPropagation()"
+                    >
+                      Start →
+                    </a>
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        </section>
+
+        <!-- Key milestones -->
+        <section>
+          <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4">🏆 Projects &amp; Milestones</h2>
+          <div class="grid sm:grid-cols-2 gap-3">
+            {projectLessons.map(lesson => {
+              const dayStr = String(lesson.data.day).padStart(3, '0');
+              const mod = MODULES.find(m => m.id === lesson.data.module)!;
+              return (
+                <a
+                  href={`/lessons/day-${dayStr}`}
+                  class={`p-3 rounded-xl border transition-all group ${
+                    lesson.data.projectType === 'capstone'
+                      ? 'border-amber-800/40 bg-amber-950/20 hover:border-amber-700/60'
+                      : 'border-purple-800/40 bg-purple-950/20 hover:border-purple-700/60'
+                  }`}
+                >
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-sm">{lesson.data.projectType === 'capstone' ? '🏆' : '🔨'}</span>
+                    <span class={`text-xs font-medium ${lesson.data.projectType === 'capstone' ? 'text-amber-400' : 'text-purple-400'}`}>
+                      Day {lesson.data.day} · {lesson.data.projectType === 'capstone' ? 'Capstone' : 'Mini-Project'}
+                    </span>
+                  </div>
+                  <p class="text-sm text-slate-300 group-hover:text-white transition-colors leading-snug">{lesson.data.title}</p>
+                </a>
+              );
+            })}
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <!-- Stats row -->
+    <div class="mt-12 grid grid-cols-2 sm:grid-cols-4 gap-4">
+      {[
+        { label: 'Total Lessons', value: '130', icon: '📚' },
+        { label: 'Weeks', value: '26', icon: '📅' },
+        { label: 'Projects', value: String(projectLessons.length), icon: '🔨' },
+        { label: 'Min/Lesson', value: '30', icon: '⏱' },
+      ].map(stat => (
+        <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 text-center">
+          <div class="text-2xl mb-1">{stat.icon}</div>
+          <div class="text-2xl font-bold text-white tabular-nums">{stat.value}</div>
+          <div class="text-xs text-slate-500 mt-0.5">{stat.label}</div>
+        </div>
+      ))}
+    </div>
+  </main>
+</BaseLayout>

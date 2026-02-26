@@ -1,0 +1,242 @@
+---
+title: "OAuth 2.0 and OpenID Connect"
+day: 108
+week: 22
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "google_sign_in in Flutter, OAuth flow"
+csharpConcept: "OAuth 2.0 flows, OIDC, AddGoogle/AddMicrosoft, external login, Keycloak"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+OAuth 2.0 lets users sign in with Google, Microsoft, GitHub, or any identity provider. OpenID Connect (OIDC) extends OAuth with identity — you get a verified user profile alongside access tokens. ASP.NET Core has first-class support for both.
+
+## OAuth 2.0 Flow
+
+```
+User clicks "Sign in with Google"
+    │
+    ▼
+Your app redirects to Google:
+  https://accounts.google.com/oauth/authorize
+    ?client_id=YOUR_CLIENT_ID
+    &redirect_uri=https://yourapp.com/signin-google
+    &scope=openid email profile
+    &state=RANDOM_STATE_VALUE
+    │
+    ▼
+User authenticates with Google, grants permission
+    │
+    ▼
+Google redirects to your callback:
+  https://yourapp.com/signin-google?code=AUTH_CODE&state=RANDOM_STATE
+    │
+    ▼
+Your server exchanges code for tokens (server-to-server):
+  POST https://oauth2.googleapis.com/token
+    { code, client_id, client_secret, redirect_uri }
+    │
+    ▼
+Google returns: access_token, id_token (OIDC), refresh_token
+    │
+    ▼
+Decode id_token → get user's email, name, Google sub (unique ID)
+Create or find local user, issue your own JWT
+```
+
+## Adding External Providers to ASP.NET Core
+
+```csharp
+// Install packages:
+// dotnet add package Microsoft.AspNetCore.Authentication.Google
+// dotnet add package Microsoft.AspNetCore.Authentication.MicrosoftAccount
+// dotnet add package AspNet.Security.OAuth.GitHub
+
+// Program.cs
+builder.Services
+    .AddAuthentication(options =>
+    {
+        options.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(/* ... JWT config from day-107 */)
+    .AddGoogle(options =>
+    {
+        options.ClientId = builder.Configuration["Google:ClientId"]!;
+        options.ClientSecret = builder.Configuration["Google:ClientSecret"]!;
+        options.CallbackPath = "/signin-google";
+        options.Scope.Add("profile");  // get name + avatar
+        // Map claims from Google's response
+        options.ClaimActions.MapJsonKey("urn:google:picture", "picture", "url");
+    })
+    .AddMicrosoftAccount(options =>
+    {
+        options.ClientId = builder.Configuration["Microsoft:ClientId"]!;
+        options.ClientSecret = builder.Configuration["Microsoft:ClientSecret"]!;
+    })
+    .AddGitHub(options =>
+    {
+        options.ClientId = builder.Configuration["GitHub:ClientId"]!;
+        options.ClientSecret = builder.Configuration["GitHub:ClientSecret"]!;
+        options.Scope.Add("user:email");
+    });
+```
+
+## External Login Flow for API (Mobile/SPA)
+
+```csharp
+// For Flutter/SPA: the client handles the OAuth dance, sends us the ID token
+// We verify it server-side with Google's public keys
+
+// Endpoint: receive Google ID token from Flutter app
+app.MapPost("/api/auth/google", async (
+    GoogleLoginRequest request,
+    GoogleTokenVerifier verifier,
+    UserManager<AppUser> userManager,
+    JwtTokenService jwtService) =>
+{
+    // Verify the ID token with Google's public keys
+    var payload = await verifier.VerifyAsync(request.IdToken);
+    if (payload is null) return Results.Unauthorized();
+
+    // Find or create local user
+    var user = await userManager.FindByLoginAsync("Google", payload.Subject);
+
+    if (user is null)
+    {
+        // New user — create account
+        user = await userManager.FindByEmailAsync(payload.Email) ?? new AppUser
+        {
+            Email = payload.Email,
+            UserName = payload.Email,
+            DisplayName = payload.Name,
+            AvatarUrl = payload.Picture,
+            EmailConfirmed = payload.EmailVerified
+        };
+
+        if (user.Id == null)  // brand new
+        {
+            var createResult = await userManager.CreateAsync(user);
+            if (!createResult.Succeeded) return Results.Problem("Failed to create user");
+        }
+
+        // Link Google login to user
+        await userManager.AddLoginAsync(user,
+            new UserLoginInfo("Google", payload.Subject, "Google"));
+    }
+
+    var tokens = await jwtService.GenerateTokensAsync(user);
+    return Results.Ok(tokens);
+});
+
+// Google token verifier using Google.Apis.Auth:
+// dotnet add package Google.Apis.Auth
+public class GoogleTokenVerifier(IConfiguration config)
+{
+    public async Task<GoogleJsonWebSignature.Payload?> VerifyAsync(string idToken)
+    {
+        try
+        {
+            return await GoogleJsonWebSignature.ValidateAsync(idToken,
+                new GoogleJsonWebSignature.ValidationSettings
+                {
+                    Audience = [config["Google:ClientId"]!]
+                });
+        }
+        catch { return null; }
+    }
+}
+```
+
+## OpenID Connect with Keycloak / Auth0
+
+```csharp
+// For enterprise auth or when you want a centralized identity server
+// Keycloak is free/open-source; Auth0 is hosted
+
+builder.Services.AddAuthentication()
+    .AddOpenIdConnect("keycloak", options =>
+    {
+        options.Authority = "https://auth.yourcompany.com/realms/myrealm";
+        options.ClientId = "my-api";
+        options.ClientSecret = config["Keycloak:Secret"];
+        options.ResponseType = "code";
+        options.Scope.Add("openid");
+        options.Scope.Add("profile");
+        options.Scope.Add("email");
+
+        // Map Keycloak roles to ASP.NET Core roles
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            RoleClaimType = "realm_access.roles",
+            NameClaimType = "preferred_username"
+        };
+
+        options.Events = new OpenIdConnectEvents
+        {
+            OnTokenValidated = ctx =>
+            {
+                // Extract custom claims from Keycloak token
+                var realmRoles = ctx.Principal?.FindAll("realm_access")
+                    .Select(c => c.Value);
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+// For token-only validation (API that trusts Keycloak tokens):
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = "https://auth.yourcompany.com/realms/myrealm";
+        options.Audience = "my-api";
+        // Authority auto-discovers public keys from /.well-known/openid-configuration
+    });
+```
+
+## The Flutter Side — Using Your Auth API
+
+```dart
+// Flutter: use google_sign_in package, send ID token to your backend
+class AuthService {
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: ['email', 'profile'],
+  );
+
+  Future<TokenResponse?> signInWithGoogle() async {
+    final account = await _googleSignIn.signIn();
+    if (account == null) return null;
+
+    final auth = await account.authentication;
+    final idToken = auth.idToken;  // send THIS to your backend
+
+    final response = await http.post(
+      Uri.parse('https://api.yourapp.com/api/auth/google'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'idToken': idToken}),
+    );
+
+    if (response.statusCode == 200) {
+      return TokenResponse.fromJson(jsonDecode(response.body));
+    }
+    return null;
+  }
+}
+```
+
+<ConceptCallout type="tip" title="OAuth for Mobile vs Web">
+For Flutter apps, the recommended pattern is: Flutter handles the Google/Apple sign-in flow using platform SDKs (`google_sign_in`, `sign_in_with_apple`), gets an ID token, and sends it to your .NET backend. Your backend verifies the token cryptographically and issues your own JWT. This way, your backend is the source of truth for authorization, and you're not dependent on provider-specific APIs in your business logic.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Register a Google OAuth app in the Google Cloud Console (free). Implement the `POST /api/auth/google` endpoint that accepts a Google ID token and returns your app's JWT. Test it with a real Google token (use the Google OAuth Playground to get one).
+2. Implement "link account" functionality: a logged-in user can link their Google account to their existing email/password account. Handle the case where another user already linked that Google account.
+3. Add GitHub OAuth login: users can sign in with GitHub. Map their GitHub username to `DisplayName` and their GitHub avatar to `AvatarUrl`. Handle the case where their GitHub email is already registered — merge the accounts automatically.
+</ExerciseBlock>

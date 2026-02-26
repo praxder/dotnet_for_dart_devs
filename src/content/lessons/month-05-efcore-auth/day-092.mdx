@@ -1,0 +1,223 @@
+---
+title: "EF Core: Relationships and Configurations"
+day: 92
+week: 19
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "drift foreign keys, relations"
+csharpConcept: "one-to-many, many-to-many, one-to-one, Fluent API, data annotations"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+EF Core's relationship configuration determines how tables relate and how navigation properties work. You can configure with conventions (implicit from naming), Data Annotations (attributes), or Fluent API (the most powerful).
+
+## One-to-Many
+
+```csharp
+// Convention: EF Core infers the relationship from navigation properties + FKs
+public class Blog
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = "";
+    public List<Post> Posts { get; set; } = [];  // one blog has many posts
+}
+
+public class Post
+{
+    public int Id { get; set; }
+    public int BlogId { get; set; }     // foreign key (convention: {NavigationName}Id)
+    public Blog? Blog { get; set; }     // navigation property back to parent
+    public string Title { get; set; } = "";
+}
+
+// Fluent API configuration (in OnModelCreating):
+modelBuilder.Entity<Post>()
+    .HasOne(p => p.Blog)          // Post has one Blog
+    .WithMany(b => b.Posts)       // Blog has many Posts
+    .HasForeignKey(p => p.BlogId) // FK column
+    .OnDelete(DeleteBehavior.Cascade);  // delete posts when blog is deleted
+```
+
+## Many-to-Many
+
+```csharp
+// EF Core 5+: implicit many-to-many (no junction entity needed)
+public class Student
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public List<Course> Courses { get; set; } = [];
+}
+
+public class Course
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = "";
+    public List<Student> Students { get; set; } = [];
+}
+
+// EF Core creates a StudentCourse junction table automatically
+// Convention: the table is named based on both entity names
+
+// Explicit junction table (when you need extra columns):
+public class Enrollment
+{
+    public int StudentId { get; set; }
+    public Student? Student { get; set; }
+    public int CourseId { get; set; }
+    public Course? Course { get; set; }
+    public DateTime EnrolledAt { get; set; }   // extra column
+    public decimal? Grade { get; set; }         // extra column
+}
+
+// Configuration for explicit junction:
+modelBuilder.Entity<Enrollment>()
+    .HasKey(e => new { e.StudentId, e.CourseId });  // composite PK
+
+modelBuilder.Entity<Enrollment>()
+    .HasOne(e => e.Student)
+    .WithMany(s => s.Enrollments)
+    .HasForeignKey(e => e.StudentId);
+
+modelBuilder.Entity<Enrollment>()
+    .HasOne(e => e.Course)
+    .WithMany(c => c.Enrollments)
+    .HasForeignKey(e => e.CourseId);
+```
+
+## One-to-One
+
+```csharp
+public class User
+{
+    public int Id { get; set; }
+    public string Email { get; set; } = "";
+    public UserProfile? Profile { get; set; }  // optional one-to-one
+}
+
+public class UserProfile
+{
+    public int Id { get; set; }
+    public int UserId { get; set; }    // FK in the dependent entity
+    public User? User { get; set; }
+    public string Bio { get; set; } = "";
+    public string? AvatarUrl { get; set; }
+}
+
+modelBuilder.Entity<User>()
+    .HasOne(u => u.Profile)
+    .WithOne(p => p.User)
+    .HasForeignKey<UserProfile>(p => p.UserId);
+```
+
+## Fluent API — Table Configuration
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    // Table name
+    modelBuilder.Entity<OrderLine>().ToTable("order_lines");
+
+    // Column configuration
+    modelBuilder.Entity<Product>(entity =>
+    {
+        entity.Property(p => p.Name)
+            .HasMaxLength(200)
+            .IsRequired();
+
+        entity.Property(p => p.Price)
+            .HasPrecision(18, 2)
+            .IsRequired();
+
+        entity.Property(p => p.Description)
+            .HasMaxLength(2000)
+            .HasDefaultValue("");
+
+        // Index
+        entity.HasIndex(p => p.Sku).IsUnique();
+        entity.HasIndex(p => new { p.CategoryId, p.Price });  // composite
+
+        // Ignore a property (not mapped)
+        entity.Ignore(p => p.ComputedDisplay);
+    });
+
+    // Global query filter — auto-applied to all queries
+    // (for soft-delete, multi-tenancy)
+    modelBuilder.Entity<Product>()
+        .HasQueryFilter(p => !p.IsDeleted);
+}
+```
+
+## IEntityTypeConfiguration — Separate Config Files
+
+```csharp
+// Better than one giant OnModelCreating:
+public class ProductConfiguration : IEntityTypeConfiguration<Product>
+{
+    public void Configure(EntityTypeBuilder<Product> builder)
+    {
+        builder.ToTable("products");
+
+        builder.HasKey(p => p.Id);
+        builder.Property(p => p.Id).UseIdentityColumn();
+
+        builder.Property(p => p.Name).HasMaxLength(200).IsRequired();
+        builder.Property(p => p.Price).HasPrecision(18, 2);
+
+        builder.HasOne(p => p.Category)
+            .WithMany(c => c.Products)
+            .HasForeignKey(p => p.CategoryId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(p => p.Sku).IsUnique();
+    }
+}
+
+// Apply all configurations from the assembly:
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+}
+```
+
+## Seed Data
+
+```csharp
+// HasData — seeded in migrations (static, compile-time data)
+modelBuilder.Entity<Category>().HasData(
+    new Category { Id = 1, Name = "Electronics" },
+    new Category { Id = 2, Name = "Clothing" },
+    new Category { Id = 3, Name = "Books" }
+);
+
+// For development seeding with navigation properties:
+// dotnet add package Bogus  (fake data generator)
+public static class DbSeeder
+{
+    public static async Task SeedAsync(AppDbContext db)
+    {
+        if (await db.Products.AnyAsync()) return;  // already seeded
+
+        var faker = new Faker<Product>()
+            .RuleFor(p => p.Name, f => f.Commerce.ProductName())
+            .RuleFor(p => p.Price, f => f.Finance.Amount(1, 1000))
+            .RuleFor(p => p.CategoryId, f => f.PickRandom(1, 2, 3));
+
+        db.Products.AddRange(faker.Generate(50));
+        await db.SaveChangesAsync();
+    }
+}
+```
+
+<ExerciseBlock>
+1. Model a `Library` system: `Book` (has many copies), `Author` (many-to-many with Book), `Member`, `Loan` (junction between Member and Copy, with checkout date and due date). Configure all relationships with Fluent API in separate `IEntityTypeConfiguration` classes.
+2. Add a `SoftDeletable` base class with `IsDeleted` and `DeletedAt` properties. Configure a global query filter on all soft-deletable entities. Write a `SoftDeleteInterceptor` that overrides `SaveChangesAsync` to set `IsDeleted = true` instead of actually deleting.
+3. Seed your Library database with realistic data using Bogus: 20 authors, 100 books, 3 copies per book, 50 members, and 30 active loans.
+</ExerciseBlock>

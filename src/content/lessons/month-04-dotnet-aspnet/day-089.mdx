@@ -1,0 +1,238 @@
+---
+title: "gRPC with ASP.NET Core"
+day: 89
+week: 18
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "grpc package, protobuf, dart grpc client"
+csharpConcept: "Grpc.AspNetCore, .proto files, code generation, streaming RPCs"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+gRPC is a high-performance RPC framework using Protocol Buffers for serialization. It's ideal for service-to-service communication where performance, type safety, and streaming matter — especially in microservices and mobile backends. Dart has solid gRPC support, so the concepts translate well.
+
+## gRPC vs REST
+
+| | gRPC | REST |
+|--|--|--|
+| Protocol | HTTP/2 (always) | HTTP/1.1 or HTTP/2 |
+| Serialization | Protocol Buffers (binary) | JSON (text) |
+| Schema | .proto file (required) | OpenAPI (optional) |
+| Streaming | 4 types | Server-sent events only |
+| Browser support | Limited (grpc-web needed) | Full |
+| Performance | ~10x faster, ~5x smaller | Baseline |
+| Use case | Service-to-service, mobile | Public APIs |
+
+## Project Setup
+
+```bash
+dotnet new grpc -n MyGrpcService
+# Or add to existing:
+dotnet add package Grpc.AspNetCore
+```
+
+```xml
+<!-- MyGrpcService.csproj -->
+<ItemGroup>
+  <Protobuf Include="Protos\orders.proto" GrpcServices="Server" />
+</ItemGroup>
+```
+
+## Define a Proto File
+
+<CodeComparison>
+  <div slot="dart">
+  ```protobuf
+  // orders.proto — same for Dart and C#
+  syntax = "proto3";
+  package orders;
+
+  service OrderService {
+    rpc GetOrder (GetOrderRequest) returns (OrderResponse);
+    rpc ListOrders (ListOrdersRequest) returns (stream OrderResponse);
+    rpc CreateOrder (CreateOrderRequest) returns (OrderResponse);
+  }
+
+  message GetOrderRequest { string order_id = 1; }
+  message ListOrdersRequest { string customer_id = 1; }
+  message CreateOrderRequest {
+    string customer_id = 1;
+    repeated OrderLine lines = 2;
+  }
+  message OrderLine {
+    string product_id = 1;
+    int32 quantity = 2;
+    double unit_price = 3;
+  }
+  message OrderResponse {
+    string id = 1;
+    string customer_id = 2;
+    repeated OrderLine lines = 3;
+    double total = 4;
+    string status = 5;
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Code generated from proto:
+  // OrderServiceBase — abstract class to implement
+  // GetOrderRequest, OrderResponse — message classes
+  // OrderServiceClient — for calling from clients
+  ```
+  </div>
+</CodeComparison>
+
+## Implementing a gRPC Service
+
+```csharp
+using Grpc.Core;
+using Orders;  // generated namespace
+
+public class OrderGrpcService : OrderService.OrderServiceBase
+{
+    private readonly IOrderRepository _orders;
+
+    public OrderGrpcService(IOrderRepository orders) => _orders = orders;
+
+    // Unary RPC — single request, single response (like REST GET)
+    public override async Task<OrderResponse> GetOrder(
+        GetOrderRequest request,
+        ServerCallContext context)
+    {
+        var order = await _orders.GetByIdAsync(Guid.Parse(request.OrderId));
+
+        if (order is null)
+            throw new RpcException(new Status(StatusCode.NotFound, $"Order {request.OrderId} not found"));
+
+        return MapToResponse(order);
+    }
+
+    // Server streaming RPC — single request, multiple responses
+    public override async Task ListOrders(
+        ListOrdersRequest request,
+        IServerStreamWriter<OrderResponse> responseStream,
+        ServerCallContext context)
+    {
+        await foreach (var order in _orders.GetByCustomerAsync(request.CustomerId,
+            context.CancellationToken))
+        {
+            await responseStream.WriteAsync(MapToResponse(order));
+        }
+    }
+
+    private static OrderResponse MapToResponse(Order order) => new()
+    {
+        Id = order.Id.ToString(),
+        CustomerId = order.CustomerId,
+        Total = (double)order.Total,
+        Status = order.Status.ToString(),
+        Lines = { order.Lines.Select(l => new OrderLine
+        {
+            ProductId = l.ProductId,
+            Quantity = l.Quantity,
+            UnitPrice = (double)l.UnitPrice
+        }) }
+    };
+}
+
+// Register in Program.cs
+builder.Services.AddGrpc();
+app.MapGrpcService<OrderGrpcService>();
+```
+
+## All Four Streaming Types
+
+```protobuf
+// In .proto:
+service StreamingService {
+  // 1. Unary — one request, one response
+  rpc Unary (Request) returns (Response);
+
+  // 2. Server streaming — one request, many responses
+  rpc ServerStream (Request) returns (stream Response);
+
+  // 3. Client streaming — many requests, one response
+  rpc ClientStream (stream Request) returns (Response);
+
+  // 4. Bidirectional streaming — many requests, many responses
+  rpc BidiStream (stream Request) returns (stream Response);
+}
+```
+
+```csharp
+// Client streaming — client sends multiple messages
+public override async Task<BatchResult> BatchProcess(
+    IAsyncStreamReader<ProcessRequest> requestStream,
+    ServerCallContext context)
+{
+    int processed = 0;
+    await foreach (var request in requestStream.ReadAllAsync(context.CancellationToken))
+    {
+        await ProcessOneAsync(request);
+        processed++;
+    }
+    return new BatchResult { ProcessedCount = processed };
+}
+
+// Bidirectional streaming — chat, real-time updates
+public override async Task BidiStream(
+    IAsyncStreamReader<Request> requestStream,
+    IServerStreamWriter<Response> responseStream,
+    ServerCallContext context)
+{
+    var ct = context.CancellationToken;
+    await foreach (var request in requestStream.ReadAllAsync(ct))
+    {
+        var result = await ProcessAsync(request);
+        await responseStream.WriteAsync(new Response { Data = result });
+    }
+}
+```
+
+## gRPC Client
+
+```csharp
+// Call a gRPC service from another .NET service
+var channel = GrpcChannel.ForAddress("https://orders-service:5001");
+var client = new OrderService.OrderServiceClient(channel);
+
+// Unary call
+var order = await client.GetOrderAsync(new GetOrderRequest { OrderId = "123" });
+Console.WriteLine($"Order status: {order.Status}");
+
+// Server streaming
+using var stream = client.ListOrders(new ListOrdersRequest { CustomerId = "CUST-1" });
+await foreach (var response in stream.ResponseStream.ReadAllAsync())
+    Console.WriteLine($"Order: {response.Id} — {response.Status}");
+```
+
+## gRPC in ASP.NET Core — Authentication
+
+```csharp
+// gRPC uses HTTP headers for metadata (like HTTP headers in REST)
+[Authorize]
+public class SecureOrderService : OrderService.OrderServiceBase
+{
+    public override async Task<OrderResponse> GetOrder(
+        GetOrderRequest request, ServerCallContext context)
+    {
+        var user = context.GetHttpContext().User;
+        var userId = user.FindFirstValue(ClaimTypes.NameIdentifier)!;
+        // ...
+    }
+}
+```
+
+<ExerciseBlock>
+1. Build a gRPC service for a `ProductCatalog`: implement `GetProduct(id)`, `ListProducts(CategoryId)` (server streaming), and `SearchProducts(query)`. Generate the proto, implement the service, and call it from a test client.
+2. Implement client streaming: a `DataIngestion` service with `IngestEvents(stream IngestRequest) returns (IngestSummary)`. The client sends 1000 events in a stream; the server batches them into groups of 100 and persists each batch.
+3. Add gRPC reflection (`Grpc.AspNetCore.Server.Reflection`) to your service so you can call it with `grpcurl` without a proto file. Use grpcurl to list services and call methods from the command line.
+</ExerciseBlock>

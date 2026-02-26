@@ -1,0 +1,238 @@
+---
+title: "Mini-Project: Secure API with Full Authentication"
+day: 115
+week: 23
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "Flutter app authentication, secure storage, token refresh"
+csharpConcept: "Identity + JWT + OAuth + TOTP + resource-based auth + security headers"
+estimatedMinutes: 60
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This is the Module 9 capstone. You'll integrate the complete authentication and security stack: ASP.NET Core Identity, JWT with refresh tokens, Google OAuth, 2FA, resource-based authorization, rate limiting, and security headers — all tested with integration tests.
+
+## Project: Secure Blog API — Complete Auth Stack
+
+Building on the EF Core blog API from module 8, add the full auth layer.
+
+### Authentication Architecture
+
+```
+POST /api/auth/register          → Create account
+POST /api/auth/login             → Email/password → JWT pair (or 2FA challenge)
+POST /api/auth/verify-2fa        → Complete 2FA → JWT pair
+POST /api/auth/google            → Google ID token → JWT pair
+POST /api/auth/refresh           → Refresh token rotation
+POST /api/auth/logout            → Revoke refresh token
+POST /api/auth/forgot-password   → Email reset token
+POST /api/auth/reset-password    → Apply new password
+
+GET  /api/account/profile        → My profile
+PUT  /api/account/profile        → Update display name, bio
+GET  /api/account/sessions       → Active sessions
+DELETE /api/account/sessions/{id} → Revoke specific session
+POST /api/account/2fa/setup      → Begin 2FA setup
+POST /api/account/2fa/enable     → Enable 2FA with verification
+POST /api/account/2fa/disable    → Disable 2FA
+```
+
+### Complete Program.cs
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+// Database
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+
+// Identity
+builder.Services.AddIdentity<AppUser, IdentityRole>(options =>
+{
+    options.Password.RequiredLength = 8;
+    options.Password.RequireUppercase = false;
+    options.Password.RequireNonAlphanumeric = false;
+    options.Lockout.MaxFailedAccessAttempts = 5;
+    options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+    options.User.RequireUniqueEmail = true;
+})
+.AddEntityFrameworkStores<AppDbContext>()
+.AddDefaultTokenProviders();
+
+// Authentication
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidateAudience = true,
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+        };
+    });
+
+// Authorization
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+    options.AddPolicy("Admin", p => p.RequireRole("Admin"));
+    options.AddPolicy("Author", p => p.RequireRole("Admin", "Author"));
+    options.AddPolicy("PostOwner", p => p.AddRequirements(new OwnershipRequirement()));
+});
+
+// Authorization handlers
+builder.Services.AddSingleton<IAuthorizationHandler, PostOwnershipHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, CommentOwnershipHandler>();
+
+// Rate limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("auth", cfg =>
+    {
+        cfg.Window = TimeSpan.FromMinutes(15);
+        cfg.PermitLimit = 5;
+    });
+    options.AddPolicy("per-user", context =>
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return userId is not null
+            ? RateLimitPartition.GetSlidingWindowLimiter(userId, _ =>
+                new SlidingWindowRateLimiterOptions
+                {
+                    Window = TimeSpan.FromMinutes(1),
+                    PermitLimit = 60,
+                    SegmentsPerWindow = 6
+                })
+            : RateLimitPartition.GetFixedWindowLimiter("anon", _ =>
+                new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) });
+    });
+});
+
+// CORS
+builder.Services.AddCors(options =>
+    options.AddPolicy("Flutter", policy =>
+        policy
+            .WithOrigins(builder.Configuration.GetSection("AllowedOrigins").Get<string[]>()!)
+            .WithMethods("GET", "POST", "PUT", "DELETE")
+            .WithHeaders("Authorization", "Content-Type")));
+
+// MediatR + FluentValidation
+builder.Services.AddMediatR(cfg =>
+    cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
+builder.Services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+
+// Services
+builder.Services.AddScoped<JwtTokenService>();
+builder.Services.AddScoped<TwoFactorService>();
+builder.Services.AddScoped<GoogleTokenVerifier>();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddMemoryCache();
+builder.Services.AddDataProtection().SetApplicationName("BlogApi");
+
+var app = builder.Build();
+
+// Security middleware (order matters)
+app.UseSecurityHeaders();     // custom middleware adding security headers
+app.UseHttpsRedirection();
+app.UseCors("Flutter");
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Register all endpoint groups
+app.MapAuthEndpoints();       // /api/auth/*
+app.MapAccountEndpoints();    // /api/account/*
+app.MapBlogEndpoints();       // /api/blog/*
+app.MapAdminEndpoints();      // /api/admin/*
+
+await app.RunAsync();
+```
+
+### Security-Hardened Endpoint Example
+
+```csharp
+// Blog endpoints — mix of public and authenticated
+public static class BlogEndpoints
+{
+    public static void MapBlogEndpoints(this WebApplication app)
+    {
+        var group = app.MapGroup("/api/blog").WithOpenApi();
+
+        // Public: no auth required
+        group.MapGet("/posts", ([AsParameters] ListPostsQuery q, IMediator m) => m.Send(q))
+            .AllowAnonymous()
+            .RequireRateLimiting("per-user")
+            .WithName("ListPosts");
+
+        group.MapGet("/posts/{slug}", (string slug, IMediator m) =>
+            m.Send(new GetPostBySlugQuery(slug)))
+            .AllowAnonymous()
+            .WithName("GetPost");
+
+        // Authenticated: create post
+        group.MapPost("/posts", async (
+            CreatePostCommand cmd,
+            IMediator m,
+            ClaimsPrincipal user) =>
+        {
+            var result = await m.Send(cmd with { AuthorId = user.GetAuthorId() });
+            return Results.Created($"/api/blog/posts/{result.Slug}", result);
+        }).RequireAuthorization("Author");
+
+        // Resource-based: only owner or admin can update
+        group.MapPut("/posts/{id:int}", async (
+            int id,
+            UpdatePostRequest body,
+            IMediator m,
+            IAuthorizationService authService,
+            AppDbContext db,
+            ClaimsPrincipal user) =>
+        {
+            var post = await db.Posts.FindAsync(id);
+            if (post is null) return Results.NotFound();
+
+            var authResult = await authService.AuthorizeAsync(user, post, "PostOwner");
+            if (!authResult.Succeeded) return Results.Forbid();
+
+            return Results.Ok(await m.Send(new UpdatePostCommand(id, body.Title, body.Body, body.Summary)));
+        }).RequireAuthorization();
+
+        // Comments: require auth
+        group.MapPost("/posts/{id:int}/comments", async (
+            int id,
+            AddCommentRequest body,
+            IMediator m,
+            ClaimsPrincipal user) =>
+        {
+            var result = await m.Send(new AddCommentCommand(
+                PostId: id,
+                AuthorName: user.GetDisplayName(),
+                AuthorEmail: user.GetEmail(),
+                Body: body.Body));
+            return Results.Created($"/api/blog/posts/{id}/comments/{result.CommentId}", result);
+        }).RequireAuthorization();
+    }
+}
+```
+
+<ExerciseBlock>
+1. **Complete and run**: Implement all the auth endpoints listed in the architecture above. Run the app and test every endpoint with a REST client (curl, Bruno, or Insomnia). Verify the full flow: register → login → access protected resource → refresh → logout.
+2. **Integration test suite**: Write 20+ integration tests covering: happy path flows, unauthorized access (401), forbidden access (403), BOLA (accessing other users' resources returns 404), rate limit enforcement (429), and invalid input (422).
+3. **Security headers audit**: Use [securityheaders.com](https://securityheaders.com) or a similar tool against your localhost API. Verify all A-grade headers are present. If any are missing, add them to your `SecurityHeaders` middleware.
+4. **Flutter client**: In your Flutter project, implement an `AuthService` that calls your .NET backend's auth endpoints. Handle: JWT storage in `flutter_secure_storage`, automatic token refresh (intercept 401 responses with Dio interceptor), and Google Sign In that sends the ID token to your backend.
+</ExerciseBlock>

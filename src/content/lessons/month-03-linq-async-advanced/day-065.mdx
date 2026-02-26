@@ -1,0 +1,297 @@
+---
+title: "Capstone: C# Language Mastery Project"
+day: 65
+week: 13
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Full Dart application architecture"
+csharpConcept: "Channels, LINQ, generics, async/await, pattern matching, records, events"
+estimatedMinutes: 30
+isProject: true
+projectType: "capstone"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This capstone brings together everything from the first 13 weeks of C# learning. You'll build a real-time event processing engine that demonstrates mastery of the C# language before moving into the .NET ecosystem and ASP.NET.
+
+## Project: Real-Time Order Processing Engine
+
+Build an in-process order processing system that demonstrates:
+- Channels for async pipelines
+- LINQ for data querying
+- Pattern matching for business logic
+- Records for domain modeling
+- Events/delegates for notifications
+- Generics for reusable infrastructure
+- IDisposable for resource management
+
+### Domain Model
+
+```csharp
+// Enums and value objects
+public enum OrderStatus { Pending, Processing, Fulfilled, Failed, Refunded }
+public enum PaymentMethod { CreditCard, BankTransfer, Crypto }
+
+public readonly record struct OrderId(Guid Value)
+{
+    public static OrderId New() => new(Guid.NewGuid());
+    public static implicit operator OrderId(Guid g) => new(g);
+    public override string ToString() => Value.ToString("N")[..8];
+}
+
+// Domain events — discriminated union
+public abstract record OrderEvent(OrderId OrderId, DateTime OccurredAt)
+{
+    public record Placed(OrderId OrderId, Order Order, DateTime OccurredAt)
+        : OrderEvent(OrderId, OccurredAt);
+    public record PaymentProcessed(OrderId OrderId, decimal Amount, DateTime OccurredAt)
+        : OrderEvent(OrderId, OccurredAt);
+    public record Fulfilled(OrderId OrderId, string TrackingCode, DateTime OccurredAt)
+        : OrderEvent(OrderId, OccurredAt);
+    public record Failed(OrderId OrderId, string Reason, DateTime OccurredAt)
+        : OrderEvent(OrderId, OccurredAt);
+}
+
+// Order aggregate
+public record Order
+{
+    public OrderId Id { get; init; } = OrderId.New();
+    public required string CustomerId { get; init; }
+    public required IReadOnlyList<OrderLine> Lines { get; init; }
+    public required PaymentMethod PaymentMethod { get; init; }
+    public OrderStatus Status { get; init; } = OrderStatus.Pending;
+    public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
+
+    public decimal Total => Lines.Sum(l => l.UnitPrice * l.Quantity);
+
+    public Order WithStatus(OrderStatus status) => this with { Status = status };
+}
+
+public record OrderLine(
+    string ProductId,
+    string ProductName,
+    decimal UnitPrice,
+    int Quantity);
+```
+
+### Processing Pipeline
+
+```csharp
+public class OrderProcessor : IAsyncDisposable
+{
+    // Event for external notifications
+    public event EventHandler<OrderEvent>? OrderEventOccurred;
+
+    private readonly Channel<Order> _inboundChannel;
+    private readonly Channel<OrderEvent> _eventChannel;
+    private readonly ConcurrentDictionary<OrderId, Order> _orderStore;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Task _processingTask;
+    private readonly Task _eventDispatchTask;
+
+    public OrderProcessor()
+    {
+        _inboundChannel = Channel.CreateBounded<Order>(
+            new BoundedChannelOptions(1000) { FullMode = BoundedChannelFullMode.Wait });
+        _eventChannel = Channel.CreateUnbounded<OrderEvent>();
+        _orderStore = new ConcurrentDictionary<OrderId, Order>();
+
+        // Start background tasks
+        _processingTask = ProcessOrdersAsync(_cts.Token);
+        _eventDispatchTask = DispatchEventsAsync(_cts.Token);
+    }
+
+    public async Task SubmitOrderAsync(Order order, CancellationToken ct = default)
+    {
+        await _inboundChannel.Writer.WriteAsync(order, ct);
+    }
+
+    private async Task ProcessOrdersAsync(CancellationToken ct)
+    {
+        await foreach (var order in _inboundChannel.Reader.ReadAllAsync(ct))
+        {
+            try
+            {
+                await ProcessSingleOrderAsync(order, ct);
+            }
+            catch (Exception ex)
+            {
+                var failed = order.WithStatus(OrderStatus.Failed);
+                _orderStore[order.Id] = failed;
+                await _eventChannel.Writer.WriteAsync(
+                    new OrderEvent.Failed(order.Id, ex.Message, DateTime.UtcNow), ct);
+            }
+        }
+    }
+
+    private async Task ProcessSingleOrderAsync(Order order, CancellationToken ct)
+    {
+        // Update status to processing
+        var processing = order.WithStatus(OrderStatus.Processing);
+        _orderStore[order.Id] = processing;
+        await _eventChannel.Writer.WriteAsync(
+            new OrderEvent.Placed(order.Id, order, DateTime.UtcNow), ct);
+
+        // Simulate payment processing — varies by method
+        decimal processingFee = order.PaymentMethod switch
+        {
+            PaymentMethod.CreditCard  => order.Total * 0.025m,
+            PaymentMethod.BankTransfer => 2.50m,
+            PaymentMethod.Crypto       => order.Total * 0.01m,
+            _ => throw new UnreachableException()
+        };
+
+        await SimulatePaymentAsync(order.Total + processingFee, order.PaymentMethod, ct);
+        await _eventChannel.Writer.WriteAsync(
+            new OrderEvent.PaymentProcessed(order.Id, order.Total, DateTime.UtcNow), ct);
+
+        // Fulfill order
+        string tracking = $"TRK-{order.Id}-{Random.Shared.Next(100000, 999999)}";
+        var fulfilled = order.WithStatus(OrderStatus.Fulfilled);
+        _orderStore[order.Id] = fulfilled;
+        await _eventChannel.Writer.WriteAsync(
+            new OrderEvent.Fulfilled(order.Id, tracking, DateTime.UtcNow), ct);
+    }
+
+    private async Task SimulatePaymentAsync(
+        decimal amount, PaymentMethod method, CancellationToken ct)
+    {
+        // Simulate network latency
+        int delay = method switch
+        {
+            PaymentMethod.CreditCard   => Random.Shared.Next(100, 300),
+            PaymentMethod.BankTransfer => Random.Shared.Next(200, 500),
+            PaymentMethod.Crypto       => Random.Shared.Next(50, 150),
+            _ => 100
+        };
+        await Task.Delay(delay, ct);
+    }
+
+    private async Task DispatchEventsAsync(CancellationToken ct)
+    {
+        await foreach (var evt in _eventChannel.Reader.ReadAllAsync(ct))
+        {
+            OrderEventOccurred?.Invoke(this, evt);
+        }
+    }
+
+    public IReadOnlyDictionary<OrderId, Order> GetAllOrders() => _orderStore;
+
+    public IEnumerable<Order> GetOrdersByStatus(OrderStatus status)
+        => _orderStore.Values.Where(o => o.Status == status);
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _inboundChannel.Writer.Complete();
+        _eventChannel.Writer.Complete();
+
+        await Task.WhenAll(_processingTask, _eventDispatchTask);
+        _cts.Dispose();
+    }
+}
+```
+
+### Analytics Engine
+
+```csharp
+public static class OrderAnalytics
+{
+    public static void PrintReport(IEnumerable<Order> orders)
+    {
+        var list = orders.ToList();
+
+        Console.WriteLine("=== ORDER ANALYTICS ===");
+        Console.WriteLine($"Total Orders: {list.Count:N0}");
+        Console.WriteLine($"Total Revenue: {list.Sum(o => o.Total):C}");
+        Console.WriteLine();
+
+        // By status
+        Console.WriteLine("--- By Status ---");
+        foreach (var (status, count) in list
+            .GroupBy(o => o.Status)
+            .Select(g => (g.Key, g.Count()))
+            .OrderBy(t => t.Key))
+        {
+            Console.WriteLine($"  {status,12}: {count}");
+        }
+
+        // By payment method
+        Console.WriteLine("\n--- Revenue by Payment Method ---");
+        foreach (var (method, revenue, count) in list
+            .GroupBy(o => o.PaymentMethod)
+            .Select(g => (g.Key, g.Sum(o => o.Total), g.Count()))
+            .OrderByDescending(t => t.Item2))
+        {
+            Console.WriteLine($"  {method,14}: {revenue,12:C} ({count} orders)");
+        }
+
+        // Top products
+        Console.WriteLine("\n--- Top Products ---");
+        foreach (var (name, revenue) in list
+            .SelectMany(o => o.Lines)
+            .GroupBy(l => l.ProductName)
+            .Select(g => (g.Key, g.Sum(l => l.UnitPrice * l.Quantity)))
+            .OrderByDescending(t => t.Item2)
+            .Take(5))
+        {
+            Console.WriteLine($"  {name,-20}: {revenue:C}");
+        }
+    }
+}
+```
+
+### Program Entry Point
+
+```csharp
+await using var processor = new OrderProcessor();
+
+// Subscribe to events
+processor.OrderEventOccurred += (_, evt) =>
+{
+    string message = evt switch
+    {
+        OrderEvent.Placed { OrderId: var id }
+            => $"[{id}] Order placed",
+        OrderEvent.PaymentProcessed { OrderId: var id, Amount: var amt }
+            => $"[{id}] Payment processed: {amt:C}",
+        OrderEvent.Fulfilled { OrderId: var id, TrackingCode: var tracking }
+            => $"[{id}] Fulfilled — {tracking}",
+        OrderEvent.Failed { OrderId: var id, Reason: var reason }
+            => $"[{id}] FAILED: {reason}",
+        _ => $"[{evt.OrderId}] Unknown event"
+    };
+    Console.WriteLine($"  EVENT: {message}");
+};
+
+// Submit test orders in parallel
+var submitTasks = Enumerable.Range(1, 20).Select(i =>
+    processor.SubmitOrderAsync(new Order
+    {
+        CustomerId = $"CUST-{i % 5 + 1}",
+        PaymentMethod = (PaymentMethod)(i % 3),
+        Lines = [
+            new OrderLine($"PROD-{i % 10}", $"Product {i % 10}", 49.99m, Random.Shared.Next(1, 5)),
+            new OrderLine($"PROD-{(i + 3) % 10}", $"Product {(i + 3) % 10}", 19.99m, 1),
+        ]
+    })).ToArray();
+
+await Task.WhenAll(submitTasks);
+
+// Wait for all orders to process
+await Task.Delay(5000);
+
+// Print analytics
+var allOrders = processor.GetAllOrders().Values;
+OrderAnalytics.PrintReport(allOrders);
+```
+
+<ExerciseBlock>
+1. Add a `PriorityQueue<Order, int>` to process high-value orders (>$500) before regular orders, regardless of submission order.
+2. Add a retry mechanism: when an order fails payment, retry up to 3 times with exponential backoff (100ms, 200ms, 400ms) before marking as failed.
+3. Add a `RateLimit(int ordersPerSecond)` option to the processor using a `SemaphoreSlim` token bucket, preventing the system from processing more than N orders per second.
+4. Export the event log to a JSON file using `System.Text.Json` with source generation, including all events in chronological order.
+</ExerciseBlock>

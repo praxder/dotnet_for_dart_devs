@@ -1,0 +1,247 @@
+---
+title: "Type Casting and Checking: is, as, and Pattern Matching"
+day: 10
+week: 2
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "Dart is/is! type tests, as casting"
+csharpConcept: "is operator, as operator, is Type variable pattern, GetType() vs typeof()"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Type checking and casting work similarly in C# and Dart, but C# adds a powerful pattern that Dart doesn't have: the `is Type variable` declaration pattern that checks and binds in one expression. This is a preview of the full pattern matching system you'll explore in Module 2.
+
+## `is` — Type Checking
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  Object animal = Dog("Rex");
+
+  // Type test
+  if (animal is Dog) {
+    print("It's a dog");
+  }
+
+  // Negative test
+  if (animal is! Cat) {
+    print("Not a cat");
+  }
+
+  // In switch/when
+  switch (animal) {
+    case Dog d: print(d.name);
+    case Cat c: print(c.meow());
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  object animal = new Dog("Rex");
+
+  // Type test — same as Dart
+  if (animal is Dog)
+  {
+      Console.WriteLine("It's a dog");
+  }
+
+  // Negative test
+  if (animal is not Cat)
+  {
+      Console.WriteLine("Not a cat");
+  }
+
+  // C# declaration pattern — check AND bind in one step
+  if (animal is Dog d)
+  {
+      Console.WriteLine(d.Name); // d is Dog, already cast!
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="new" title="Declaration Pattern: Check + Cast in One Step">
+`if (animal is Dog d)` — this checks if `animal` is a `Dog` AND simultaneously declares a `d` variable of type `Dog`. No separate cast needed. This is extremely common in idiomatic C# code. Dart 3 has a similar feature in patterns, but C# had it first (since C# 7).
+</ConceptCallout>
+
+## `as` — Safe Casting
+
+`as` performs a cast that returns `null` if the cast fails, instead of throwing:
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  Object animal = Cat("Whiskers");
+
+  // Dart 'as' throws TypeError if wrong type
+  var dog = animal as Dog;    // throws! animal is Cat
+  var cat = animal as Cat;    // succeeds — cat is Cat
+
+  // Null-safe approach in Dart
+  var maybeDog = animal is Dog ? animal as Dog : null;
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  object animal = new Cat("Whiskers");
+
+  // C# 'as' returns null if wrong type (only for reference types)
+  var dog = animal as Dog;    // null — doesn't throw
+  var cat = animal as Cat;    // succeeds — cat is Cat
+
+  if (cat != null)
+  {
+      Console.WriteLine(cat.Name);
+  }
+
+  // Or combine into one step:
+  if (animal as Dog is { } d)
+  {
+      Console.WriteLine(d.Name);
+  }
+  ```
+  </div>
+</CodeComparison>
+
+### Hard Cast `(Type)` — Throws on Failure
+
+```csharp
+object value = "hello";
+
+// Hard cast — throws InvalidCastException if wrong type
+string s = (string)value;      // works
+int n = (int)value;            // throws! value is a string
+
+// When to use hard cast vs 'as':
+// - Hard cast: you KNOW the type and want to fail fast if wrong
+// - 'as': you're not sure and want to handle null case
+```
+
+## `GetType()` vs `typeof()`
+
+```csharp
+var obj = "hello";
+
+// GetType() — runtime type of an instance
+Type t = obj.GetType();                    // System.String
+Console.WriteLine(obj.GetType().Name);     // "String"
+Console.WriteLine(obj.GetType().FullName); // "System.String"
+
+// typeof() — compile-time type token
+Type stringType = typeof(string);
+Type listType = typeof(List<int>);
+
+// Exact type check (no inheritance)
+if (obj.GetType() == typeof(string)) { ... }  // exact match only
+
+// 'is' checks inheritance hierarchy
+if (obj is object) { ... }  // true — string inherits from object
+if (obj.GetType() == typeof(object)) { ... }  // false! GetType() is exact
+```
+
+<ConceptCallout type="tip" title="Use 'is' not GetType() == for Type Checks">
+Prefer `obj is SomeType` over `obj.GetType() == typeof(SomeType)`. The `is` check respects inheritance hierarchies, is more readable, and lets you use the declaration pattern simultaneously.
+</ConceptCallout>
+
+## Pattern Matching Preview
+
+The `is` operator in C# is the entry point to a full pattern matching system. You'll cover this in depth in Module 2, but here's a taste:
+
+```csharp
+object shape = new Circle { Radius = 5.0 };
+
+// Declaration pattern — type + bind
+if (shape is Circle c)
+{
+    Console.WriteLine($"Circle area: {Math.PI * c.Radius * c.Radius:F2}");
+}
+
+// Property pattern — check nested properties
+if (shape is Circle { Radius: > 0 } validCircle)
+{
+    Console.WriteLine("Valid circle");
+}
+
+// Switch expression with patterns
+double area = shape switch
+{
+    Circle c => Math.PI * c.Radius * c.Radius,
+    Rectangle r => r.Width * r.Height,
+    Triangle t => 0.5 * t.Base * t.Height,
+    null => throw new ArgumentNullException(nameof(shape)),
+    _ => throw new NotSupportedException($"Unknown shape: {shape.GetType().Name}"),
+};
+
+Console.WriteLine($"Area: {area:F2}");
+```
+
+## Practical: Working with Heterogeneous Data
+
+```csharp
+// A common pattern: processing a mixed list
+var items = new object[] { 42, "hello", 3.14, true, new DateTime(2024, 1, 1) };
+
+foreach (var item in items)
+{
+    var description = item switch
+    {
+        int n when n > 0 => $"positive int: {n}",
+        int n => $"non-positive int: {n}",
+        string s when s.Length > 3 => $"long string: \"{s}\"",
+        string s => $"short string: \"{s}\"",
+        double d => $"double: {d:F2}",
+        bool b => $"bool: {b}",
+        DateTime dt => $"date: {dt:yyyy-MM-dd}",
+        _ => $"unknown: {item.GetType().Name}",
+    };
+    Console.WriteLine(description);
+}
+// positive int: 42
+// long string: "hello"
+// double: 3.14
+// bool: True
+// date: 2024-01-01
+```
+
+## Casting Numeric Types
+
+Unlike reference type casting, numeric type casting is explicit and lossy:
+
+```csharp
+// Widening — implicit (no data loss)
+int n = 42;
+long l = n;          // int → long: implicit, always safe
+double d = n;        // int → double: implicit, always safe
+
+// Narrowing — explicit cast (potential data loss)
+double pi = 3.14159;
+int truncated = (int)pi;    // 3 — decimal truncated, not rounded!
+
+long big = 1_000_000_000_000L;
+int overflow = (int)big;    // may lose data — no exception by default!
+
+// Safe narrowing with checked
+checked
+{
+    int safe = (int)big;    // throws OverflowException if overflow
+}
+
+// Converting (not casting) — use Convert or Parse
+string s = "42";
+int parsed = int.Parse(s);                            // throws if invalid
+int safe2 = int.TryParse(s, out var r) ? r : 0;     // safe version
+int converted = Convert.ToInt32(s);                   // similar to Parse
+```
+
+<ExerciseBlock>
+1. Write a method `Describe(object value)` using a switch expression with declaration patterns for `int`, `double`, `string`, `bool`, `DateTime`, and `IEnumerable<object>` (which should print the count).
+2. Given `List<Animal> animals` containing `Dog` and `Cat` instances, use LINQ with `OfType<Dog>()` to filter to only dogs. Then look up `OfType<T>()` in the docs to understand how it uses type checking internally.
+3. Write a `SafeCast<T>(object obj, T defaultValue)` generic method that returns `(T)obj` if the cast succeeds, or `defaultValue` if it fails, without throwing.
+</ExerciseBlock>

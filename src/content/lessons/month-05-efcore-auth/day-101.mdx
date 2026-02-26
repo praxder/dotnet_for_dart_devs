@@ -1,0 +1,288 @@
+---
+title: "EF Core: Interceptors, Audit Logging, and Soft Delete"
+day: 101
+week: 21
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "middleware patterns in Dart, hooks in database packages"
+csharpConcept: "IDbCommandInterceptor, ISaveChangesInterceptor, audit trail, soft delete, shadow properties"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+EF Core interceptors are hooks that run before and after database operations. They're perfect for cross-cutting concerns: audit logging, soft delete, performance tracking, and command rewriting — without polluting entity or service code.
+
+## ISaveChangesInterceptor — Intercept Saves
+
+```csharp
+// Automatically set audit fields on every save
+public class AuditInterceptor(IHttpContextAccessor httpContext) : SaveChangesInterceptor
+{
+    public override InterceptionResult<int> SavingChanges(
+        DbContextEventData eventData,
+        InterceptionResult<int> result)
+    {
+        UpdateAuditFields(eventData.Context);
+        return base.SavingChanges(eventData, result);
+    }
+
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken ct = default)
+    {
+        UpdateAuditFields(eventData.Context);
+        return base.SavingChangesAsync(eventData, result, ct);
+    }
+
+    private void UpdateAuditFields(DbContext? context)
+    {
+        if (context is null) return;
+        var userId = httpContext.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var now = DateTime.UtcNow;
+
+        foreach (var entry in context.ChangeTracker.Entries())
+        {
+            if (entry.State == EntityState.Added && entry.Entity is ICreatable creatable)
+            {
+                creatable.CreatedAt = now;
+                creatable.CreatedBy = userId ?? "system";
+            }
+
+            if (entry.State is EntityState.Added or EntityState.Modified
+                && entry.Entity is IModifiable modifiable)
+            {
+                modifiable.UpdatedAt = now;
+                modifiable.UpdatedBy = userId ?? "system";
+            }
+        }
+    }
+}
+
+// Interfaces for auditable entities
+public interface ICreatable
+{
+    DateTime CreatedAt { get; set; }
+    string CreatedBy { get; set; }
+}
+
+public interface IModifiable : ICreatable
+{
+    DateTime UpdatedAt { get; set; }
+    string UpdatedBy { get; set; }
+}
+
+// Base class entities can inherit:
+public abstract class AuditableEntity : IModifiable
+{
+    public DateTime CreatedAt { get; set; }
+    public string CreatedBy { get; set; } = "";
+    public DateTime UpdatedAt { get; set; }
+    public string UpdatedBy { get; set; } = "";
+}
+
+// Registration:
+builder.Services.AddSingleton<AuditInterceptor>();
+builder.Services.AddDbContext<AppDbContext>((sp, options) =>
+    options.UseSqlite(connectionString)
+           .AddInterceptors(sp.GetRequiredService<AuditInterceptor>()));
+```
+
+## Soft Delete Interceptor
+
+```csharp
+// Instead of deleting rows, mark them as deleted
+public interface ISoftDeletable
+{
+    bool IsDeleted { get; set; }
+    DateTime? DeletedAt { get; set; }
+    string? DeletedBy { get; set; }
+}
+
+public class SoftDeleteInterceptor(IHttpContextAccessor httpContext) : SaveChangesInterceptor
+{
+    public override InterceptionResult<int> SavingChanges(
+        DbContextEventData eventData,
+        InterceptionResult<int> result)
+    {
+        ConvertDeletes(eventData.Context);
+        return base.SavingChanges(eventData, result);
+    }
+
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken ct = default)
+    {
+        ConvertDeletes(eventData.Context);
+        return base.SavingChangesAsync(eventData, result, ct);
+    }
+
+    private void ConvertDeletes(DbContext? context)
+    {
+        if (context is null) return;
+        var userId = httpContext.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        foreach (var entry in context.ChangeTracker.Entries<ISoftDeletable>()
+            .Where(e => e.State == EntityState.Deleted))
+        {
+            entry.State = EntityState.Modified;  // don't actually delete
+            entry.Entity.IsDeleted = true;
+            entry.Entity.DeletedAt = DateTime.UtcNow;
+            entry.Entity.DeletedBy = userId ?? "system";
+        }
+    }
+}
+
+// Global query filter to exclude deleted records automatically
+modelBuilder.Entity<Product>()
+    .HasQueryFilter(p => !p.IsDeleted);
+
+// To query deleted records when needed:
+var allProducts = await db.Products.IgnoreQueryFilters().ToListAsync();
+var deletedOnly = await db.Products.IgnoreQueryFilters()
+    .Where(p => p.IsDeleted)
+    .ToListAsync();
+```
+
+## Full Audit Trail — Change History Table
+
+```csharp
+// Record every change to audited entities
+public class AuditLog
+{
+    public long Id { get; set; }
+    public string TableName { get; set; } = "";
+    public string KeyValues { get; set; } = "";  // JSON: {"Id": 42}
+    public string? OldValues { get; set; }        // JSON: {"Price": 9.99}
+    public string? NewValues { get; set; }        // JSON: {"Price": 14.99}
+    public string Action { get; set; } = "";      // Added/Modified/Deleted
+    public DateTime Timestamp { get; set; }
+    public string? UserId { get; set; }
+}
+
+public class AuditTrailInterceptor(IHttpContextAccessor httpContext) : SaveChangesInterceptor
+{
+    public override async ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData,
+        int result,
+        CancellationToken ct = default)
+    {
+        // Called AFTER successful save — audit logs are committed atomically
+        if (eventData.Context is AppDbContext db)
+        {
+            var auditLogs = CreateAuditLogs(eventData.Context);
+            if (auditLogs.Any())
+            {
+                db.AuditLogs.AddRange(auditLogs);
+                await db.SaveChangesAsync(ct);  // second save for audit records
+            }
+        }
+        return await base.SavedChangesAsync(eventData, result, ct);
+    }
+
+    private List<AuditLog> CreateAuditLogs(DbContext? context)
+    {
+        if (context is null) return [];
+        var userId = httpContext.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        return context.ChangeTracker.Entries()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted)
+            .Select(entry => new AuditLog
+            {
+                TableName = entry.Metadata.GetTableName() ?? entry.Metadata.Name,
+                KeyValues = JsonSerializer.Serialize(
+                    entry.Properties
+                        .Where(p => p.Metadata.IsPrimaryKey())
+                        .ToDictionary(p => p.Metadata.Name, p => p.CurrentValue)),
+                OldValues = entry.State == EntityState.Added ? null :
+                    JsonSerializer.Serialize(
+                        entry.Properties
+                            .Where(p => p.IsModified || entry.State == EntityState.Deleted)
+                            .ToDictionary(p => p.Metadata.Name, p => p.OriginalValue)),
+                NewValues = entry.State == EntityState.Deleted ? null :
+                    JsonSerializer.Serialize(
+                        entry.Properties
+                            .Where(p => p.IsModified || entry.State == EntityState.Added)
+                            .ToDictionary(p => p.Metadata.Name, p => p.CurrentValue)),
+                Action = entry.State.ToString(),
+                Timestamp = DateTime.UtcNow,
+                UserId = userId
+            }).ToList();
+    }
+}
+```
+
+## IDbCommandInterceptor — Intercept SQL
+
+```csharp
+// Log slow queries, add SQL comments, or modify SQL commands
+public class SlowQueryInterceptor(
+    ILogger<SlowQueryInterceptor> logger,
+    int thresholdMs = 100)
+    : DbCommandInterceptor
+{
+    private readonly ConcurrentDictionary<DbCommand, Stopwatch> _timers = new();
+
+    public override InterceptionResult<DbDataReader> ReaderExecuting(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<DbDataReader> result)
+    {
+        _timers[command] = Stopwatch.StartNew();
+        return result;
+    }
+
+    public override DbDataReader ReaderExecuted(
+        DbCommand command,
+        CommandExecutedEventData eventData,
+        DbDataReader result)
+    {
+        if (_timers.TryRemove(command, out var sw) && sw.ElapsedMilliseconds > thresholdMs)
+        {
+            logger.LogWarning(
+                "Slow query ({Elapsed}ms):\n{SQL}",
+                sw.ElapsedMilliseconds,
+                command.CommandText);
+        }
+        return result;
+    }
+}
+```
+
+## Shadow Properties — Track State Without Polluting Entities
+
+```csharp
+// Shadow properties: exist in EF model but not in the C# class
+// Great for audit fields you don't want on the entity
+
+modelBuilder.Entity<Product>(entity =>
+{
+    entity.Property<DateTime>("CreatedAt").HasDefaultValueSql("GETUTCDATE()");
+    entity.Property<DateTime>("UpdatedAt");
+    entity.Property<string?>("CreatedById");
+});
+
+// Read shadow property:
+var createdAt = db.Entry(product).Property<DateTime>("CreatedAt").CurrentValue;
+
+// Set in interceptor:
+entry.Property("UpdatedAt").CurrentValue = DateTime.UtcNow;
+
+// Query by shadow property:
+var recent = await db.Products
+    .Where(p => EF.Property<DateTime>(p, "CreatedAt") > DateTime.UtcNow.AddDays(-7))
+    .ToListAsync();
+```
+
+<ExerciseBlock>
+1. Implement a complete audit system: `AuditableEntity` base class with `CreatedAt`, `CreatedBy`, `UpdatedAt`, `UpdatedBy`. Add an interceptor that auto-populates these. Verify it works by checking the fields after creating and updating a record.
+2. Add soft delete to your blog or shop domain: implement `SoftDeleteInterceptor`, add a global query filter, and test that (a) regular queries exclude deleted records, (b) `IgnoreQueryFilters()` shows them, (c) "deleting" actually sets `IsDeleted = true`.
+3. Build a slow query detector: `SlowQueryInterceptor` that logs warnings for any query taking more than 50ms. Test it by running a query on an unindexed column with many rows. Fix it with an index and confirm the warning disappears.
+</ExerciseBlock>

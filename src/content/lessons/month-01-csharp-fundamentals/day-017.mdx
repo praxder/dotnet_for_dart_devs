@@ -1,0 +1,218 @@
+---
+title: "Extension Methods"
+day: 17
+week: 4
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart extension on Type { method() {} }"
+csharpConcept: "C# static class with this TypeName parameter"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Extension methods let you add methods to existing types without modifying them or subclassing. Same capability as Dart's `extension` keyword, just different syntax. In C#, LINQ itself is entirely built on extension methods — so understanding this pattern is foundational.
+
+## The Syntax Difference
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart extension — dedicated keyword, clean syntax
+  extension StringExtensions on String {
+    String toTitleCase() {
+      if (isEmpty) return this;
+      return split(' ')
+        .map((w) => w[0].toUpperCase() + w.substring(1).toLowerCase())
+        .join(' ');
+    }
+
+    bool get isPalindrome {
+      final clean = toLowerCase().replaceAll(' ', '');
+      return clean == clean.split('').reversed.join('');
+    }
+  }
+
+  // Usage — looks like it's on String
+  'hello world'.toTitleCase();  // "Hello World"
+  'racecar'.isPalindrome;       // true
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# extension — static class, 'this' prefix on first param
+  public static class StringExtensions
+  {
+      public static string ToTitleCase(this string s)
+      {
+          if (string.IsNullOrEmpty(s)) return s;
+          return string.Join(' ',
+              s.Split(' ')
+               .Select(w => char.ToUpper(w[0]) + w[1..].ToLower()));
+      }
+
+      public static bool IsPalindrome(this string s)
+      {
+          var clean = s.ToLower().Replace(" ", "");
+          return clean == new string(clean.Reverse().ToArray());
+      }
+  }
+
+  // Usage — identical to Dart, looks like it's on string
+  "hello world".ToTitleCase();  // "Hello World"
+  "racecar".IsPalindrome();     // true
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="C# Extension Methods Need a Using Import">
+In Dart, extensions are automatically in scope if they're in the same library or imported. In C#, the static class containing your extension methods must be in scope via a `using` statement. If your extension method isn't showing up in IntelliSense, you're probably missing the `using`.
+</ConceptCallout>
+
+## Rules for Writing Extension Methods
+
+```csharp
+// 1. Must be in a static class
+public static class MyExtensions
+{
+    // 2. Method must be static
+    // 3. First parameter must have 'this' keyword
+    // 4. The 'this' parameter type is what gets extended
+    public static T OrDefault<T>(this T? value, T defaultValue)
+        where T : struct
+        => value ?? defaultValue;
+
+    // Can extend interfaces — very powerful!
+    public static IEnumerable<T> WhereNotNull<T>(this IEnumerable<T?> source)
+        where T : class
+        => source.Where(x => x is not null)!;
+
+    // Extending a specific generic type
+    public static T Second<T>(this IEnumerable<T> source)
+        => source.Skip(1).First();
+}
+```
+
+## Extending Interfaces — The LINQ Pattern
+
+LINQ is 100% extension methods on `IEnumerable<T>`. Here's a simplified version showing how it works:
+
+```csharp
+// These look like instance methods but are extension methods
+var numbers = new[] { 1, 2, 3, 4, 5 };
+
+numbers.Where(n => n > 2)     // WhereIterator<int>
+       .Select(n => n * n)     // SelectIterator<int, int>
+       .ToList();              // List<int> { 9, 16, 25 }
+
+// The ACTUAL definitions (simplified):
+// public static IEnumerable<T> Where<T>(this IEnumerable<T> source, Func<T, bool> predicate) { ... }
+// public static IEnumerable<TResult> Select<T, TResult>(this IEnumerable<T> source, Func<T, TResult> selector) { ... }
+```
+
+Since they extend `IEnumerable<T>`, they work on arrays, `List<T>`, `HashSet<T>`, custom collections — anything that implements the interface.
+
+## Real-World Extension Method Examples
+
+```csharp
+public static class EnumerableExtensions
+{
+    // Chunking — built into .NET 6, useful to understand
+    public static IEnumerable<T[]> Chunk<T>(this IEnumerable<T> source, int size)
+    {
+        var buffer = new List<T>(size);
+        foreach (var item in source)
+        {
+            buffer.Add(item);
+            if (buffer.Count == size)
+            {
+                yield return buffer.ToArray();
+                buffer.Clear();
+            }
+        }
+        if (buffer.Count > 0) yield return buffer.ToArray();
+    }
+
+    // Running total
+    public static IEnumerable<decimal> RunningSum(this IEnumerable<decimal> source)
+    {
+        decimal sum = 0;
+        foreach (var item in source)
+        {
+            sum += item;
+            yield return sum;
+        }
+    }
+
+    // Paginate
+    public static IEnumerable<T> Page<T>(this IEnumerable<T> source, int page, int pageSize)
+        => source.Skip((page - 1) * pageSize).Take(pageSize);
+}
+
+public static class DateTimeExtensions
+{
+    public static bool IsWeekend(this DateTime dt)
+        => dt.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+
+    public static DateTime StartOfWeek(this DateTime dt)
+    {
+        var diff = (7 + (dt.DayOfWeek - DayOfWeek.Monday)) % 7;
+        return dt.AddDays(-diff).Date;
+    }
+
+    public static string ToRelativeString(this DateTime dt)
+    {
+        var diff = DateTime.Now - dt;
+        return diff.TotalSeconds switch
+        {
+            < 60 => "just now",
+            < 3600 => $"{(int)diff.TotalMinutes} minutes ago",
+            < 86400 => $"{(int)diff.TotalHours} hours ago",
+            _ => $"{(int)diff.TotalDays} days ago",
+        };
+    }
+}
+
+// Usage
+var orders = GetOrders();
+var page2 = orders.Page(2, 20).ToList();
+
+var amounts = orders.Select(o => o.Amount);
+var runningTotals = amounts.RunningSum().ToList();
+
+var postedAt = DateTime.Now.AddHours(-3);
+Console.WriteLine(postedAt.ToRelativeString()); // "3 hours ago"
+```
+
+## Extension Methods on Nullable Types
+
+```csharp
+public static class NullableExtensions
+{
+    // Extend nullable reference types
+    public static string OrEmpty(this string? s) => s ?? string.Empty;
+    public static bool IsNullOrEmpty(this string? s) => string.IsNullOrEmpty(s);
+
+    // Extend nullable value types
+    public static T OrDefault<T>(this T? nullable, T defaultValue)
+        where T : struct
+        => nullable ?? defaultValue;
+}
+
+string? name = GetUserName();
+var display = name.OrEmpty().ToTitleCase(); // safe chaining
+
+int? age = GetAge();
+var displayAge = age.OrDefault(0);
+```
+
+<ExerciseBlock>
+1. Write a `StringExtensions` class with: `Truncate(int maxLength, string ellipsis = "...")`, `ToSlug()` (converts "Hello World" to "hello-world"), and `CountWords()`.
+2. Add a `Shuffle<T>()` extension to `IList<T>` that randomizes the list in place using Fisher-Yates. Also add `TakeSample<T>(int n)` to `IEnumerable<T>` that returns n random elements.
+3. Create `HttpResponseMessageExtensions` with an `EnsureSuccessAndRead<T>()` method that calls `EnsureSuccessStatusCode()` then deserializes the JSON body to `T` using `System.Text.Json`.
+</ExerciseBlock>

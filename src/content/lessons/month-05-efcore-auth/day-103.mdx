@@ -1,0 +1,217 @@
+---
+title: "EF Core: Temporal Tables and Historical Data"
+day: 103
+week: 21
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "event log patterns in Dart, audit history"
+csharpConcept: "temporal tables, time travel queries, TemporalAsOf, point-in-time queries, SQL Server temporal"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+SQL Server Temporal Tables and PostgreSQL's temporal features let you query data "as of" a point in time — the database stores all history automatically. EF Core 6+ has first-class support for temporal table queries.
+
+## What Are Temporal Tables?
+
+```sql
+-- SQL Server creates a history table automatically
+-- Every row tracks ValidFrom / ValidTo timestamps
+-- The "current" table: products
+-- The "history" table: products_history
+
+-- Normal SELECT — current data only
+SELECT * FROM products WHERE id = 42;
+-- {Id: 42, Price: 14.99, ValidFrom: 2024-01-15, ValidTo: 9999-12-31}
+
+-- Time travel — see the row as it was on Jan 10th
+SELECT * FROM products FOR SYSTEM_TIME AS OF '2024-01-10'
+WHERE id = 42;
+-- {Id: 42, Price: 9.99, ValidFrom: 2024-01-01, ValidTo: 2024-01-15}
+```
+
+## EF Core Temporal Table Setup
+
+```csharp
+public class Product
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public decimal Price { get; set; }
+    public int StockQuantity { get; set; }
+    // No need to add ValidFrom/ValidTo — EF handles them as shadow properties
+}
+
+// Configuration:
+modelBuilder.Entity<Product>()
+    .ToTable("products", tb => tb.IsTemporal(temporal =>
+    {
+        temporal.HasPeriodStart("ValidFrom");
+        temporal.HasPeriodEnd("ValidTo");
+        temporal.UseHistoryTable("products_history");  // optional custom name
+    }));
+```
+
+```bash
+# Generate migration — creates temporal table
+dotnet ef migrations add AddTemporalToProducts
+# Reviews the generated migration:
+# .IsTemporal() adds ValidFrom, ValidTo, PERIOD FOR SYSTEM_TIME, and SYSTEM_VERSIONING
+dotnet ef database update
+```
+
+## Time Travel Queries
+
+```csharp
+// What was the price on January 10th?
+var pointInTime = new DateTime(2024, 1, 10, 0, 0, 0, DateTimeKind.Utc);
+
+var productThen = await db.Products
+    .TemporalAsOf(pointInTime)
+    .FirstOrDefaultAsync(p => p.Id == 42);
+
+Console.WriteLine(productThen?.Price);  // 9.99 (before the price increase)
+
+// Get all versions of a product (full history):
+var history = await db.Products
+    .TemporalAll()
+    .Where(p => p.Id == 42)
+    .OrderBy(p => EF.Property<DateTime>(p, "ValidFrom"))
+    .Select(p => new
+    {
+        p.Price,
+        p.StockQuantity,
+        ValidFrom = EF.Property<DateTime>(p, "ValidFrom"),
+        ValidTo = EF.Property<DateTime>(p, "ValidTo")
+    })
+    .ToListAsync();
+
+// What was in the catalog between two dates?
+var between = await db.Products
+    .TemporalBetween(
+        new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+        new DateTime(2024, 2, 1, 0, 0, 0, DateTimeKind.Utc))
+    .Where(p => p.CategoryId == 5)
+    .ToListAsync();
+
+// What has changed since a point? (includes rows modified after that point)
+var changed = await db.Products
+    .TemporalFromTo(DateTime.UtcNow.AddDays(-7), DateTime.UtcNow)
+    .Where(p => p.Id == 42)
+    .ToListAsync();
+```
+
+## Practical Use Cases
+
+```csharp
+// Audit: Who changed the price and when?
+public record PriceHistory(decimal Price, DateTime ValidFrom, DateTime ValidTo);
+
+public async Task<List<PriceHistory>> GetPriceHistoryAsync(int productId)
+    => await db.Products
+        .TemporalAll()
+        .Where(p => p.Id == productId)
+        .OrderByDescending(p => EF.Property<DateTime>(p, "ValidFrom"))
+        .Select(p => new PriceHistory(
+            p.Price,
+            EF.Property<DateTime>(p, "ValidFrom"),
+            EF.Property<DateTime>(p, "ValidTo")))
+        .ToListAsync();
+
+// Restore: revert to a previous state
+public async Task RestoreProductAsync(int productId, DateTime asOf)
+{
+    var historical = await db.Products
+        .TemporalAsOf(asOf)
+        .AsNoTracking()
+        .FirstOrDefaultAsync(p => p.Id == productId)
+        ?? throw new KeyNotFoundException();
+
+    var current = await db.Products.FindAsync(productId)
+        ?? throw new KeyNotFoundException();
+
+    // Restore specific fields from historical version
+    current.Price = historical.Price;
+    current.Name = historical.Name;
+    // (temporal table auto-records this as a new history entry)
+    await db.SaveChangesAsync();
+}
+
+// Compliance: generate a report of all data at year-end
+public async Task<List<Product>> GetYearEndInventoryAsync(int year)
+    => await db.Products
+        .TemporalAsOf(new DateTime(year, 12, 31, 23, 59, 59, DateTimeKind.Utc))
+        .AsNoTracking()
+        .ToListAsync();
+```
+
+## PostgreSQL — Temporal with Versioning
+
+```csharp
+// PostgreSQL doesn't have native temporal tables
+// Use a versioning pattern with triggers, or a history table manually
+
+// Alternative: use system_period_temporality extension (with trigger)
+// Or implement soft-versioning in EF Core:
+
+public class ProductVersion
+{
+    public long Id { get; set; }
+    public int ProductId { get; set; }
+    public Product? Product { get; set; }
+    public decimal Price { get; set; }
+    public string Name { get; set; } = "";
+    public DateTime ValidFrom { get; set; }
+    public DateTime? ValidTo { get; set; }
+    public string ChangedBy { get; set; } = "";
+}
+
+// Interceptor creates a version record on each product update
+public class VersioningInterceptor : SaveChangesInterceptor
+{
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData data,
+        InterceptionResult<int> result,
+        CancellationToken ct = default)
+    {
+        if (data.Context is null) return base.SavingChangesAsync(data, result, ct);
+
+        foreach (var entry in data.Context.ChangeTracker.Entries<Product>()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified))
+        {
+            // Close the previous version
+            // (would need separate query to update ValidTo on old version)
+
+            // Create new version
+            data.Context.Set<ProductVersion>().Add(new ProductVersion
+            {
+                ProductId = entry.Entity.Id,
+                Price = entry.Entity.Price,
+                Name = entry.Entity.Name,
+                ValidFrom = DateTime.UtcNow
+            });
+        }
+        return base.SavingChangesAsync(data, result, ct);
+    }
+}
+```
+
+<ConceptCallout type="tip" title="When to Use Temporal Tables vs Manual Audit">
+**SQL Server Temporal Tables**: Best choice for SQL Server. Zero code in application layer — the DB handles everything. Supports complex time-travel queries. Requires SQL Server 2016+.
+
+**Manual history table + interceptor**: Works on any database (SQLite, PostgreSQL, MySQL). More control over what you capture. Slightly more code. Needed when you also want to capture WHO made the change.
+
+**Audit logs** (from day-101): Best for "who changed what" compliance requirements. Less efficient for time-travel queries.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Configure temporal tables for `Product` and `Order` in SQL Server. Write a query that shows all price changes for a product over the last year, ordered by time. Include a "price history" API endpoint: `GET /api/products/{id}/price-history`.
+2. Implement a "restore to version" feature: `POST /api/products/{id}/restore?asOf=2024-01-01`. The endpoint retrieves the product state as of the given date and applies it to the current record. Write a test that modifies a product, then restores it and verifies the values.
+3. Build a compliance report endpoint: `GET /api/reports/inventory-snapshot?date=2024-12-31` that returns the complete inventory (all products and quantities) as they existed on that date. Compare the generated SQL against a manual join with the history table.
+</ExerciseBlock>

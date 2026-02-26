@@ -1,0 +1,275 @@
+---
+title: "EF Core: Multi-Tenancy Patterns"
+day: 102
+week: 21
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "multi-tenant apps in Flutter, tenant context"
+csharpConcept: "row-level multi-tenancy, schema-per-tenant, global query filters, tenant resolution"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Multi-tenancy lets one application serve multiple isolated clients. There are three approaches: shared database with tenant column (row-level), separate schemas per tenant, or separate databases per tenant. EF Core handles all three, with row-level being most common in SaaS applications.
+
+## Strategy 1: Row-Level Isolation (Shared Database)
+
+```csharp
+// Every tenant's data lives in the same tables, filtered by tenant ID
+// Simplest, cheapest, but requires discipline to never forget the filter
+
+// Tenant-aware base entity
+public interface ITenantEntity
+{
+    string TenantId { get; set; }
+}
+
+public abstract class TenantEntity : ITenantEntity
+{
+    public string TenantId { get; set; } = "";
+}
+
+// Product belongs to a tenant
+public class Product : TenantEntity
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public decimal Price { get; set; }
+}
+
+// Tenant context — resolved from JWT/header/subdomain
+public interface ITenantContext
+{
+    string TenantId { get; }
+}
+
+public class TenantContext(IHttpContextAccessor httpContext) : ITenantContext
+{
+    public string TenantId
+    {
+        get
+        {
+            // Option 1: From JWT claim
+            var claim = httpContext.HttpContext?.User.FindFirstValue("tenant_id");
+            if (claim is not null) return claim;
+
+            // Option 2: From subdomain (acme.myapp.com → "acme")
+            var host = httpContext.HttpContext?.Request.Host.Host ?? "";
+            var parts = host.Split('.');
+            if (parts.Length >= 3) return parts[0];
+
+            // Option 3: From header
+            return httpContext.HttpContext?.Request.Headers["X-Tenant-Id"].FirstOrDefault()
+                ?? throw new InvalidOperationException("No tenant context");
+        }
+    }
+}
+```
+
+## Global Query Filter for Tenant Isolation
+
+```csharp
+public class AppDbContext(
+    DbContextOptions<AppDbContext> options,
+    ITenantContext tenantContext)
+    : DbContext(options)
+{
+    private string CurrentTenantId => tenantContext.TenantId;
+
+    public DbSet<Product> Products { get; set; }
+    public DbSet<Order> Orders { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Apply global filter to ALL tenant entities automatically
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            if (typeof(ITenantEntity).IsAssignableFrom(entityType.ClrType))
+            {
+                var method = typeof(AppDbContext)
+                    .GetMethod(nameof(ApplyTenantFilter),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(entityType.ClrType);
+
+                method.Invoke(null, [modelBuilder, this]);
+            }
+        }
+    }
+
+    private static void ApplyTenantFilter<TEntity>(
+        ModelBuilder builder,
+        AppDbContext context)
+        where TEntity : class, ITenantEntity
+    {
+        builder.Entity<TEntity>()
+            .HasQueryFilter(e => e.TenantId == context.CurrentTenantId);
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken ct = default)
+    {
+        // Auto-assign TenantId to new entities
+        foreach (var entry in ChangeTracker.Entries<ITenantEntity>()
+            .Where(e => e.State == EntityState.Added))
+        {
+            entry.Entity.TenantId = CurrentTenantId;
+        }
+        return base.SaveChangesAsync(ct);
+    }
+}
+
+// Registration — TenantContext is Scoped (one per request):
+builder.Services.AddScoped<ITenantContext, TenantContext>();
+builder.Services.AddDbContext<AppDbContext>();
+// With pooling, use AddDbContextFactory instead
+```
+
+## Tenant Middleware — Validate Tenant Early
+
+```csharp
+public class TenantMiddleware(RequestDelegate next, IServiceProvider sp)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Resolve tenant from request
+        var tenantId = ResolveTenantId(context);
+
+        if (tenantId is null)
+        {
+            context.Response.StatusCode = 400;
+            await context.Response.WriteAsync("Missing tenant identifier");
+            return;
+        }
+
+        // Validate tenant exists in tenant registry
+        using var scope = sp.CreateScope();
+        var registry = scope.ServiceProvider.GetRequiredService<ITenantRegistry>();
+        var tenant = await registry.GetTenantAsync(tenantId);
+
+        if (tenant is null || !tenant.IsActive)
+        {
+            context.Response.StatusCode = 404;
+            await context.Response.WriteAsync("Tenant not found or inactive");
+            return;
+        }
+
+        // Store in HttpContext for downstream use
+        context.Items["TenantId"] = tenantId;
+        context.Items["Tenant"] = tenant;
+        await next(context);
+    }
+
+    private string? ResolveTenantId(HttpContext context)
+    {
+        // Try multiple resolution strategies
+        if (context.Request.Headers.TryGetValue("X-Tenant-Id", out var header))
+            return header.FirstOrDefault();
+
+        var host = context.Request.Host.Host;
+        var subdomain = host.Split('.').FirstOrDefault();
+        if (subdomain is not null and not "www" and not "api")
+            return subdomain;
+
+        return context.User.FindFirstValue("tenant_id");
+    }
+}
+```
+
+## Strategy 2: Schema-Per-Tenant
+
+```csharp
+// Each tenant gets their own schema: tenant1.products, tenant2.products
+// More isolation, more complexity
+
+public class SchemaAwareDbContext(
+    DbContextOptions options,
+    string tenantSchema)
+    : DbContext(options)
+{
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // All entities go in the tenant's schema
+        modelBuilder.HasDefaultSchema(tenantSchema);
+    }
+}
+
+// Factory that creates context for a specific tenant schema
+public class TenantDbContextFactory(
+    IConfiguration config,
+    ITenantContext tenantContext)
+{
+    public AppDbContext Create()
+    {
+        var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
+        optionsBuilder.UseSqlServer(config.GetConnectionString("Default"));
+
+        return new AppDbContext(
+            optionsBuilder.Options,
+            tenantContext.TenantId);  // becomes the schema name
+    }
+}
+
+// Migration: run per-tenant migrations
+// dotnet ef database update -- --schema tenant_acme
+```
+
+## Strategy 3: Database-Per-Tenant
+
+```csharp
+// Each tenant has their own database — maximum isolation, highest cost
+
+public class TenantConnectionStringResolver(
+    ITenantContext tenantContext,
+    ITenantRegistry registry)
+{
+    public async Task<string> GetConnectionStringAsync()
+    {
+        var tenant = await registry.GetTenantAsync(tenantContext.TenantId);
+        return tenant?.ConnectionString
+            ?? throw new InvalidOperationException($"No connection string for tenant {tenantContext.TenantId}");
+    }
+}
+
+// DbContext with dynamic connection string
+public class TenantDbContext : DbContext
+{
+    private readonly string _connectionString;
+
+    public TenantDbContext(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder.UseSqlServer(_connectionString);
+}
+
+// Onboarding new tenant:
+public async Task ProvisionTenantAsync(string tenantId, string connectionString)
+{
+    var options = new DbContextOptionsBuilder<TenantDbContext>()
+        .UseSqlServer(connectionString)
+        .Options;
+
+    using var db = new TenantDbContext(options);
+    await db.Database.MigrateAsync();  // run all migrations for new tenant DB
+    await SeedDefaultDataAsync(db);
+}
+```
+
+<ConceptCallout type="tip" title="Choosing a Multi-Tenancy Strategy">
+- **Row-level**: Easiest to implement. Use when you have many small tenants and cost is a concern. Risk: bugs can leak data between tenants if filters are bypassed.
+- **Schema-per-tenant**: Good balance of isolation and cost. Works well with PostgreSQL. Requires per-tenant migrations.
+- **Database-per-tenant**: Maximum isolation, GDPR-friendly (easy data deletion). Use for enterprise/compliance-heavy tenants or when tenants need different schemas.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Implement row-level multi-tenancy for a `ShopContext` with `Product` and `Order` entities. Use `ITenantEntity` + global query filters. Write a test that creates two tenants with different products and verifies that querying as tenant A never returns tenant B's products.
+2. Tenant registration endpoint: `POST /api/tenants` accepts a tenant name, auto-generates a tenant ID (slug from name), creates default configuration, and seeds initial data. Add a tenant lookup service backed by its own `TenantRegistryDbContext` (not tenant-isolated).
+3. Security exercise: write a test that attempts to bypass the tenant filter by using `IgnoreQueryFilters()` from a controller action. Verify that your authorization middleware prevents non-admin users from accessing that endpoint.
+</ExerciseBlock>

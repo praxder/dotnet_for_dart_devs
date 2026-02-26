@@ -1,0 +1,254 @@
+---
+title: "Capstone Project: Flutter + .NET API (Part 1 — Architecture)"
+day: 129
+week: 26
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "full Flutter app architecture, state management"
+csharpConcept: "full-stack .NET + Flutter architecture, API design, auth flow, real-time"
+estimatedMinutes: 45
+isProject: true
+projectType: "capstone"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+You've spent 128 days learning C# and .NET. Today you design a full-stack project that uses everything — from LINQ and EF Core to auth, SignalR, Docker, and CI/CD — alongside your existing Flutter expertise.
+
+## The Capstone: Real-Time Task Board
+
+A collaborative task board (think Trello/Linear) where multiple users manage tasks in real time. This covers every major .NET concept from the course while being something you'd actually build as a Flutter developer.
+
+## Domain Model
+
+```
+Workspace (root aggregate)
+  ├── members[] (users with roles: owner, admin, member)
+  └── boards[]
+
+Board (root aggregate)
+  ├── name, description
+  ├── columns[] (To Do, In Progress, Review, Done)
+  └── tasks[]
+
+Task (entity in Board aggregate)
+  ├── title, description (markdown)
+  ├── assignee (User ref)
+  ├── priority (Low, Medium, High, Critical)
+  ├── labels[]
+  ├── dueDate?
+  ├── position (in column — for ordering)
+  └── comments[]
+
+User (Identity aggregate)
+  ├── IdentityUser (login, password, 2FA)
+  └── Profile (display name, avatar, preferences)
+```
+
+## .NET Backend Architecture
+
+```
+src/
+├── TaskBoard.Api/                 ← ASP.NET Core entry point
+│   ├── Program.cs                 ← DI composition, middleware
+│   ├── Endpoints/                 ← Minimal API route registration
+│   │   ├── WorkspaceEndpoints.cs
+│   │   ├── BoardEndpoints.cs
+│   │   ├── TaskEndpoints.cs
+│   │   └── AuthEndpoints.cs
+│   └── Hubs/
+│       └── BoardHub.cs            ← SignalR real-time updates
+│
+├── TaskBoard.Domain/              ← Domain model, no dependencies
+│   ├── Aggregates/
+│   │   ├── Board.cs
+│   │   └── Workspace.cs
+│   ├── Entities/
+│   │   └── Task.cs
+│   ├── ValueObjects/
+│   │   ├── TaskPosition.cs
+│   │   └── Label.cs
+│   └── Events/
+│       ├── TaskCreated.cs
+│       ├── TaskMoved.cs
+│       └── TaskAssigned.cs
+│
+├── TaskBoard.Application/         ← CQRS commands, queries, handlers
+│   ├── Commands/
+│   │   ├── CreateTask/
+│   │   │   ├── CreateTaskCommand.cs
+│   │   │   └── CreateTaskHandler.cs
+│   │   └── MoveTask/
+│   │       ├── MoveTaskCommand.cs
+│   │       └── MoveTaskHandler.cs
+│   ├── Queries/
+│   │   ├── GetBoard/
+│   │   └── GetTask/
+│   └── Notifications/
+│       └── TaskMovedNotificationHandler.cs  ← pushes via SignalR
+│
+├── TaskBoard.Infrastructure/      ← EF Core, Identity, external services
+│   ├── Persistence/
+│   │   ├── AppDbContext.cs
+│   │   └── Configurations/
+│   ├── Identity/
+│   │   └── JwtTokenService.cs
+│   └── Hubs/
+│       └── BoardHubService.cs
+│
+└── tests/
+    ├── TaskBoard.UnitTests/
+    ├── TaskBoard.IntegrationTests/
+    └── TaskBoard.ArchTests/       ← verify architecture rules
+```
+
+## Key API Endpoints
+
+```
+Authentication:
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/google
+POST /api/auth/refresh
+POST /api/auth/logout
+
+Workspaces:
+GET    /api/workspaces              ← list my workspaces
+POST   /api/workspaces             ← create workspace
+GET    /api/workspaces/{id}
+PUT    /api/workspaces/{id}
+DELETE /api/workspaces/{id}
+POST   /api/workspaces/{id}/invite  ← invite member by email
+
+Boards:
+GET    /api/workspaces/{wId}/boards
+POST   /api/workspaces/{wId}/boards
+GET    /api/boards/{id}             ← full board with tasks
+DELETE /api/boards/{id}
+
+Tasks:
+POST   /api/boards/{bId}/tasks
+GET    /api/tasks/{id}
+PUT    /api/tasks/{id}
+DELETE /api/tasks/{id}
+POST   /api/tasks/{id}/move         ← move to different column/position
+POST   /api/tasks/{id}/assign       ← assign to user
+POST   /api/tasks/{id}/comments
+
+Real-Time (SignalR):
+Hub: /hubs/board?boardId={id}
+Server → Client:
+  - TaskCreated(task)
+  - TaskMoved(taskId, fromColumn, toColumn, newPosition)
+  - TaskUpdated(task)
+  - TaskDeleted(taskId)
+  - MemberTyping(userId, taskId)
+  - UserPresence(userId, isOnline)
+```
+
+## Flutter App Architecture
+
+```
+lib/
+├── main.dart
+├── app.dart                       ← MaterialApp, routing
+│
+├── features/
+│   ├── auth/
+│   │   ├── data/
+│   │   │   └── auth_repository.dart    ← calls .NET auth endpoints
+│   │   ├── domain/
+│   │   │   └── user.dart
+│   │   └── presentation/
+│   │       ├── login_screen.dart
+│   │       └── register_screen.dart
+│   │
+│   ├── boards/
+│   │   ├── data/
+│   │   │   ├── board_repository.dart   ← REST calls
+│   │   │   └── board_hub_service.dart  ← SignalR connection
+│   │   ├── domain/
+│   │   │   ├── board.dart
+│   │   │   └── task.dart
+│   │   └── presentation/
+│   │       ├── board_screen.dart       ← kanban board UI
+│   │       ├── task_detail_screen.dart
+│   │       └── widgets/
+│   │           ├── task_card.dart
+│   │           └── kanban_column.dart
+│   │
+│   └── workspace/
+│       └── ...
+│
+├── shared/
+│   ├── api/
+│   │   ├── api_client.dart         ← Dio HTTP client with auth interceptor
+│   │   └── token_storage.dart      ← flutter_secure_storage
+│   ├── realtime/
+│   │   └── hub_connection.dart     ← signalr_netcore wrapper
+│   └── widgets/
+│       └── ...
+│
+└── generated/                      ← openapi_generator output
+    └── api/
+        └── lib/api.dart            ← auto-generated Dart client
+```
+
+## Real-Time Task Board Design
+
+```dart
+// Flutter state management with Riverpod + SignalR stream
+@riverpod
+class BoardNotifier extends _$BoardNotifier {
+  late BoardHubService _hub;
+
+  @override
+  Future<BoardState> build(int boardId) async {
+    // Load initial board state
+    final board = await ref.read(boardRepositoryProvider).getBoardAsync(boardId);
+
+    // Connect to SignalR hub
+    _hub = await ref.read(boardHubProvider).connectAsync(boardId);
+
+    // React to real-time updates
+    _hub.taskCreated.listen(_handleTaskCreated);
+    _hub.taskMoved.listen(_handleTaskMoved);
+    _hub.taskDeleted.listen(_handleTaskDeleted);
+
+    ref.onDispose(() => _hub.disconnect());
+
+    return BoardState(board: board);
+  }
+
+  void _handleTaskCreated(TaskCreatedEvent event) {
+    state = AsyncValue.data(state.value!.addTask(event.task));
+  }
+
+  void _handleTaskMoved(TaskMovedEvent event) {
+    state = AsyncValue.data(state.value!.moveTask(
+      event.taskId, event.toColumn, event.newPosition));
+  }
+
+  Future<void> moveTaskAsync(int taskId, String toColumn, int position) async {
+    // Optimistic update — update UI immediately
+    final previous = state;
+    state = AsyncValue.data(state.value!.moveTask(taskId, toColumn, position));
+
+    try {
+      await ref.read(boardRepositoryProvider).moveTaskAsync(taskId, toColumn, position);
+    } catch (e) {
+      // Rollback on failure
+      state = previous;
+      rethrow;
+    }
+  }
+}
+```
+
+<ExerciseBlock>
+1. **Architecture review**: Before writing any code, document your architecture decisions: (a) Why CQRS + MediatR? (b) Why EF Core with owned types for `Label[]`? (c) How does SignalR handle concurrent moves — what happens if two users move the same task simultaneously? (d) How does the Flutter app handle the SignalR connection when it goes to the background?
+2. **Domain modeling**: Implement the `Board` aggregate with its `AddTask`, `MoveTask`, `ReorderTask`, and `DeleteTask` methods. Each method should enforce invariants: no duplicate positions in a column, task must exist to be moved, column must exist. Write unit tests for all invariants.
+3. **Data layer**: Design the EF Core migrations for the task board. The tricky parts: (a) `TaskPosition` as a value object, (b) `Label[]` stored as JSON column, (c) `members` as a many-to-many with roles. Create the migration and seed a test workspace with 3 boards.
+</ExerciseBlock>

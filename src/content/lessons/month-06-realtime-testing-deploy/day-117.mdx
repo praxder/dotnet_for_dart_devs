@@ -1,0 +1,288 @@
+---
+title: "CI/CD with GitHub Actions"
+day: 117
+week: 24
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Flutter CI with GitHub Actions, Fastlane"
+csharpConcept: "GitHub Actions workflows, build/test/publish, container registry, automated deployment"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+CI/CD automates the path from code commit to production deployment. Every push triggers builds, tests, security scans, and — on the main branch — deployment. This eliminates manual deployment errors and enforces quality gates.
+
+## Complete CI Pipeline
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_VERSION: '9.x'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    # Spin up services needed for integration tests
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Cache NuGet packages
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release
+
+      # Run unit tests
+      - name: Unit Tests
+        run: dotnet test tests/UnitTests --no-build -c Release
+          --logger "trx;LogFileName=unit-test-results.xml"
+          --collect:"XPlat Code Coverage"
+
+      # Run integration tests with DB
+      - name: Integration Tests
+        env:
+          ConnectionStrings__Default: "Host=localhost;Database=testdb;Username=postgres;Password=postgres"
+          Jwt__Key: "test-key-that-is-at-least-32-characters-long"
+          Jwt__Issuer: "test"
+          Jwt__Audience: "test"
+        run: dotnet test tests/IntegrationTests --no-build -c Release
+          --logger "trx;LogFileName=integration-test-results.xml"
+
+      # Publish test results
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: "**/*-test-results.xml"
+
+      # Publish code coverage
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: "**/coverage.cobertura.xml"
+          fail_ci_if_error: true
+
+      # Check for vulnerable packages
+      - name: Security Scan
+        run: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee /tmp/vuln.txt
+          if grep -q "has the following vulnerable packages" /tmp/vuln.txt; then
+            echo "::error::Vulnerable packages detected"
+            cat /tmp/vuln.txt
+            exit 1
+          fi
+```
+
+## Container Build and Push
+
+```yaml
+  # Second job: build and push Docker image
+  docker:
+    name: Build and Push Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push'  # only on push, not PR
+
+    permissions:
+      contents: read
+      packages: write  # needed to push to GHCR
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha  # GitHub Actions cache
+          cache-to: type=gha,mode=max
+
+      # Scan for vulnerabilities
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'  # fail on critical vulnerabilities
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+```
+
+## Deployment to Azure Container Apps
+
+```yaml
+  # Third job: deploy to staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    environment: staging  # requires manual approval in GitHub
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Container Apps
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          resourceGroup: myapp-rg
+          containerAppName: blog-api-staging
+          imageToDeploy: >
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
+      # Run smoke tests against staging
+      - name: Smoke Tests
+        run: |
+          BASE_URL=https://blog-api-staging.azurecontainerapps.io
+
+          # Health check
+          curl -f $BASE_URL/health/live || exit 1
+          curl -f $BASE_URL/health/ready || exit 1
+
+          # Public endpoint check
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" $BASE_URL/api/blog/posts)
+          [ "$STATUS" = "200" ] || exit 1
+
+          echo "Smoke tests passed ✓"
+```
+
+## Environment-Specific Configuration
+
+```yaml
+# Multiple environments: staging and production
+  deploy-production:
+    needs: deploy-staging
+    environment:
+      name: production
+      url: https://api.myapp.com
+    # GitHub will require manual approval before running this job
+    steps:
+      - name: Deploy to Production
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          resourceGroup: myapp-prod-rg
+          containerAppName: blog-api-prod
+          imageToDeploy: >
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+```
+
+## Release Workflow — Semantic Versioning
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # triggers on v1.2.3 tags
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build release image
+        run: |
+          docker build -t $REGISTRY/$IMAGE_NAME:${{ steps.version.outputs.VERSION }} .
+          docker tag $REGISTRY/$IMAGE_NAME:${{ steps.version.outputs.VERSION }} \
+            $REGISTRY/$IMAGE_NAME:latest
+          docker push $REGISTRY/$IMAGE_NAME:${{ steps.version.outputs.VERSION }}
+          docker push $REGISTRY/$IMAGE_NAME:latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            CHANGELOG.md
+```
+
+<ConceptCallout type="tip" title="CI/CD for Flutter + .NET">
+When you have a Flutter app and a .NET backend in the same repo (or separate repos with contract tests), the CI pipeline should: (1) run .NET tests, (2) run Flutter tests, (3) run contract tests to verify the Flutter app's API expectations match the .NET implementation, (4) deploy the backend before the app. This prevents client-server version mismatches in production.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Set up the complete CI workflow for your blog API in GitHub. Verify that: PRs run tests and fail if tests fail, pushes to main build and push a Docker image to GHCR (GitHub Container Registry), and the workflow uses NuGet caching for fast runs.
+2. Add a "formatting check" step to CI: `dotnet format --verify-no-changes` fails the build if code isn't formatted. Add a pre-commit hook locally with `dotnet format` so developers never push unformatted code.
+3. Configure a protected main branch: require CI to pass before merging, require at least one reviewer, and enable "require linear history" (squash merges only). Document the release process: how does a commit get from development to production?
+</ExerciseBlock>

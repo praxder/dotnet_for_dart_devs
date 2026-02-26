@@ -1,0 +1,234 @@
+---
+title: "Advanced Testing: Mutation Testing and Property-Based Testing"
+day: 126
+week: 26
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "property-based testing in Dart, fuzz testing"
+csharpConcept: "Stryker mutation testing, FsCheck, property-based testing, test quality"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Standard unit tests verify specific scenarios. Mutation testing verifies your tests actually catch bugs. Property-based testing generates hundreds of inputs automatically to find edge cases you didn't think of.
+
+## Mutation Testing with Stryker.NET
+
+```bash
+# Mutation testing: introduce deliberate bugs, verify your tests catch them
+# If a mutant survives (test still passes), your tests are missing coverage
+
+# Install Stryker
+dotnet tool install -g dotnet-stryker
+
+# Run mutation tests
+dotnet stryker --project "src/Domain/Domain.csproj"
+               --test-project "tests/UnitTests/UnitTests.csproj"
+               --reporter "html"
+               --threshold-high 80
+               --threshold-low 60
+               --threshold-break 40
+
+# Stryker generates mutations like:
+# Original:  if (quantity > 0)
+# Mutant 1:  if (quantity >= 0)    ← boundary condition
+# Mutant 2:  if (quantity < 0)     ← operator flip
+# Mutant 3:  if (true)             ← condition removed
+
+# If tests pass with Mutant 1: your tests don't cover the quantity=0 edge case
+```
+
+```csharp
+// Original code with poor test coverage:
+public class Discount
+{
+    public decimal Apply(decimal price, decimal discountPercent)
+    {
+        if (discountPercent <= 0) return price;
+        if (discountPercent >= 100) return 0;
+        return price * (1 - discountPercent / 100);
+    }
+}
+
+// Insufficient tests — many mutants survive:
+[Fact]
+public void Apply_20PercentDiscount_ReturnsCorrectPrice()
+{
+    var d = new Discount();
+    Assert.Equal(80m, d.Apply(100m, 20m));  // only tests happy path
+}
+
+// After Stryker reveals gaps — improved tests:
+[Theory]
+[InlineData(100, 0, 100)]     // zero discount
+[InlineData(100, 0.001, 99.999)]  // just above zero
+[InlineData(100, 99.999, 0.001)]  // just below 100%
+[InlineData(100, 100, 0)]     // full discount
+[InlineData(100, -1, 100)]    // negative discount (invalid)
+[InlineData(100, 101, 0)]     // over 100% (invalid)
+[InlineData(0, 50, 0)]        // zero price
+public void Apply_VariousScenarios_ReturnsExpectedResult(
+    decimal price, decimal percent, decimal expected)
+{
+    var result = new Discount().Apply(price, percent);
+    Assert.Equal(expected, result, precision: 3);
+}
+```
+
+## Property-Based Testing with FsCheck
+
+```csharp
+// Property-based: describe PROPERTIES that must always hold
+// FsCheck generates 100+ random inputs and finds counterexamples
+// dotnet add package FsCheck.Xunit
+
+public class DiscountProperties
+{
+    // Property: discount can never increase the price
+    [Property]
+    public Property Apply_NeverIncreasesPrice(
+        PositiveInt rawPrice, NonNegativeInt rawPercent)
+    {
+        var price = (decimal)rawPrice.Get;
+        var percent = Math.Min((decimal)rawPercent.Get % 101, 100); // 0-100
+
+        var result = new Discount().Apply(price, percent);
+
+        return (result <= price).Label($"price={price}, percent={percent}, result={result}");
+    }
+
+    // Property: identity (0% discount = original price)
+    [Property]
+    public Property Apply_ZeroPercent_ReturnsOriginalPrice(PositiveInt rawPrice)
+    {
+        var price = (decimal)rawPrice.Get;
+        return (new Discount().Apply(price, 0) == price)
+            .Label($"price={price}");
+    }
+
+    // Property: full discount always returns 0
+    [Property]
+    public Property Apply_100Percent_ReturnsZero(PositiveInt rawPrice)
+    {
+        var price = (decimal)rawPrice.Get;
+        return (new Discount().Apply(price, 100) == 0m)
+            .Label($"price={price}");
+    }
+
+    // Property: double-discounting is less than or equal to adding percents
+    [Property]
+    public Property Apply_Twice_LessOrEqualThanCombined(
+        PositiveInt rawPrice,
+        Gen.NonNegativeInt rawA,
+        Gen.NonNegativeInt rawB)
+    {
+        var price = (decimal)rawPrice.Get;
+        var a = Math.Min((decimal)rawA.Get % 50, 50);
+        var b = Math.Min((decimal)rawB.Get % 50, 50);
+        var combined = Math.Min(a + b, 100);
+
+        var twoSteps = new Discount().Apply(new Discount().Apply(price, a), b);
+        var oneStep = new Discount().Apply(price, combined);
+
+        // Two discounts in sequence ≥ equivalent combined discount
+        return (twoSteps >= oneStep).Label($"price={price}, a={a}, b={b}");
+    }
+}
+```
+
+## Custom Generators for Domain Types
+
+```csharp
+// Generate domain-specific random data for property tests
+
+// Arb = Arbitrary — how to generate values
+public static class DomainArbitrary
+{
+    public static Arbitrary<Money> MoneyArb()
+    {
+        return Arb.From(
+            Gen.Choose(1, 100_000)
+               .Select(cents => new Money(cents / 100m, "USD")));
+    }
+
+    public static Arbitrary<Order> OrderArb()
+    {
+        return Arb.From(
+            from customerId in Gen.Choose(1, 1000)
+            from lineCount in Gen.Choose(1, 10)
+            from lines in Gen.ListOf(lineCount, OrderLineArb().Generator)
+            select new Order
+            {
+                CustomerId = customerId,
+                Lines = lines,
+                Total = new Money(lines.Sum(l => l.Subtotal.Amount), "USD")
+            });
+    }
+}
+
+// Use in property tests:
+[Property(Arbitrary = [typeof(DomainArbitrary)])]
+public Property Order_TotalEqualsLineSum(Order order)
+{
+    var calculatedTotal = order.Lines.Sum(l => l.Subtotal.Amount);
+    return (order.Total.Amount == calculatedTotal)
+        .Label($"expected {calculatedTotal}, got {order.Total.Amount}");
+}
+```
+
+## Snapshot Testing
+
+```csharp
+// Snapshot tests: run once → generate expected output → future runs must match
+// Great for API response shapes, complex serialization, report generation
+// dotnet add package Verify.Xunit
+
+[UsesVerify]
+public class PostSerializationTests
+{
+    [Fact]
+    public async Task PostDto_Serialization_MatchesSnapshot()
+    {
+        var post = new PostDetailDto(
+            Id: 1,
+            Title: "Test Post",
+            Slug: "test-post",
+            Body: "Body content",
+            AuthorName: "Jane Doe",
+            PublishedAt: new DateTime(2024, 1, 15, 10, 0, 0, DateTimeKind.Utc),
+            ViewCount: 42,
+            Tags: ["dotnet", "testing"],
+            Comments: []);
+
+        // First run: creates tests/PostSerializationTests.PostDto_Serialization_MatchesSnapshot.verified.txt
+        // Subsequent runs: compares against that file
+        await Verify(post);
+    }
+}
+// Verified snapshot file (auto-generated, committed to git):
+// {
+//   "Id": 1,
+//   "Title": "Test Post",
+//   ...
+// }
+```
+
+<ConceptCallout type="tip" title="Testing Strategy Review">
+- **Unit tests**: Fast, no I/O, test business logic in isolation. Aim for 80%+ coverage of domain logic.
+- **Integration tests**: Test HTTP + database. Use WebApplicationFactory + TestContainers. Test every endpoint at least once.
+- **Property-based tests**: Test domain invariants with random inputs. Excellent for financial calculations, data transformations.
+- **Mutation tests** (Stryker): Verify your tests actually catch bugs. Run occasionally, not in CI (slow). A mutation score > 70% is good.
+- **Snapshot tests**: API response shapes, complex serialization. Catch unintended changes in output structure.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Run Stryker on your domain layer (pricing, discount, order calculations). Identify any surviving mutants. Write additional tests to kill them. Report your before/after mutation score.
+2. Write property-based tests for your `Money` value object (from day 99): (a) addition is commutative, (b) multiplication by 0 = zero, (c) multiplication by 1 = original, (d) never negative for valid operations. Use FsCheck with a custom generator.
+3. Add snapshot tests for your top 3 API endpoints (list posts, get post, blog analytics). Run them once to generate snapshots, then make a deliberate change to the response shape and verify the snapshot test catches it. Revert and confirm it passes again.
+</ExerciseBlock>

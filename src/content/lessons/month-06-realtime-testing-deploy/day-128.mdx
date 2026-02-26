@@ -1,0 +1,264 @@
+---
+title: "Production Readiness: Health, Resilience, and Graceful Shutdown"
+day: 128
+week: 26
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Flutter error handling, crash reporting"
+csharpConcept: "Polly resilience, circuit breakers, health checks, graceful shutdown, chaos engineering"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Production systems fail. The difference between a good system and a great one is how gracefully it handles failures. This lesson covers the resilience patterns that keep your API running when dependencies fail.
+
+## Polly Resilience Pipelines
+
+```csharp
+// Polly v8 (Microsoft.Extensions.Resilience) — unified resilience API
+// dotnet add package Microsoft.Extensions.Http.Resilience
+
+builder.Services.AddHttpClient<IInventoryService, InventoryService>()
+    .AddResilienceHandler("inventory", pipeline =>
+    {
+        // 1. Retry: retry transient failures with exponential backoff
+        pipeline.AddRetry(new HttpRetryStrategyOptions
+        {
+            MaxRetryAttempts = 3,
+            BackoffType = DelayBackoffType.Exponential,
+            UseJitter = true,
+            DelayGenerator = args =>
+            {
+                // Custom delays: 1s, 2s, 4s (exponential)
+                var delay = TimeSpan.FromSeconds(Math.Pow(2, args.AttemptNumber));
+                return ValueTask.FromResult<TimeSpan?>(delay);
+            },
+            ShouldHandle = args =>
+                ValueTask.FromResult(
+                    args.Outcome.Result?.StatusCode is
+                        HttpStatusCode.RequestTimeout or
+                        HttpStatusCode.TooManyRequests or
+                        HttpStatusCode.ServiceUnavailable)
+        });
+
+        // 2. Circuit Breaker: stop calling if service is down
+        pipeline.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            SamplingDuration = TimeSpan.FromSeconds(60),
+            FailureRatio = 0.5,       // break if 50% of calls fail
+            MinimumThroughput = 10,   // need at least 10 calls to evaluate
+            BreakDuration = TimeSpan.FromSeconds(30)  // how long to stay open
+        });
+
+        // 3. Timeout: give up if takes too long
+        pipeline.AddTimeout(new HttpTimeoutStrategyOptions
+        {
+            Timeout = TimeSpan.FromSeconds(10)
+        });
+    });
+
+// Standalone pipeline for non-HTTP operations:
+var pipeline = new ResiliencePipelineBuilder()
+    .AddRetry(new RetryStrategyOptions
+    {
+        MaxRetryAttempts = 3,
+        Delay = TimeSpan.FromMilliseconds(500),
+        ShouldHandle = new PredicateBuilder().Handle<DbException>()
+    })
+    .AddTimeout(TimeSpan.FromSeconds(5))
+    .Build();
+
+await pipeline.ExecuteAsync(async ct =>
+    await db.SaveChangesAsync(ct), cancellationToken);
+```
+
+## Fallback Patterns
+
+```csharp
+// Provide degraded functionality when primary service fails
+
+public class ProductService(
+    IInventoryService inventory,
+    IMemoryCache cache,
+    ILogger<ProductService> logger)
+{
+    public async Task<ProductAvailability> CheckAvailabilityAsync(int productId)
+    {
+        try
+        {
+            // Try real-time inventory
+            return await inventory.CheckAsync(productId);
+        }
+        catch (BrokenCircuitException)
+        {
+            logger.LogWarning("Inventory service circuit open, using cached data");
+
+            // Fallback: return cached availability
+            if (cache.TryGetValue($"availability:{productId}", out ProductAvailability? cached))
+                return cached! with { IsStale = true };  // mark as stale
+
+            // No cache: fail gracefully with "assume available"
+            logger.LogWarning("No cached data for product {Id}, assuming available", productId);
+            return new ProductAvailability(productId, IsAvailable: true, IsStale: true);
+        }
+    }
+}
+```
+
+## Comprehensive Health Checks
+
+```csharp
+builder.Services.AddHealthChecks()
+    // Database
+    .AddNpgsql(
+        connectionString,
+        name: "database",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: ["ready", "db"])
+
+    // Redis cache
+    .AddRedis(
+        redisConnectionString,
+        name: "redis",
+        tags: ["ready"])
+
+    // External service
+    .AddUrlGroup(
+        new Uri("https://payment-gateway.com/health"),
+        name: "payment-gateway",
+        tags: ["ready"])
+
+    // Custom: disk space
+    .AddCheck("disk-space", () =>
+    {
+        var drive = DriveInfo.GetDrives().First(d => d.IsReady && d.DriveType == DriveType.Fixed);
+        var percentFree = (double)drive.AvailableFreeSpace / drive.TotalSize * 100;
+        return percentFree > 10
+            ? HealthCheckResult.Healthy($"{percentFree:F1}% free")
+            : HealthCheckResult.Degraded($"Only {percentFree:F1}% free");
+    })
+
+    // Custom: message queue connection
+    .AddCheck<RabbitMqHealthCheck>("rabbitmq", tags: ["ready"]);
+
+// Separate liveness and readiness endpoints:
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false,  // liveness: just check app is running (no DB)
+    ResponseWriter = WriteJsonResponse
+});
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = WriteJsonResponse
+});
+
+// Kubernetes probes:
+// livenessProbe: /health/live — restart if unhealthy
+// readinessProbe: /health/ready — remove from load balancer if not ready
+// startupProbe: /health/live (with longer timeout) — give extra time to start
+```
+
+## Graceful Shutdown
+
+```csharp
+// Kubernetes sends SIGTERM before killing — you have 30 seconds to finish
+// ASP.NET Core handles this, but background services need explicit support
+
+public class OrderProcessingService : BackgroundService
+{
+    private int _activeJobs = 0;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var batch = await GetNextBatchAsync(stoppingToken);
+            var tasks = batch.Select(order => ProcessWithCountingAsync(order, stoppingToken));
+            await Task.WhenAll(tasks);
+        }
+
+        // Shutdown: wait for active jobs (up to 30s)
+        var deadline = DateTime.UtcNow.AddSeconds(25);
+        while (_activeJobs > 0 && DateTime.UtcNow < deadline)
+        {
+            _logger.LogInformation("Shutdown: waiting for {Count} active jobs", _activeJobs);
+            await Task.Delay(1000);
+        }
+    }
+
+    private async Task ProcessWithCountingAsync(Order order, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _activeJobs);
+        try
+        {
+            await ProcessOrderAsync(order, ct);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeJobs);
+        }
+    }
+}
+
+// Configure shutdown timeout
+builder.Host.ConfigureHostOptions(options =>
+    options.ShutdownTimeout = TimeSpan.FromSeconds(30));
+
+// Register SIGTERM handler for custom cleanup:
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() =>
+    app.Logger.LogInformation("Application is shutting down..."));
+```
+
+## Chaos Engineering — Test Your Resilience
+
+```csharp
+// Intentionally inject failures in dev/staging to verify resilience
+
+public class ChaosMiddleware(
+    RequestDelegate next,
+    IConfiguration config)
+{
+    private static readonly Random Random = new();
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (!config.GetValue<bool>("Chaos:Enabled")) { await next(context); return; }
+
+        // Random latency injection
+        if (Random.NextDouble() < config.GetValue<double>("Chaos:SlowRequestRate"))
+            await Task.Delay(config.GetValue<int>("Chaos:SlowRequestDelayMs"));
+
+        // Random 500 errors
+        if (Random.NextDouble() < config.GetValue<double>("Chaos:ErrorRate"))
+        {
+            context.Response.StatusCode = 500;
+            await context.Response.WriteAsync("Injected chaos error");
+            return;
+        }
+
+        await next(context);
+    }
+}
+
+// appsettings.Development.json:
+// "Chaos": { "Enabled": false, "ErrorRate": 0.05, "SlowRequestRate": 0.1 }
+```
+
+<ConceptCallout type="tip" title="Resilience Checklist">
+Every external dependency (database, cache, external API, message queue) should have: ✅ Timeouts (never wait forever), ✅ Retries with backoff (for transient failures), ✅ Circuit breaker (stop hammering a failing service), ✅ Fallback (degraded mode or cached data), ✅ Health check (know it's failing before users complain), ✅ Graceful shutdown (finish in-flight requests cleanly).
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Add a Polly resilience pipeline to every `HttpClient` in your blog API (payment service, external image CDN, email provider). Configure: 3 retries with exponential backoff, circuit breaker (50% failure rate → open for 30s), and 10-second timeout. Test by making the external service return 503.
+2. Implement a custom `RabbitMqHealthCheck` that tries to connect to RabbitMQ and verifies the connection is healthy. Add it to the readiness endpoint. Write an integration test that starts the app, kills the RabbitMQ container, and verifies `/health/ready` returns 503.
+3. Test graceful shutdown: run your API, start processing 10 background jobs (sleep for 5 seconds each), send SIGTERM (`docker stop` or `kill -15`), and verify: (a) in-flight jobs complete before shutdown, (b) the API stops accepting new requests immediately, (c) the process exits cleanly within 30 seconds.
+</ExerciseBlock>

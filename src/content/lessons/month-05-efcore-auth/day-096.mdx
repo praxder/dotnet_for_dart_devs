@@ -1,0 +1,267 @@
+---
+title: "Repository Pattern and Unit of Work"
+day: 96
+week: 20
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "data layer abstraction in Flutter, repository pattern in Dart"
+csharpConcept: "IRepository<T>, UnitOfWork, DbContext as UoW, testability, generic repository"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+The Repository pattern abstracts data access behind an interface — making business logic testable without a real database. The Unit of Work coordinates multiple repositories in a single transaction. Controversy exists about whether these patterns add value over using DbContext directly; this lesson covers both perspectives.
+
+## The Case For and Against Repository Over EF Core
+
+<ConceptCallout type="tip" title="DbContext IS a Unit of Work + Repository">
+`DbContext` already implements the Unit of Work pattern (`SaveChanges()` commits all tracked changes atomically). `DbSet<T>` already implements a generic repository. Adding another repository layer on top often just wraps EF Core in boilerplate.
+
+**When repositories add value:** testing without a database, swapping the ORM (rare), domain-layer isolation. **When they don't:** most CRUD applications where tests can use SQLite in-memory or TestContainers.
+</ConceptCallout>
+
+## Generic Repository Interface
+
+```csharp
+public interface IRepository<T> where T : class
+{
+    Task<T?> GetByIdAsync(int id);
+    Task<IReadOnlyList<T>> GetAllAsync();
+    Task<IReadOnlyList<T>> FindAsync(Expression<Func<T, bool>> predicate);
+    Task AddAsync(T entity);
+    void Update(T entity);
+    void Remove(T entity);
+}
+
+public class Repository<T>(AppDbContext db) : IRepository<T> where T : class
+{
+    protected readonly DbSet<T> Set = db.Set<T>();
+
+    public async Task<T?> GetByIdAsync(int id)
+        => await Set.FindAsync(id);
+
+    public async Task<IReadOnlyList<T>> GetAllAsync()
+        => await Set.AsNoTracking().ToListAsync();
+
+    public async Task<IReadOnlyList<T>> FindAsync(Expression<Func<T, bool>> predicate)
+        => await Set.AsNoTracking().Where(predicate).ToListAsync();
+
+    public async Task AddAsync(T entity)
+        => await Set.AddAsync(entity);
+
+    public void Update(T entity)
+        => Set.Update(entity);
+
+    public void Remove(T entity)
+        => Set.Remove(entity);
+}
+```
+
+## Specific Repository with Domain Logic
+
+```csharp
+// Extend generic repo with domain-specific queries
+public interface IOrderRepository : IRepository<Order>
+{
+    Task<IReadOnlyList<Order>> GetByCustomerAsync(int customerId);
+    Task<IReadOnlyList<Order>> GetPendingAsync();
+    Task<Order?> GetWithLinesAsync(int orderId);
+    Task<decimal> GetCustomerLifetimeValueAsync(int customerId);
+}
+
+public class OrderRepository(AppDbContext db) : Repository<Order>(db), IOrderRepository
+{
+    public async Task<IReadOnlyList<Order>> GetByCustomerAsync(int customerId)
+        => await Set
+            .AsNoTracking()
+            .Where(o => o.CustomerId == customerId)
+            .OrderByDescending(o => o.OrderedAt)
+            .ToListAsync();
+
+    public async Task<IReadOnlyList<Order>> GetPendingAsync()
+        => await Set
+            .AsNoTracking()
+            .Where(o => o.Status == OrderStatus.Pending)
+            .Include(o => o.Customer)
+            .ToListAsync();
+
+    public async Task<Order?> GetWithLinesAsync(int orderId)
+        => await Set
+            .Include(o => o.Lines)
+                .ThenInclude(l => l.Product)
+            .Include(o => o.Customer)
+            .FirstOrDefaultAsync(o => o.Id == orderId);
+
+    public async Task<decimal> GetCustomerLifetimeValueAsync(int customerId)
+        => await Set
+            .Where(o => o.CustomerId == customerId && o.Status != OrderStatus.Cancelled)
+            .SumAsync(o => o.Total);
+}
+```
+
+## Unit of Work
+
+```csharp
+public interface IUnitOfWork : IAsyncDisposable
+{
+    IOrderRepository Orders { get; }
+    IRepository<Customer> Customers { get; }
+    IRepository<Product> Products { get; }
+    Task<int> SaveChangesAsync(CancellationToken ct = default);
+    Task BeginTransactionAsync();
+    Task CommitAsync();
+    Task RollbackAsync();
+}
+
+public class UnitOfWork(AppDbContext db) : IUnitOfWork
+{
+    private IDbContextTransaction? _transaction;
+
+    public IOrderRepository Orders { get; } = new OrderRepository(db);
+    public IRepository<Customer> Customers { get; } = new Repository<Customer>(db);
+    public IRepository<Product> Products { get; } = new Repository<Product>(db);
+
+    public Task<int> SaveChangesAsync(CancellationToken ct = default)
+        => db.SaveChangesAsync(ct);
+
+    public async Task BeginTransactionAsync()
+        => _transaction = await db.Database.BeginTransactionAsync();
+
+    public async Task CommitAsync()
+    {
+        if (_transaction is not null) await _transaction.CommitAsync();
+    }
+
+    public async Task RollbackAsync()
+    {
+        if (_transaction is not null) await _transaction.RollbackAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_transaction is not null) await _transaction.DisposeAsync();
+    }
+}
+
+// Registration:
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddScoped<AppDbContext>();
+```
+
+## Using the Unit of Work in a Service
+
+```csharp
+public class OrderService(IUnitOfWork uow)
+{
+    public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request)
+    {
+        await uow.BeginTransactionAsync();
+        try
+        {
+            // Deduct inventory
+            foreach (var item in request.Items)
+            {
+                var products = await uow.Products.FindAsync(p => p.Id == item.ProductId);
+                var product = products.FirstOrDefault()
+                    ?? throw new KeyNotFoundException($"Product {item.ProductId} not found");
+
+                if (product.StockQuantity < item.Quantity)
+                    throw new InvalidOperationException($"Insufficient stock: {product.Name}");
+
+                product.StockQuantity -= item.Quantity;
+                uow.Products.Update(product);
+            }
+
+            var order = new Order { CustomerId = request.CustomerId, /* ... */ };
+            await uow.Orders.AddAsync(order);
+
+            await uow.SaveChangesAsync();
+            await uow.CommitAsync();
+            return order;
+        }
+        catch
+        {
+            await uow.RollbackAsync();
+            throw;
+        }
+    }
+}
+```
+
+## Testing with Fake Repositories
+
+```csharp
+// The real payoff: business logic tests that need no database
+public class FakeOrderRepository : IOrderRepository
+{
+    private readonly List<Order> _orders = [];
+    private int _nextId = 1;
+
+    public Task<Order?> GetByIdAsync(int id)
+        => Task.FromResult(_orders.FirstOrDefault(o => o.Id == id));
+
+    public Task<IReadOnlyList<Order>> GetAllAsync()
+        => Task.FromResult<IReadOnlyList<Order>>(_orders.ToList());
+
+    public Task<IReadOnlyList<Order>> FindAsync(Expression<Func<Order, bool>> predicate)
+        => Task.FromResult<IReadOnlyList<Order>>(
+            _orders.AsQueryable().Where(predicate).ToList());
+
+    public Task AddAsync(Order entity)
+    {
+        entity.Id = _nextId++;
+        _orders.Add(entity);
+        return Task.CompletedTask;
+    }
+
+    public void Update(Order entity) { }
+    public void Remove(Order entity) => _orders.Remove(entity);
+
+    // Domain-specific:
+    public Task<IReadOnlyList<Order>> GetByCustomerAsync(int customerId)
+        => Task.FromResult<IReadOnlyList<Order>>(
+            _orders.Where(o => o.CustomerId == customerId).ToList());
+
+    public Task<IReadOnlyList<Order>> GetPendingAsync()
+        => Task.FromResult<IReadOnlyList<Order>>(
+            _orders.Where(o => o.Status == OrderStatus.Pending).ToList());
+
+    public Task<Order?> GetWithLinesAsync(int orderId)
+        => Task.FromResult(_orders.FirstOrDefault(o => o.Id == orderId));
+
+    public Task<decimal> GetCustomerLifetimeValueAsync(int customerId)
+        => Task.FromResult(_orders
+            .Where(o => o.CustomerId == customerId)
+            .Sum(o => o.Total));
+}
+
+// Pure unit test — no DB required:
+[Fact]
+public async Task PlaceOrder_DeductsInventory()
+{
+    var fakeUow = new FakeUnitOfWork();
+    fakeUow.Products.Seed(new Product { Id = 1, Name = "Widget", StockQuantity = 10 });
+
+    var service = new OrderService(fakeUow);
+    await service.PlaceOrderAsync(new PlaceOrderRequest
+    {
+        CustomerId = 1,
+        Items = [new OrderItem { ProductId = 1, Quantity = 3 }]
+    });
+
+    var product = (await fakeUow.Products.GetByIdAsync(1))!;
+    Assert.Equal(7, product.StockQuantity);
+}
+```
+
+<ExerciseBlock>
+1. Implement `IRepository<T>` and `UnitOfWork` for a library system with `Book`, `Member`, and `Loan` repositories. Add domain-specific methods: `GetOverdueLoansAsync()`, `GetMemberBorrowingHistoryAsync(int memberId)`.
+2. Write a service layer that uses the Unit of Work to process a book return (find the loan, mark it returned, update availability). Write unit tests using fake repositories — no database involved.
+3. Compare the two approaches: write the same "get active orders with customer details" query using (a) the repository pattern and (b) directly on DbContext. Evaluate lines of code, testability, and performance implications.
+</ExerciseBlock>

@@ -1,0 +1,184 @@
+---
+title: "Span<T> and Memory<T>: Zero-Copy Slicing"
+day: 34
+week: 7
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "(no Dart equivalent — closest is Uint8List.sublistView)"
+csharpConcept: "Span<T>, ReadOnlySpan<T>, Memory<T>, zero-allocation slicing"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+`Span<T>` is a high-performance C# type with no real Dart equivalent. It lets you work with slices of memory — arrays, strings, stack buffers — without any heap allocations. You'll encounter it in performance-sensitive .NET code and new BCL APIs.
+
+## The Core Problem It Solves
+
+```csharp
+// Traditional approach — creates new arrays (heap allocations!)
+string fullPath = "/api/users/123/orders";
+string[] segments = fullPath.Split('/');         // new array!
+string usersSegment = segments[2];               // new string!
+string userId = usersSegment.Substring(0, 5);    // another new string!
+
+// With Span — zero allocations, works directly on original memory
+ReadOnlySpan<char> span = fullPath.AsSpan();
+var parts = span[1..];           // "/api/users/123/orders" without leading /
+// No new string created — just a view of the original memory
+```
+
+<ConceptCallout type="new" title="Span: A View Into Existing Memory">
+`Span<T>` is a "window" into a contiguous region of memory. It doesn't own or copy the memory — it just points to it with a length. This is fundamentally different from Dart's approach where slicing (`list.sublist()`) always creates a new object.
+</ConceptCallout>
+
+## Basic Span Usage
+
+```csharp
+// Span from array
+int[] numbers = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+Span<int> span = numbers.AsSpan();
+Span<int> middle = span[2..8];    // elements 3-8, no copy
+
+// Modify through span — affects the original array!
+middle[0] = 99;
+Console.WriteLine(numbers[2]);    // 99
+
+// ReadOnlySpan — cannot modify
+ReadOnlySpan<int> readOnly = numbers.AsSpan();
+// readOnly[0] = 1;  // ERROR
+
+// Span from string (ReadOnlySpan<char>)
+string text = "Hello, World!";
+ReadOnlySpan<char> hello = text.AsSpan(0, 5);
+Console.WriteLine(hello.ToString());  // "Hello"
+Console.WriteLine(hello.Length);      // 5
+
+// SequenceEqual — compare without ToString
+ReadOnlySpan<char> greeting = "Hello".AsSpan();
+Console.WriteLine(hello.SequenceEqual(greeting));  // True
+```
+
+## Span and String Parsing (Zero-Allocation)
+
+The main practical use: high-performance text parsing:
+
+```csharp
+// Parse CSV line without allocating substring strings
+void ParseCsvLine(ReadOnlySpan<char> line)
+{
+    int start = 0;
+    int fieldIndex = 0;
+
+    while (start <= line.Length)
+    {
+        int commaIndex = line[start..].IndexOf(',');
+        var field = commaIndex >= 0
+            ? line[start..(start + commaIndex)]
+            : line[start..];
+
+        // Process field as Span<char> — no string allocation
+        Console.WriteLine($"Field {fieldIndex}: '{field.ToString()}'");
+        fieldIndex++;
+
+        if (commaIndex < 0) break;
+        start += commaIndex + 1;
+    }
+}
+
+ParseCsvLine("Alice,30,New York,Engineer".AsSpan());
+// Field 0: 'Alice'
+// Field 1: '30'
+// Field 2: 'New York'
+// Field 3: 'Engineer'
+
+// int.TryParse works directly with Span<char>
+ReadOnlySpan<char> numSpan = "42".AsSpan();
+int.TryParse(numSpan, out int result);  // no string needed!
+```
+
+## Stack-Allocated Buffers with `stackalloc`
+
+```csharp
+// Allocate on the stack (no GC!) for small, temporary buffers
+Span<byte> buffer = stackalloc byte[256];
+buffer.Fill(0);   // zero-initialize
+
+// Useful for cryptographic operations, encoding, etc.
+Span<char> output = stackalloc char[64];
+int written = SomeMethod(input, output);
+var result = output[..written].ToString();
+
+// Rule: stackalloc is only safe for small, bounded sizes
+// For larger or variable sizes, use array pools
+```
+
+## `Memory<T>` — For When Span<T> Isn't Enough
+
+`Span<T>` has a critical limitation: it's a **ref struct** — it can only exist on the stack and cannot be stored in fields, used with `async`/`await`, or put in closures. `Memory<T>` is the heap-compatible version:
+
+```csharp
+// Span<T> — stack only, NO async
+async Task ProcessAsync(Span<byte> data)  // COMPILE ERROR
+
+// Memory<T> — works with async
+async Task ProcessAsync(Memory<byte> data)
+{
+    // Use data.Span for synchronous operations
+    var span = data.Span;
+    // ...
+    await SomeAsyncOperation();
+    // Can still use data after await
+    var span2 = data.Span;
+}
+
+// ArraySegment<T> — older version of Memory<T>, still common
+var array = new byte[1000];
+var segment = new ArraySegment<byte>(array, 100, 200);
+Memory<byte> memory = segment;
+```
+
+## MemoryPool and ArrayPool
+
+For repeated allocations, use pools to avoid GC pressure:
+
+```csharp
+using System.Buffers;
+
+// Rent a buffer from the pool (returned on dispose)
+using var owner = MemoryPool<byte>.Shared.Rent(4096);
+Memory<byte> buffer = owner.Memory;
+
+// Or ArrayPool (slightly lower-level)
+var pool = ArrayPool<byte>.Shared;
+byte[] rented = pool.Rent(4096);
+try
+{
+    // Use rented[..]
+    Span<byte> span = rented.AsSpan(0, 4096);
+}
+finally
+{
+    pool.Return(rented);  // MUST return!
+}
+```
+
+<ConceptCallout type="tip" title="When to Use Span<T>">
+Use `Span<T>` and `Memory<T>` when:
+- Parsing text or binary data in hot paths (high call frequency)
+- Writing library code used by performance-critical consumers
+- Working with `System.IO.Pipelines` (the high-performance I/O API)
+
+For most application-level code, regular strings and arrays are fine. Profile first, optimize second.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Write a `CountWords(ReadOnlySpan<char> text)` method that counts words without any string allocations. A word is any sequence of non-space characters.
+2. Implement a zero-allocation `TryParseIpAddress(ReadOnlySpan<char> input, out (byte, byte, byte, byte) octets)` method that parses "192.168.1.1" format.
+3. Write a method that uses `stackalloc` to convert an `int` to its hex representation in a stack buffer and returns a `string`. Compare its performance to `value.ToString("X")` using `Stopwatch`.
+</ExerciseBlock>

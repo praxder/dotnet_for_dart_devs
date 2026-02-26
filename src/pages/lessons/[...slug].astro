@@ -1,0 +1,23 @@
+---
+import { getCollection } from 'astro:content';
+import LessonLayout from '../../layouts/LessonLayout.astro';
+import { getAllLessons } from '../../lib/lessons';
+import { getLessonNavigation } from '../../lib/navigation';
+
+export async function getStaticPaths() {
+  const lessons = await getAllLessons();
+  return lessons.map(lesson => ({
+    params: { slug: lesson.slug },
+    props: { lesson },
+  }));
+}
+
+const { lesson } = Astro.props;
+const allLessons = await getAllLessons();
+const nav = getLessonNavigation(lesson, allLessons);
+const { Content } = await lesson.render();
+---
+
+<LessonLayout lesson={lesson} allLessons={allLessons} nav={nav}>
+  <Content />
+</LessonLayout>

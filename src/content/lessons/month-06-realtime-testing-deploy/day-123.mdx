@@ -1,0 +1,228 @@
+---
+title: "API Design: OpenAPI, Versioning, and Documentation"
+day: 123
+week: 25
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Dart API clients, openapi_generator for Flutter"
+csharpConcept: "Scalar, Swagger, OpenAPI 3.1, API versioning, NSwag, client code generation"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Good API documentation lets consumers (including your Flutter app) understand and use your API without reading the source code. OpenAPI generates interactive docs and client SDKs automatically. Versioning lets you evolve the API without breaking existing clients.
+
+## OpenAPI with .NET 9 (Built-In)
+
+```csharp
+// .NET 9 has built-in OpenAPI support (replaces Swashbuckle for many use cases)
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, context, ct) =>
+    {
+        document.Info = new OpenApiInfo
+        {
+            Title = "Blog API",
+            Version = "v1",
+            Description = "A full-featured blog API with auth, EF Core, and real-time features",
+            Contact = new OpenApiContact
+            {
+                Name = "Blog API Team",
+                Email = "api@myblog.com"
+            }
+        };
+        return Task.CompletedTask;
+    });
+
+    // Add JWT Bearer security scheme
+    options.AddDocumentTransformer<BearerSecuritySchemeTransformer>();
+});
+
+// Map the OpenAPI endpoint
+app.MapOpenApi();  // /openapi/v1.json
+
+// Scalar UI — modern alternative to Swagger UI
+// dotnet add package Scalar.AspNetCore
+app.MapScalarApiReference("/docs");
+// Swagger UI is still available:
+// dotnet add package Swashbuckle.AspNetCore
+// app.UseSwaggerUI(c => c.SwaggerEndpoint("/openapi/v1.json", "Blog API v1"));
+```
+
+## Annotating Minimal API Endpoints
+
+```csharp
+// Use attributes and extension methods to enrich OpenAPI docs
+var posts = app.MapGroup("/api/posts")
+    .WithTags("Posts")  // groups in Scalar/Swagger
+    .WithOpenApi();
+
+posts.MapGet("/", ([AsParameters] ListPostsQuery query, IMediator mediator) =>
+    mediator.Send(query))
+    .WithName("ListPosts")
+    .WithSummary("List published posts")
+    .WithDescription("Returns a paginated list of published posts with optional filtering by tag or author.")
+    .Produces<PagedResult<PostSummaryDto>>()
+    .Produces(400)
+    .AllowAnonymous();
+
+posts.MapPost("/", async (CreatePostCommand cmd, IMediator m) =>
+{
+    var result = await m.Send(cmd);
+    return Results.Created($"/api/posts/{result.Slug}", result);
+})
+.WithName("CreatePost")
+.WithSummary("Create a new post")
+.RequireAuthorization("Author")
+.Produces<PostCreatedDto>(201)
+.Produces<ValidationProblemDetails>(422)
+.Produces(401)
+.Produces(403);
+
+// Add example values to improve docs quality:
+posts.MapGet("/{slug}", (string slug, IMediator m) =>
+    m.Send(new GetPostBySlugQuery(slug)))
+    .WithOpenApi(op =>
+    {
+        op.Parameters[0].Description = "URL-friendly post slug (e.g., 'my-first-post')";
+        op.Parameters[0].Example = new OpenApiString("my-first-post");
+        return op;
+    });
+```
+
+## API Versioning
+
+```csharp
+// dotnet add package Asp.Versioning.Http
+// dotnet add package Asp.Versioning.Http.Client (for clients)
+
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new ApiVersion(1);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;  // adds api-supported-versions header
+    options.ApiVersionReader = ApiVersionReader.Combine(
+        new UrlSegmentApiVersionReader(),       // /api/v1/posts
+        new HeaderApiVersionReader("X-API-Version"),  // X-API-Version: 1
+        new MediaTypeApiVersionReader("version")       // application/json;version=1
+    );
+})
+.AddApiExplorer(options =>
+{
+    options.GroupNameFormat = "'v'VVV";
+    options.SubstituteApiVersionInUrl = true;
+});
+
+// Version 1 endpoint group
+var v1 = app.NewVersionedApi();
+var postsV1 = v1.MapGroup("/api/v{version:apiVersion}/posts")
+    .HasApiVersion(1);
+
+postsV1.MapGet("/", (IMediator m) => m.Send(new ListPostsQueryV1()));
+postsV1.MapGet("/{slug}", (string slug, IMediator m) =>
+    m.Send(new GetPostQueryV1(slug)));
+
+// Version 2 — breaking changes
+var postsV2 = v1.MapGroup("/api/v{version:apiVersion}/posts")
+    .HasApiVersion(2);
+
+postsV2.MapGet("/", (IMediator m) => m.Send(new ListPostsQueryV2()));  // new fields
+postsV2.MapGet("/{id:int}", (int id, IMediator m) =>  // changed: slug → int ID
+    m.Send(new GetPostQueryV2(id)));
+
+// Deprecation notice:
+postsV1.MapGet("/{slug}", handler)
+    .WithApiVersionSet(v1.ApiVersionSet!)
+    .HasDeprecatedApiVersion(new ApiVersion(1));  // mark v1 as deprecated
+```
+
+## Generating Dart/Flutter Client Code
+
+```bash
+# Generate a type-safe Dart client from your OpenAPI spec
+# Install: dart pub global activate openapi_generator_cli
+
+# Download your OpenAPI spec
+curl http://localhost:5000/openapi/v1.json -o api_spec.json
+
+# Generate Dart client
+openapi-generator generate \
+    -i api_spec.json \
+    -g dart-dio \
+    -o lib/generated/api \
+    --additional-properties=pubName=blog_api_client,pubVersion=1.0.0
+
+# Result: fully typed Dart classes
+# Usage in Flutter:
+# import 'generated/api/lib/api.dart';
+# final api = BlogApi(dio: dio, basePathOverride: 'https://api.myblog.com');
+# final posts = await api.getPostsApi().listPosts(page: 1, pageSize: 20);
+```
+
+```csharp
+// NSwag — alternative, generates from running app
+// dotnet add package NSwag.AspNetCore
+// dotnet add package NSwag.MSBuild
+
+// In .csproj for auto-generation on build:
+// <Target Name="GenerateDartClient" AfterTargets="Build">
+//   <Exec Command="dotnet nswag run nswag.json" />
+// </Target>
+
+// nswag.json:
+// {
+//   "runtime": "Net90",
+//   "defaultVariables": null,
+//   "documentGenerator": {
+//     "aspNetCoreToOpenApi": { "project": "Api/Api.csproj" }
+//   },
+//   "codeGenerators": {
+//     "openApiToTypeScriptClient": {  // or openApiToDartClient
+//       "framework": "Fetch",
+//       "output": "../frontend/src/api/client.ts"
+//     }
+//   }
+// }
+```
+
+## Problem Details — Standard Error Responses
+
+```csharp
+// RFC 9457 — standard machine-readable error format
+// .NET 9 adds Problem Details support built-in
+
+builder.Services.AddProblemDetails(options =>
+{
+    options.CustomizeProblemDetails = ctx =>
+    {
+        ctx.ProblemDetails.Extensions["traceId"] =
+            Activity.Current?.Id ?? ctx.HttpContext.TraceIdentifier;
+        ctx.ProblemDetails.Extensions["timestamp"] = DateTime.UtcNow;
+    };
+});
+
+// Validation errors map to:
+// HTTP 422
+// {
+//   "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+//   "title": "Validation failed",
+//   "status": 422,
+//   "errors": {
+//     "title": ["Title is required"],
+//     "body": ["Body must be at least 100 characters"]
+//   },
+//   "traceId": "00-abc123-def456-00"
+// }
+```
+
+<ExerciseBlock>
+1. Set up Scalar API docs for your blog API. Add `WithSummary`, `WithDescription`, and `Produces<T>()` annotations to every endpoint. Add example values to path parameters and request bodies. Share the URL with a colleague and ask them to call an endpoint without reading your source code.
+2. Implement API versioning for your blog API: V1 uses slugs for post lookup, V2 uses integer IDs and returns additional fields (SEO metadata, related posts). Add `Deprecated = true` to V1 endpoints and verify the deprecation header appears in responses.
+3. Generate a Dart client from your OpenAPI spec using `openapi_generator`. Import it into a test Flutter project and call at least 3 endpoints (list posts, get post, add comment). The goal is zero HTTP calls written by hand — everything uses the generated client.
+</ExerciseBlock>

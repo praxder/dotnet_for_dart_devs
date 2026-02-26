@@ -1,0 +1,62 @@
+---
+type CalloutType = 'tip' | 'gotcha' | 'same' | 'different' | 'new' | 'info';
+
+interface Props {
+  type?: CalloutType;
+  title?: string;
+}
+
+const { type = 'info', title } = Astro.props;
+
+const config: Record<CalloutType, { icon: string; label: string; classes: string; titleClass: string }> = {
+  tip: {
+    icon: '💡',
+    label: 'Tip',
+    classes: 'bg-amber-950/40 border-amber-700/50',
+    titleClass: 'text-amber-300',
+  },
+  gotcha: {
+    icon: '⚠️',
+    label: 'Gotcha',
+    classes: 'bg-red-950/40 border-red-700/50',
+    titleClass: 'text-red-300',
+  },
+  same: {
+    icon: '✅',
+    label: 'Same as Dart',
+    classes: 'bg-emerald-950/40 border-emerald-700/50',
+    titleClass: 'text-emerald-300',
+  },
+  different: {
+    icon: '🔄',
+    label: 'Different from Dart',
+    classes: 'bg-orange-950/40 border-orange-700/50',
+    titleClass: 'text-orange-300',
+  },
+  new: {
+    icon: '✨',
+    label: 'New Concept',
+    classes: 'bg-indigo-950/40 border-indigo-700/50',
+    titleClass: 'text-indigo-300',
+  },
+  info: {
+    icon: 'ℹ️',
+    label: 'Note',
+    classes: 'bg-slate-800/60 border-slate-600/50',
+    titleClass: 'text-slate-300',
+  },
+};
+
+const { icon, label, classes, titleClass } = config[type];
+const displayTitle = title || label;
+---
+
+<div class={`my-5 rounded-xl border p-4 ${classes}`}>
+  <p class={`flex items-center gap-2 text-sm font-semibold mb-2 ${titleClass}`}>
+    <span>{icon}</span>
+    <span>{displayTitle}</span>
+  </p>
+  <div class="text-sm text-slate-300 [&>p]:m-0 [&>p]:leading-relaxed [&>ul]:mt-1 [&>ul]:space-y-1">
+    <slot />
+  </div>
+</div>

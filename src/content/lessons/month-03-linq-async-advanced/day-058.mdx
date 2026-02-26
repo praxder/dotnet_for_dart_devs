@@ -1,0 +1,238 @@
+---
+title: "Channels and Producer/Consumer Patterns"
+day: 58
+week: 12
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Stream, StreamController, StreamTransformer, isolates"
+csharpConcept: "Channel<T>, ChannelReader/Writer, unbounded/bounded channels, async pipelines"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+`System.Threading.Channels` provides thread-safe async producer/consumer pipelines. It's the .NET equivalent of Go channels or Dart's `StreamController` — but with backpressure, bounded queues, and superior performance for high-throughput scenarios.
+
+## Channel Basics
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: StreamController as a channel
+  final controller = StreamController<int>.broadcast();
+
+  // Producer
+  void produce() async {
+    for (int i = 0; i < 10; i++) {
+      controller.add(i);
+      await Future.delayed(Duration(milliseconds: 100));
+    }
+    await controller.close();
+  }
+
+  // Consumer
+  controller.stream.listen(
+    (item) => print('Got: $item'),
+    onDone: () => print('Done'),
+  );
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  using System.Threading.Channels;
+
+  // Unbounded channel — producer never blocks
+  var channel = Channel.CreateUnbounded<int>();
+
+  // Producer — writes to channel
+  async Task ProduceAsync(ChannelWriter<int> writer)
+  {
+      for (int i = 0; i < 10; i++)
+      {
+          await writer.WriteAsync(i);
+          await Task.Delay(100);
+      }
+      writer.Complete();  // signals no more items
+  }
+
+  // Consumer — reads from channel
+  async Task ConsumeAsync(ChannelReader<int> reader)
+  {
+      await foreach (var item in reader.ReadAllAsync())
+          Console.WriteLine($"Got: {item}");
+      // ReadAllAsync() exits when Complete() is called
+  }
+
+  // Run both concurrently
+  var producer = ProduceAsync(channel.Writer);
+  var consumer = ConsumeAsync(channel.Reader);
+  await Task.WhenAll(producer, consumer);
+  ```
+  </div>
+</CodeComparison>
+
+## Bounded Channels — Backpressure
+
+```csharp
+// Bounded channel — producer blocks when buffer is full
+// This gives you backpressure: slow consumers slow down producers
+var options = new BoundedChannelOptions(capacity: 100)
+{
+    FullMode = BoundedChannelFullMode.Wait,       // await when full (backpressure)
+    // FullMode = BoundedChannelFullMode.DropOldest,  // drop oldest item
+    // FullMode = BoundedChannelFullMode.DropNewest,  // drop newest item
+    // FullMode = BoundedChannelFullMode.DropWrite,   // writing task returns false
+    SingleReader = true,   // optimization if only one consumer
+    SingleWriter = false,  // multiple producers OK
+};
+var boundedChannel = Channel.CreateBounded<WorkItem>(options);
+
+// Producer — will await if channel is full
+async Task FastProducer(ChannelWriter<WorkItem> writer)
+{
+    while (true)
+    {
+        var work = await GetNextWorkItemAsync();
+        await writer.WriteAsync(work);  // ← waits here if channel is at capacity
+    }
+}
+
+// Slow consumer — processes at its own pace
+async Task SlowConsumer(ChannelReader<WorkItem> reader)
+{
+    await foreach (var item in reader.ReadAllAsync())
+        await ProcessSlowlyAsync(item);  // consumer dictates pace
+}
+```
+
+## Multi-Producer Multi-Consumer
+
+```csharp
+// Multiple producers writing to the same channel
+var channel = Channel.CreateUnbounded<LogEntry>(
+    new UnboundedChannelOptions { SingleReader = true });
+
+// 5 producers
+var producers = Enumerable.Range(1, 5).Select(id =>
+    Task.Run(async () =>
+    {
+        for (int i = 0; i < 100; i++)
+            await channel.Writer.WriteAsync(new LogEntry($"Producer {id}: event {i}"));
+    })).ToArray();
+
+// 1 consumer
+var consumer = Task.Run(async () =>
+{
+    await foreach (var entry in channel.Reader.ReadAllAsync())
+        await WriteToLogAsync(entry);
+});
+
+await Task.WhenAll(producers);
+channel.Writer.Complete();  // all producers done
+await consumer;
+```
+
+## Pipeline Pattern — Chained Channels
+
+```csharp
+// Pipeline: read files → parse → validate → save
+// Each stage is a Channel; output of one feeds input of next
+
+async Task<ChannelReader<ParsedData>> ParseStage(ChannelReader<string> input)
+{
+    var output = Channel.CreateUnbounded<ParsedData>();
+
+    _ = Task.Run(async () =>
+    {
+        await foreach (var line in input.ReadAllAsync())
+        {
+            var parsed = ParseLine(line);
+            await output.Writer.WriteAsync(parsed);
+        }
+        output.Writer.Complete();
+    });
+
+    return output.Reader;
+}
+
+async Task<ChannelReader<ValidatedData>> ValidateStage(ChannelReader<ParsedData> input)
+{
+    var output = Channel.CreateUnbounded<ValidatedData>();
+
+    _ = Task.Run(async () =>
+    {
+        await foreach (var item in input.ReadAllAsync())
+        {
+            if (Validate(item) is ValidatedData valid)
+                await output.Writer.WriteAsync(valid);
+        }
+        output.Writer.Complete();
+    });
+
+    return output.Reader;
+}
+
+// Wire stages together
+var rawChannel = Channel.CreateUnbounded<string>();
+var parsedReader = await ParseStage(rawChannel.Reader);
+var validatedReader = await ValidateStage(parsedReader);
+
+// Feed data in
+foreach (var line in File.ReadLines("data.csv"))
+    await rawChannel.Writer.WriteAsync(line);
+rawChannel.Writer.Complete();
+
+// Consume validated results
+await foreach (var item in validatedReader.ReadAllAsync())
+    await SaveAsync(item);
+```
+
+<ConceptCallout type="tip" title="Channels vs Queues vs BlockingCollection">
+Use `Channel<T>` for async producer/consumer (async all the way). Use `ConcurrentQueue<T>` for lock-free, non-async scenarios. Use `BlockingCollection<T>` only for legacy synchronous code (it blocks threads — old pattern). `Channel<T>` is the modern, correct choice for most async scenarios.
+</ConceptCallout>
+
+## Error Handling in Channels
+
+```csharp
+// Propagate exceptions through the channel
+async Task ProducerWithErrors(ChannelWriter<int> writer)
+{
+    try
+    {
+        for (int i = 0; i < 10; i++)
+        {
+            if (i == 5) throw new InvalidOperationException("Producer failed at 5");
+            await writer.WriteAsync(i);
+        }
+        writer.Complete();  // normal completion
+    }
+    catch (Exception ex)
+    {
+        writer.Complete(ex);  // signals failure to consumer
+    }
+}
+
+async Task ConsumerHandlingErrors(ChannelReader<int> reader)
+{
+    try
+    {
+        await foreach (var item in reader.ReadAllAsync())
+            Console.WriteLine(item);
+    }
+    catch (ChannelClosedException ex) when (ex.InnerException != null)
+    {
+        Console.WriteLine($"Producer failed: {ex.InnerException.Message}");
+    }
+}
+```
+
+<ExerciseBlock>
+1. Build a log aggregation pipeline using Channels: (a) a producer that generates `LogEntry` records at 100/second, (b) a parse stage that extracts `Level`, `Timestamp`, and `Message`, (c) a filter stage that only passes `Error` and `Critical` entries, (d) a consumer that batches entries into groups of 10 before writing.
+2. Implement a bounded channel–based rate limiter: a `RateLimitedChannel<T>` that allows at most N items per second through to the consumer, discarding older items if the limit is exceeded.
+3. Create a `TaskScheduler` using a bounded channel: work items are queued via a channel, and exactly `maxConcurrency` consumer tasks process them in parallel. Use `SemaphoreSlim` inside the consumer to throttle concurrent processing.
+</ExerciseBlock>

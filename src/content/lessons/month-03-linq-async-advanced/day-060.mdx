@@ -1,0 +1,196 @@
+---
+title: "Unsafe Code, Pointers, and Interop"
+day: 60
+week: 12
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "dart:ffi for native interop, no pointer arithmetic"
+csharpConcept: "unsafe, fixed, stackalloc, P/Invoke, DllImport, NativeLibrary"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# lets you drop down to raw pointer manipulation for performance-critical code and native library interop. This is more powerful than Dart's FFI but also more dangerous — hence the `unsafe` keyword acting as an explicit opt-in.
+
+## The unsafe Keyword
+
+```csharp
+// unsafe blocks allow pointer operations
+// Requires /unsafe compiler flag or <AllowUnsafeBlocks>true</AllowUnsafeBlocks> in csproj
+
+unsafe
+{
+    int value = 42;
+    int* ptr = &value;   // take address of value
+    Console.WriteLine(*ptr);  // dereference: 42
+
+    *ptr = 100;
+    Console.WriteLine(value);  // 100 — modified through pointer
+
+    // Pointer arithmetic
+    int[] arr = { 1, 2, 3, 4, 5 };
+    fixed (int* p = arr)  // pin array in memory (prevent GC from moving it)
+    {
+        for (int i = 0; i < arr.Length; i++)
+            Console.Write(*(p + i) + " ");  // 1 2 3 4 5
+    }
+}
+```
+
+## stackalloc — Stack Allocation
+
+```csharp
+// stackalloc allocates on the stack — no GC, no heap allocation
+// The memory is freed when the method returns
+unsafe
+{
+    // Old syntax (returns pointer)
+    int* arr = stackalloc int[10];
+    for (int i = 0; i < 10; i++)
+        arr[i] = i * i;
+}
+
+// Modern: stackalloc with Span<T> — safe wrapper for stack memory
+Span<int> buffer = stackalloc int[256];  // no unsafe needed!
+for (int i = 0; i < buffer.Length; i++)
+    buffer[i] = i;
+
+// Perfect for small temporary buffers in hot paths
+public static bool TryFormatGuid(Guid guid, Span<char> destination, out int charsWritten)
+{
+    Span<char> temp = stackalloc char[36];
+    // format into temp, then copy to destination
+    return guid.TryFormat(destination, out charsWritten, "D");
+}
+```
+
+<ConceptCallout type="tip" title="Prefer Span and stackalloc Over Unsafe Pointers">
+`Span<T>` with `stackalloc` gives you stack performance without the `unsafe` keyword. The CLR bounds-checks Span accesses, so you get safety with near-pointer speed. Only use `unsafe` + raw pointers when calling native code or when Span can't express what you need.
+</ConceptCallout>
+
+## P/Invoke — Calling Native Libraries
+
+```csharp
+using System.Runtime.InteropServices;
+
+// Call Windows API functions
+public static class NativeMethods
+{
+    // Import from kernel32.dll
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint GetCurrentThreadId();
+
+    // Import with string marshaling
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SetConsoleTitle(string title);
+
+    // Cross-platform: use NativeLibrary or conditional compilation
+    [DllImport("libc", EntryPoint = "getpid")]  // Linux/macOS
+    private static extern int GetPid();
+}
+
+// Usage
+uint threadId = NativeMethods.GetCurrentThreadId();
+```
+
+## Modern P/Invoke with LibraryImport (.NET 7+)
+
+```csharp
+// LibraryImport — source-generated P/Invoke (no runtime reflection)
+// Faster and AOT-compatible (important for mobile/native)
+
+public static partial class NativeMethods
+{
+    [LibraryImport("kernel32.dll")]
+    public static partial uint GetCurrentThreadId();
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetConsoleTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+}
+```
+
+## Marshaling Complex Types
+
+```csharp
+// Struct layout for interop — must match the native struct exactly
+[StructLayout(LayoutKind.Sequential)]
+public struct POINT
+{
+    public int X;
+    public int Y;
+}
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct WIN32_FIND_DATA
+{
+    public uint FileAttributes;
+    public FILETIME CreationTime;
+    public FILETIME LastAccessTime;
+    public FILETIME LastWriteTime;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    // ...
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string FileName;
+}
+
+// Passing arrays to native code
+[DllImport("mylib.dll")]
+static extern void ProcessData(
+    [In] int[] input,
+    int inputLength,
+    [Out] int[] output);
+```
+
+## Cross-Platform Native Interop
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart FFI
+  import 'dart:ffi';
+  import 'package:ffi/ffi.dart';
+
+  final lib = DynamicLibrary.open('mylib.so');
+  final addFn = lib.lookupFunction<
+    Int32 Function(Int32, Int32),
+    int Function(int, int)>('add');
+
+  print(addFn(3, 4)); // 7
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: cross-platform with NativeLibrary
+  using System.Runtime.InteropServices;
+
+  // Dynamic loading (cross-platform)
+  var lib = NativeLibrary.Load(OperatingSystem.IsWindows()
+      ? "mylib.dll"
+      : OperatingSystem.IsMacOS() ? "libmylib.dylib" : "libmylib.so");
+
+  var addFn = NativeLibrary.GetExport(lib, "add");
+  // (Use LibraryImport for type-safe access)
+
+  // Or with delegate:
+  [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+  delegate int AddDelegate(int a, int b);
+
+  var add = Marshal.GetDelegateForFunctionPointer<AddDelegate>(addFn);
+  Console.WriteLine(add(3, 4));  // 7
+  ```
+  </div>
+</CodeComparison>
+
+<ExerciseBlock>
+1. Use P/Invoke to call `GetSystemInfo` on Windows (or `uname` on Linux/macOS) to print system information: processor count, page size, and architecture.
+2. Implement a high-performance `ParseInts` method using `stackalloc` and `Span<int>` that parses comma-separated integers from a `ReadOnlySpan<char>` without any heap allocation. Benchmark it against `string.Split()` + `int.Parse()`.
+3. Write a safe wrapper around a native random number generator (use `BCryptGenRandom` on Windows or `getrandom` on Linux via P/Invoke). Wrap it in a class that implements `IDisposable` and handles the native handle lifecycle.
+</ExerciseBlock>

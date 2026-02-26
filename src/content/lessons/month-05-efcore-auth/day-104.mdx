@@ -1,0 +1,240 @@
+---
+title: "EF Core: Bulk Operations and Large Data"
+day: 104
+week: 21
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "batch database operations in Dart, bulk inserts in sqflite"
+csharpConcept: "ExecuteUpdate, ExecuteDelete, BulkExtensions, SqlBulkCopy, chunked processing"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Standard EF Core operations (Add/Update/Remove + SaveChanges) work great for single entities and small batches. For bulk operations — importing thousands of records, batch updates, or mass deletes — you need different tools to avoid performance cliffs.
+
+## EF Core 7+ Bulk Operations
+
+```csharp
+// ExecuteUpdateAsync — single SQL UPDATE, no entity loading
+// Much faster than Load → Modify → SaveChanges for many rows
+
+// Mark all expired discounts as inactive
+int updated = await db.Products
+    .Where(p => p.DiscountExpiry < DateTime.UtcNow && p.IsDiscounted)
+    .ExecuteUpdateAsync(s => s
+        .SetProperty(p => p.IsDiscounted, false)
+        .SetProperty(p => p.DiscountPercent, (decimal?)null)
+        .SetProperty(p => p.UpdatedAt, DateTime.UtcNow));
+
+Console.WriteLine($"Updated {updated} products");
+// SQL: UPDATE products SET is_discounted=0, discount_percent=NULL, updated_at=@p
+//      WHERE discount_expiry < @now AND is_discounted=1
+
+// ExecuteDeleteAsync — single SQL DELETE, no entity loading
+int deleted = await db.AuditLogs
+    .Where(a => a.CreatedAt < DateTime.UtcNow.AddYears(-2))
+    .ExecuteDeleteAsync();
+// SQL: DELETE FROM audit_logs WHERE created_at < @cutoff
+
+// Both bypass:
+// - Change tracker (no entity tracking)
+// - SaveChanges interceptors
+// - Soft delete interceptors (if you have them)
+// Use with caution when you have cross-cutting concerns in interceptors
+```
+
+<ConceptCallout type="gotcha" title="ExecuteUpdate/Delete Bypass Interceptors">
+`ExecuteUpdateAsync` and `ExecuteDeleteAsync` go directly to the database — they bypass EF Core's change tracker and interceptors. If you have soft delete, audit logging, or domain event interceptors, they won't fire. Use them for administrative/cleanup operations where bypassing those is acceptable. For business operations, load entities and use `SaveChangesAsync`.
+</ConceptCallout>
+
+## Efficient Bulk Import — AddRange and Batching
+
+```csharp
+// For inserting 100–10,000 rows: AddRange + single SaveChanges
+var products = ImportCsv("products.csv").Select(row => new Product
+{
+    Name = row.Name,
+    Price = row.Price,
+    CategoryId = row.CategoryId
+}).ToList();
+
+db.Products.AddRange(products);  // adds all to change tracker
+await db.SaveChangesAsync();     // batched INSERT (up to 42 per batch by default)
+
+// For 10,000+ rows: chunk to avoid memory issues
+const int chunkSize = 1000;
+foreach (var chunk in ImportLargeCsv("products.csv").Chunk(chunkSize))
+{
+    db.Products.AddRange(chunk);
+    await db.SaveChangesAsync();
+    db.ChangeTracker.Clear();  // free memory between chunks
+}
+```
+
+## SqlBulkCopy — Maximum Insert Speed
+
+```csharp
+// SqlBulkCopy: fastest way to insert large amounts of data (SQL Server)
+// Bypasses EF entirely — uses SQL Server bulk copy protocol
+
+public async Task BulkInsertProductsAsync(IEnumerable<Product> products)
+{
+    var connection = (SqlConnection)db.Database.GetDbConnection();
+    await connection.OpenAsync();
+
+    using var bulkCopy = new SqlBulkCopy(connection)
+    {
+        DestinationTableName = "products",
+        BatchSize = 5000,
+        BulkCopyTimeout = 300
+    };
+
+    // Map columns explicitly
+    bulkCopy.ColumnMappings.Add(nameof(Product.Name), "name");
+    bulkCopy.ColumnMappings.Add(nameof(Product.Price), "price");
+    bulkCopy.ColumnMappings.Add(nameof(Product.CategoryId), "category_id");
+
+    // Convert to DataTable
+    var table = new DataTable();
+    table.Columns.Add("name", typeof(string));
+    table.Columns.Add("price", typeof(decimal));
+    table.Columns.Add("category_id", typeof(int));
+
+    foreach (var p in products)
+        table.Rows.Add(p.Name, p.Price, p.CategoryId);
+
+    await bulkCopy.WriteToServerAsync(table);
+}
+
+// EFCore.BulkExtensions — easier API, supports SQL Server + PostgreSQL + SQLite
+// dotnet add package EFCore.BulkExtensions
+
+await db.BulkInsertAsync(products);           // INSERT
+await db.BulkUpdateAsync(products);           // UPDATE
+await db.BulkDeleteAsync(products);           // DELETE
+await db.BulkInsertOrUpdateAsync(products);   // UPSERT (merge)
+
+// Performance comparison for 50,000 rows:
+// EF AddRange + SaveChanges: ~30 seconds
+// SqlBulkCopy:               ~0.5 seconds
+// BulkExtensions:            ~1 second
+```
+
+## Streaming Large Result Sets
+
+```csharp
+// Problem: loading 100,000 rows into memory with ToListAsync() = OOM
+// Solution: use AsAsyncEnumerable() to stream rows one at a time
+
+// BAD — loads all rows at once
+var allOrders = await db.Orders.ToListAsync();  // Could be gigabytes!
+
+// GOOD — stream processing
+await foreach (var order in db.Orders
+    .AsNoTracking()
+    .Where(o => o.Status == OrderStatus.Pending)
+    .AsAsyncEnumerable())
+{
+    await ProcessOrderAsync(order);
+    // Each row is processed and discarded — O(1) memory
+}
+
+// Export large dataset to CSV without loading everything
+public async IAsyncEnumerable<string> ExportOrdersCsvAsync(
+    DateTime from,
+    DateTime to,
+    [EnumeratorCancellation] CancellationToken ct = default)
+{
+    yield return "OrderId,CustomerName,Total,Date\n";  // header
+
+    await foreach (var order in db.Orders
+        .AsNoTracking()
+        .Where(o => o.CreatedAt >= from && o.CreatedAt <= to)
+        .Select(o => new { o.Id, CustomerName = o.Customer!.Name, o.Total, o.CreatedAt })
+        .AsAsyncEnumerable()
+        .WithCancellation(ct))
+    {
+        yield return $"{order.Id},{order.CustomerName},{order.Total},{order.CreatedAt:O}\n";
+    }
+}
+
+// Minimal API streaming endpoint:
+app.MapGet("/api/orders/export", async (
+    DateTime from, DateTime to,
+    OrderExportService service,
+    HttpResponse response,
+    CancellationToken ct) =>
+{
+    response.ContentType = "text/csv";
+    response.Headers.ContentDisposition = "attachment; filename=orders.csv";
+
+    await foreach (var line in service.ExportOrdersCsvAsync(from, to, ct))
+        await response.WriteAsync(line, ct);
+});
+```
+
+## Chunked Background Processing
+
+```csharp
+// Process large datasets in chunks as a BackgroundService
+public class OrderProcessingService(
+    IDbContextFactory<AppDbContext> factory,
+    ILogger<OrderProcessingService> logger)
+    : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await ProcessPendingOrdersAsync(stoppingToken);
+            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+        }
+    }
+
+    private async Task ProcessPendingOrdersAsync(CancellationToken ct)
+    {
+        const int batchSize = 100;
+        int processedCount = 0;
+
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        // Process in chunks to avoid holding long transactions
+        while (true)
+        {
+            var batch = await db.Orders
+                .Where(o => o.Status == OrderStatus.Pending)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (batch.Count == 0) break;
+
+            foreach (var order in batch)
+            {
+                await ProcessSingleOrderAsync(order, ct);
+                order.Status = OrderStatus.Processing;
+            }
+
+            await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();  // free memory
+            processedCount += batch.Count;
+
+            if (batch.Count < batchSize) break;  // no more pending
+        }
+
+        if (processedCount > 0)
+            logger.LogInformation("Processed {Count} pending orders", processedCount);
+    }
+}
+```
+
+<ExerciseBlock>
+1. Import 50,000 product records from a CSV file. Implement three approaches: (a) standard `AddRange` + `SaveChanges`, (b) chunked `AddRange` in batches of 1000, (c) `BulkExtensions.BulkInsertAsync`. Measure time and peak memory for each.
+2. Implement a streaming CSV export endpoint for orders with date range filtering. The endpoint should be able to stream 1 million rows without running out of memory. Verify with `GC.GetTotalAllocatedBytes()` that memory stays constant.
+3. Write a `DataCleanupService` BackgroundService that runs daily: (a) `ExecuteDeleteAsync` for audit logs older than 2 years, (b) `ExecuteUpdateAsync` to mark sessions older than 30 days as expired, (c) processes orphaned temporary uploads in chunks of 500. Log all counts.
+</ExerciseBlock>

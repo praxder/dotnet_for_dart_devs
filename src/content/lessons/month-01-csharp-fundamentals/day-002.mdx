@@ -1,0 +1,369 @@
+---
+title: "Solution and Project Structure: .csproj vs pubspec.yaml"
+day: 2
+week: 1
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "pubspec.yaml, pub get, dart pub"
+csharpConcept: ".csproj, .sln, dotnet restore, NuGet"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+# Solution and Project Structure: .csproj vs pubspec.yaml
+
+In Dart, a single `pubspec.yaml` describes your package — its name, SDK constraints, dependencies, and dev dependencies. In .NET, project metadata lives in a `.csproj` file (an XML file), and when you have multiple projects that belong together, a `.sln` solution file ties them into a group. This lesson dissects both file formats and shows you how to manage packages and project references.
+
+---
+
+## The .csproj File: Anatomy
+
+A `.csproj` file is MSBuild XML. It looks verbose but is actually quite readable once you know the structure. Here is a fully annotated example:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Which .NET version to target -->
+    <TargetFramework>net9.0</TargetFramework>
+
+    <!-- Exe = runnable app, Library = .dll with no entry point -->
+    <OutputType>Exe</OutputType>
+
+    <!-- Enables nullable reference type warnings (like Dart's null safety) -->
+    <Nullable>enable</Nullable>
+
+    <!-- Auto-imports System, System.Collections.Generic, etc. -->
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Treat all warnings as errors in CI — optional but recommended -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <!-- Assembly name if different from folder name -->
+    <AssemblyName>MyApp</AssemblyName>
+
+    <!-- Root namespace for auto-generated files -->
+    <RootNamespace>MyApp</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Third-party packages from NuGet -->
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!-- References to other projects in the same solution -->
+  <ItemGroup>
+    <ProjectReference Include="../MyApp.Core/MyApp.Core.csproj" />
+  </ItemGroup>
+
+</Project>
+```
+
+<DartEquivalent>
+Compare this to a `pubspec.yaml`:
+
+```yaml
+name: my_app
+description: A Dart application
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+dependencies:
+  http: ^1.1.0
+dev_dependencies:
+  test: ^1.24.0
+```
+
+The concepts map cleanly:
+- `TargetFramework` ↔ `environment.sdk`
+- `PackageReference` ↔ `dependencies`
+- There is no `dev_dependencies` distinction in `.csproj` — test packages just go in the test project's own `.csproj`
+</DartEquivalent>
+
+---
+
+## Multi-targeting
+
+One feature `.csproj` has that `pubspec.yaml` does not is **multi-targeting** — building your library for multiple .NET versions simultaneously:
+
+```xml
+<PropertyGroup>
+  <!-- Build for both .NET 8 and .NET 9 -->
+  <TargetFrameworks>net8.0;net9.0</TargetFrameworks>
+</PropertyGroup>
+```
+
+Note the plural `TargetFrameworks`. When you `dotnet build` this project, it produces two output assemblies. This is essential for library authors who need to support multiple .NET versions.
+
+<ConceptCallout type="new">
+There is no Dart equivalent of multi-targeting. In Dart, a package specifies a minimum SDK version and that is it. The .NET approach is more common in enterprise ecosystems where consumers cannot always upgrade quickly.
+</ConceptCallout>
+
+---
+
+## The .sln Solution File
+
+A `.sln` file is a container for multiple `.csproj` projects. Think of it as a workspace file — similar to a monorepo root `melos.yaml` if you have used Melos for Flutter monorepos, or a Yarn/pnpm workspace `package.json`.
+
+<DartEquivalent>
+In the Dart/Flutter world, a multi-package repo often uses `melos` to manage packages. In .NET, the `.sln` file is the built-in first-class mechanism for this, with no extra tooling required.
+</DartEquivalent>
+
+### Creating a solution
+
+```bash
+# Create a new solution file
+dotnet new sln -n MyApp
+
+# Create projects
+dotnet new console -n MyApp.Console
+dotnet new classlib -n MyApp.Core
+dotnet new xunit -n MyApp.Tests
+
+# Add projects to the solution
+dotnet sln add MyApp.Console/MyApp.Console.csproj
+dotnet sln add MyApp.Core/MyApp.Core.csproj
+dotnet sln add MyApp.Tests/MyApp.Tests.csproj
+```
+
+Your folder structure now looks like:
+
+```
+MyApp/
+├── MyApp.sln
+├── MyApp.Console/
+│   ├── MyApp.Console.csproj
+│   └── Program.cs
+├── MyApp.Core/
+│   ├── MyApp.Core.csproj
+│   └── MathHelpers.cs
+└── MyApp.Tests/
+    ├── MyApp.Tests.csproj
+    └── MathHelpersTests.cs
+```
+
+### What the .sln file actually looks like
+
+```
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp.Console", "MyApp.Console\MyApp.Console.csproj", "{A1B2C3D4-...}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp.Core", "MyApp.Core\MyApp.Core.csproj", "{B2C3D4E5-...}"
+EndProject
+```
+
+<ConceptCallout type="tip">
+You will almost never edit a `.sln` file by hand. Use `dotnet sln add`, `dotnet sln remove`, and `dotnet sln list` to manage it. The GUIDs are auto-generated and not meaningful to you — they are legacy artifacts from the Visual Studio era.
+</ConceptCallout>
+
+---
+
+## NuGet: The Package Registry
+
+NuGet is to .NET what pub.dev is to Dart. It lives at [nuget.org](https://nuget.org) and hosts hundreds of thousands of packages.
+
+<CodeComparison>
+  <div slot="dart">
+  ```bash
+  # Add a dependency
+  dart pub add http
+
+  # Add a dev dependency
+  dart pub add --dev test
+
+  # Remove a dependency
+  dart pub remove http
+
+  # Upgrade all dependencies
+  dart pub upgrade
+
+  # Show dependency tree
+  dart pub deps
+  ```
+  </div>
+  <div slot="csharp">
+  ```bash
+  # Add a package
+  dotnet add package Newtonsoft.Json
+
+  # Add a specific version
+  dotnet add package Newtonsoft.Json --version 13.0.3
+
+  # Remove a package
+  dotnet remove package Newtonsoft.Json
+
+  # Restore all packages (like pub get)
+  dotnet restore
+
+  # List installed packages
+  dotnet list package
+
+  # Check for outdated packages
+  dotnet list package --outdated
+  ```
+  </div>
+</CodeComparison>
+
+### Version pinning
+
+In Dart, `pubspec.yaml` uses caret syntax (`^1.1.0` means `>=1.1.0 <2.0.0`). NuGet uses square bracket notation:
+
+| Notation | Meaning |
+|----------|---------|
+| `13.0.3` | Minimum version 13.0.3 (no upper bound — floating) |
+| `[13.0.3]` | Exactly 13.0.3 |
+| `[13.0.0, 14.0.0)` | >= 13.0.0 and < 14.0.0 |
+| `[13.0.0, 14.0.0]` | >= 13.0.0 and <= 14.0.0 |
+
+In practice, most teams just write the version number without brackets: `Version="13.0.3"`. NuGet will allow patch-level upgrades during restore.
+
+<ConceptCallout type="gotcha">
+Unlike `dart pub add` which immediately updates `pubspec.lock`, `dotnet add package` updates the `.csproj` and then automatically runs a restore. The lock file equivalent is `packages.lock.json`, but it is **not generated by default**. To enable deterministic restores (important for CI), add this to your `.csproj`:
+
+```xml
+<PropertyGroup>
+  <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+</PropertyGroup>
+```
+
+This generates a `packages.lock.json` — commit it to source control just like `pubspec.lock`.
+</ConceptCallout>
+
+---
+
+## Project References
+
+When one project in your solution depends on another, use a `ProjectReference` instead of a `PackageReference`:
+
+```bash
+# CLI way: add a reference from MyApp.Console to MyApp.Core
+dotnet add MyApp.Console/MyApp.Console.csproj reference MyApp.Core/MyApp.Core.csproj
+```
+
+This adds to `MyApp.Console.csproj`:
+
+```xml
+<ItemGroup>
+  <ProjectReference Include="../MyApp.Core/MyApp.Core.csproj" />
+</ItemGroup>
+```
+
+<DartEquivalent>
+In Dart, you reference a local package in `pubspec.yaml` with a `path` dependency:
+
+```yaml
+dependencies:
+  my_core:
+    path: ../my_core
+```
+
+The `.csproj` `ProjectReference` is the direct equivalent. A key difference: .NET project references automatically trigger a rebuild of the referenced project when you run `dotnet build` on the dependent. The build system understands the dependency graph — no separate `melos bootstrap` step needed.
+</DartEquivalent>
+
+---
+
+## The bin/ and obj/ Directories
+
+After building, two directories appear that you should understand and never commit to source control:
+
+### bin/
+
+```
+MyApp.Console/bin/
+└── Debug/
+    └── net9.0/
+        ├── MyApp.Console.dll     ← Your compiled assembly
+        ├── MyApp.Console.exe     ← Platform-specific launcher
+        ├── MyApp.Core.dll        ← Referenced project assemblies are copied here
+        ├── MyApp.Console.pdb     ← Debug symbols (like .dart.js.map)
+        └── MyApp.Console.runtimeconfig.json
+```
+
+`bin/` contains the runnable output. `Debug/` vs `Release/` corresponds to the build configuration.
+
+### obj/
+
+```
+MyApp.Console/obj/
+├── project.assets.json    ← NuGet dependency graph (do not edit)
+├── project.nuget.cache    ← Restore cache
+└── Debug/
+    └── net9.0/
+        └── ...            ← Intermediate compilation artifacts
+```
+
+`obj/` contains MSBuild's intermediate files. It is regenerated on every build.
+
+<ConceptCallout type="tip">
+Add both to your `.gitignore`. The standard `.NET .gitignore` (generated by `dotnet new gitignore`) handles this automatically. If you ever have mysterious build errors, deleting `bin/` and `obj/` and running `dotnet restore && dotnet build` is the first troubleshooting step — equivalent to deleting `.dart_tool/` and running `dart pub get`.
+</ConceptCallout>
+
+---
+
+## ImplicitUsings: What Gets Imported Automatically
+
+With `<ImplicitUsings>enable</ImplicitUsings>`, the following namespaces are automatically available in every `.cs` file without an explicit `using` statement:
+
+```csharp
+// These are injected for you in console apps:
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+```
+
+<DartEquivalent>
+Dart imports are always explicit — you always write `import 'dart:io'` and so on. C#'s `ImplicitUsings` is more like how Flutter projects do not require you to import `dart:ui` for most widget work — the framework re-exports the common things. It is a convenience feature, not a language-level difference.
+</DartEquivalent>
+
+You can add your own global usings in a dedicated file (conventionally `GlobalUsings.cs`):
+
+```csharp
+// GlobalUsings.cs
+global using MyApp.Core.Models;
+global using MyApp.Core.Services;
+```
+
+---
+
+## Building the Full Solution
+
+```bash
+# Build every project in the solution
+dotnet build MyApp.sln
+
+# Build in Release mode
+dotnet build MyApp.sln -c Release
+
+# Run all tests in the solution
+dotnet test MyApp.sln
+
+# Restore packages for all projects
+dotnet restore MyApp.sln
+```
+
+When you run `dotnet build` at the solution level, MSBuild computes the dependency graph from `ProjectReference` entries and builds projects in the correct order.
+
+---
+
+<ExerciseBlock>
+## Exercises
+
+1. **Anatomy exercise**: Create a new solution with three projects: a `classlib` named `Calculator.Core`, a `console` named `Calculator.App`, and an `xunit` named `Calculator.Tests`. Wire up project references so `App` and `Tests` both reference `Core`. Run `dotnet build` at the solution root and confirm all three build.
+
+2. **NuGet exploration**: Add `Humanizer.Core` to your `Calculator.App` project. Find it on nuget.org and note its weekly download count and license. Use it to print a number in words: `42.ToWords()` should print `"forty-two"`. 
+
+3. **Lock file**: Enable `RestorePackagesWithLockFile` in one of your projects. Run `dotnet restore` and inspect the generated `packages.lock.json`. What information does it capture that the `.csproj` alone does not?
+
+4. **Outdated packages**: Run `dotnet list package --outdated` in a project that has at least one NuGet package. Upgrade one package to the latest version using `dotnet add package <name> --version <latest>`.
+
+5. **Global usings**: Create a `GlobalUsings.cs` file in `Calculator.App` with a global using for `Calculator.Core`. Verify that types from `Calculator.Core` are accessible in `Program.cs` without an explicit `using` statement.
+</ExerciseBlock>

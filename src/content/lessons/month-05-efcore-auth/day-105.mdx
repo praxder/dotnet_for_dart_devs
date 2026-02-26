@@ -1,0 +1,314 @@
+---
+title: "Mini-Project: Full Blog API with EF Core"
+day: 105
+week: 21
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "production-grade Dart API with drift, full backend architecture"
+csharpConcept: "EF Core + CQRS + MediatR + soft delete + audit + multi-tenant + performance"
+estimatedMinutes: 60
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This is the Module 8 capstone. You'll integrate everything from the EF Core module into a production-quality blog platform backend: relationships, migrations, CQRS, repository pattern, audit logging, soft delete, caching, and bulk operations.
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────┐
+│                  ASP.NET Core API                      │
+│                                                        │
+│  Minimal API Endpoints                                 │
+│        │                                               │
+│        ▼                                               │
+│  MediatR Pipeline                                      │
+│   ├── Validation (FluentValidation)                    │
+│   ├── Logging (request/response)                       │
+│   └── Caching (query results)                          │
+│        │                                               │
+│  Commands / Queries                                    │
+│        │                                               │
+│        ▼                                               │
+│  AppDbContext                                          │
+│   ├── Interceptors (AuditInterceptor, SoftDelete)      │
+│   ├── Global Filters (IsDeleted, TenantId)             │
+│   └── IEntityTypeConfiguration classes                 │
+│        │                                               │
+│        ▼                                               │
+│   SQL Server / SQLite                                  │
+└──────────────────────────────────────────────────────┘
+```
+
+## Complete Domain Model
+
+```csharp
+// Entities (all extend AuditableEntity with soft delete)
+public abstract class AuditableEntity
+{
+    public DateTime CreatedAt { get; set; }
+    public string CreatedBy { get; set; } = "system";
+    public DateTime UpdatedAt { get; set; }
+    public string UpdatedBy { get; set; } = "system";
+    public bool IsDeleted { get; set; }
+    public DateTime? DeletedAt { get; set; }
+}
+
+public class Author : AuditableEntity
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public required string Email { get; set; }
+    public string Bio { get; set; } = "";
+    public AuthorProfile Profile { get; set; } = new();  // owned type
+    public List<Post> Posts { get; set; } = [];
+}
+
+public class AuthorProfile  // value object
+{
+    public string? Website { get; set; }
+    public string? Twitter { get; set; }
+    public string? GitHub { get; set; }
+    public string AvatarUrl { get; set; } = "";
+}
+
+public class Post : AuditableEntity
+{
+    public int Id { get; set; }
+    public required string Title { get; set; }
+    public required string Slug { get; set; }
+    public string Summary { get; set; } = "";
+    public required string Body { get; set; }
+    public PostStatus Status { get; set; } = PostStatus.Draft;
+    public DateTime? PublishedAt { get; set; }
+    public int ViewCount { get; set; }
+    public int AuthorId { get; set; }
+    public Author? Author { get; set; }
+    public List<Tag> Tags { get; set; } = [];
+    public List<Comment> Comments { get; set; } = [];
+    public PostSeo Seo { get; set; } = new();  // owned type
+}
+
+public class PostSeo  // value object stored as JSON
+{
+    public string? MetaTitle { get; set; }
+    public string? MetaDescription { get; set; }
+    public List<string> Keywords { get; set; } = [];
+}
+
+public class Tag : AuditableEntity
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public required string Slug { get; set; }
+    public string? Description { get; set; }
+    public List<Post> Posts { get; set; } = [];
+}
+
+public class Comment : AuditableEntity
+{
+    public int Id { get; set; }
+    public required string AuthorName { get; set; }
+    public required string AuthorEmail { get; set; }
+    public required string Body { get; set; }
+    public CommentStatus Status { get; set; } = CommentStatus.Pending;
+    public int PostId { get; set; }
+    public Post? Post { get; set; }
+    public int? ParentId { get; set; }
+    public Comment? Parent { get; set; }
+    public List<Comment> Replies { get; set; } = [];
+}
+
+public enum PostStatus { Draft, Published, Archived }
+public enum CommentStatus { Pending, Approved, Rejected }
+```
+
+## DbContext with All Features
+
+```csharp
+public class BlogDbContext(
+    DbContextOptions<BlogDbContext> options,
+    ITenantContext? tenantContext = null)
+    : DbContext(options)
+{
+    public DbSet<Author> Authors { get; set; }
+    public DbSet<Post> Posts { get; set; }
+    public DbSet<Tag> Tags { get; set; }
+    public DbSet<Comment> Comments { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+
+        // Global filters for soft delete
+        modelBuilder.Entity<Author>().HasQueryFilter(a => !a.IsDeleted);
+        modelBuilder.Entity<Post>().HasQueryFilter(p => !p.IsDeleted);
+        modelBuilder.Entity<Comment>().HasQueryFilter(c => !c.IsDeleted
+            && c.Status == CommentStatus.Approved);
+    }
+}
+
+// Post configuration:
+public class PostConfiguration : IEntityTypeConfiguration<Post>
+{
+    public void Configure(EntityTypeBuilder<Post> builder)
+    {
+        builder.ToTable("posts");
+
+        builder.Property(p => p.Title).HasMaxLength(500).IsRequired();
+        builder.Property(p => p.Slug).HasMaxLength(500).IsRequired();
+        builder.Property(p => p.Body).IsRequired();
+        builder.Property(p => p.Summary).HasMaxLength(1000);
+
+        // Indexes for common query patterns
+        builder.HasIndex(p => p.Slug).IsUnique();
+        builder.HasIndex(p => new { p.Status, p.PublishedAt });
+        builder.HasIndex(p => p.AuthorId);
+        builder.HasIndex(p => p.IsDeleted).HasFilter("is_deleted = 0");
+
+        // SEO as JSON column
+        builder.OwnsOne(p => p.Seo, seo => seo.ToJson());
+
+        // Author relationship
+        builder.HasOne(p => p.Author)
+            .WithMany(a => a.Posts)
+            .HasForeignKey(p => p.AuthorId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Tags many-to-many
+        builder.HasMany(p => p.Tags)
+            .WithMany(t => t.Posts)
+            .UsingEntity(j => j.ToTable("post_tags"));
+
+        // Temporal table for price history (SQL Server only)
+        // builder.ToTable("posts", tb => tb.IsTemporal());
+    }
+}
+```
+
+## Full CQRS Handler Examples
+
+```csharp
+// Cached query handler
+public class GetPostBySlugHandler(
+    BlogDbContext db,
+    IMemoryCache cache)
+    : IRequestHandler<GetPostBySlugQuery, PostDetailDto?>
+{
+    public async Task<PostDetailDto?> Handle(GetPostBySlugQuery request, CancellationToken ct)
+    {
+        var cacheKey = $"post:{request.Slug}";
+
+        return await cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            entry.SlidingExpiration = TimeSpan.FromMinutes(5);
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1);
+
+            var post = await db.Posts
+                .AsNoTracking()
+                .Include(p => p.Author)
+                .Include(p => p.Tags)
+                .Include(p => p.Comments.Where(c => c.ParentId == null))
+                    .ThenInclude(c => c.Replies)
+                .FirstOrDefaultAsync(p => p.Slug == request.Slug
+                    && p.Status == PostStatus.Published, ct);
+
+            if (post is null) return null;
+
+            // Increment views asynchronously (non-blocking)
+            _ = db.Posts
+                .Where(p => p.Id == post.Id)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.ViewCount, p => p.ViewCount + 1), ct);
+
+            return MapToDto(post);
+        });
+    }
+
+    private static PostDetailDto MapToDto(Post post) => /* ... */ null!;
+}
+
+// Command with domain event
+public record DeletePostCommand(int PostId, string RequestingUserId) : IRequest<DeleteResult>;
+public record PostDeletedNotification(int PostId, string Title) : INotification;
+
+public class DeletePostHandler(
+    BlogDbContext db,
+    IMediator mediator)
+    : IRequestHandler<DeletePostCommand, DeleteResult>
+{
+    public async Task<DeleteResult> Handle(DeletePostCommand request, CancellationToken ct)
+    {
+        var post = await db.Posts
+            .FirstOrDefaultAsync(p => p.Id == request.PostId, ct);
+
+        if (post is null) return DeleteResult.NotFound;
+
+        // Soft delete via interceptor
+        db.Posts.Remove(post);
+        await db.SaveChangesAsync(ct);
+
+        // Notify other systems
+        await mediator.Publish(new PostDeletedNotification(post.Id, post.Title), ct);
+
+        return DeleteResult.Success;
+    }
+}
+```
+
+## API Endpoint Registration
+
+```csharp
+var blog = app.MapGroup("/api/blog").WithOpenApi();
+
+// Public endpoints
+blog.MapGet("/posts", ([AsParameters] ListPostsQuery query, IMediator m) =>
+    m.Send(query)).WithName("ListPosts");
+
+blog.MapGet("/posts/{slug}", (string slug, IMediator m) =>
+    m.Send(new GetPostBySlugQuery(slug)));
+
+blog.MapGet("/tags", (IMediator m) =>
+    m.Send(new ListTagsQuery()));
+
+blog.MapPost("/posts/{id}/comments", async (
+    int id, AddCommentRequest body, IMediator m) =>
+{
+    var result = await m.Send(new AddCommentCommand(id, body.Name, body.Email, body.Body));
+    return Results.Created($"/api/blog/posts/{id}/comments/{result.CommentId}", result);
+});
+
+// Authenticated endpoints
+var admin = blog.MapGroup("/admin").RequireAuthorization("author");
+
+admin.MapPost("/posts", async (CreatePostCommand cmd, IMediator m) =>
+{
+    var result = await m.Send(cmd);
+    return Results.Created($"/api/blog/posts/{result.Slug}", result);
+});
+
+admin.MapPut("/posts/{id}", (int id, UpdatePostCommand cmd, IMediator m) =>
+    m.Send(cmd with { PostId = id }));
+
+admin.MapDelete("/posts/{id}", (int id, IMediator m) =>
+    m.Send(new DeletePostCommand(id, /* userId from claims */"")));
+
+admin.MapPost("/posts/{id}/publish", (int id, IMediator m) =>
+    m.Send(new PublishPostCommand(id)));
+
+// Analytics
+admin.MapGet("/analytics", (DateTime? from, DateTime? to, IMediator m) =>
+    m.Send(new GetBlogAnalyticsQuery(
+        from ?? DateTime.UtcNow.AddDays(-30),
+        to ?? DateTime.UtcNow)));
+```
+
+<ExerciseBlock>
+1. **Complete the implementation**: Fill in all placeholder handlers and DTOs. Every endpoint in the API registration above should work end-to-end against a SQLite database.
+2. **Add full-text search**: Implement a `SearchPostsQuery` that uses `EF.Functions.Like` (SQLite) or `FreeText` (SQL Server) to search across title, summary, and body. Return results ranked by relevance (use a computed score: title match = 3 points, summary match = 2 points, body match = 1 point).
+3. **Performance audit**: Run the API under load using `dotnet-loadtest` or `bombardier`. Identify the slowest endpoints with SQL logging. Add missing indexes, caching, and `AsNoTracking()` until all endpoints respond in under 50ms for the first 100 concurrent users.
+4. **Integration test suite**: Write tests covering the full happy path: create author → create post → publish → add comment → approve comment → verify it appears in listing → soft delete post → verify excluded from listing. Use `WebApplicationFactory` with SQLite in-memory.
+</ExerciseBlock>

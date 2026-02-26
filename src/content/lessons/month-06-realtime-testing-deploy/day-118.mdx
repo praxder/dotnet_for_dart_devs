@@ -1,0 +1,256 @@
+---
+title: "Azure Deployment: App Service and Container Apps"
+day: 118
+week: 24
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Firebase Hosting, app deployment platforms"
+csharpConcept: "Azure App Service, Azure Container Apps, managed identity, Key Vault integration, deployment slots"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Azure is Microsoft's cloud platform with first-class .NET support. This lesson covers the two main options for deploying ASP.NET Core APIs: Azure App Service (managed PaaS) and Azure Container Apps (serverless containers).
+
+## Azure App Service — Managed PaaS
+
+```bash
+# Azure CLI setup
+brew install azure-cli
+az login
+
+# Create resource group
+az group create --name blogapi-rg --location eastus
+
+# Create App Service plan (Linux + B1 tier for low cost)
+az appservice plan create \
+    --name blogapi-plan \
+    --resource-group blogapi-rg \
+    --sku B1 \
+    --is-linux
+
+# Create web app (.NET 9 runtime)
+az webapp create \
+    --name myblogapi \
+    --resource-group blogapi-rg \
+    --plan blogapi-plan \
+    --runtime "DOTNETCORE:9.0"
+
+# Deploy from local zip
+dotnet publish -c Release -o ./publish
+cd publish && zip -r ../app.zip .
+az webapp deployment source config-zip \
+    --resource-group blogapi-rg \
+    --name myblogapi \
+    --src ../app.zip
+```
+
+## App Service Configuration
+
+```bash
+# Set environment variables (replaces appsettings.json in production)
+az webapp config appsettings set \
+    --resource-group blogapi-rg \
+    --name myblogapi \
+    --settings \
+        ASPNETCORE_ENVIRONMENT=Production \
+        Jwt__Issuer=https://myblogapi.azurewebsites.net \
+        Jwt__Audience=blog-clients
+
+# Connection strings (stored separately, accessible as env vars)
+az webapp config connection-string set \
+    --resource-group blogapi-rg \
+    --name myblogapi \
+    --connection-string-type SQLAzure \
+    --settings "Default=Server=..."
+
+# Scale up/out
+az webapp scale --name myblogapi --resource-group blogapi-rg --instance-count 3
+```
+
+## Managed Identity — No Secrets in Configuration
+
+```csharp
+// Managed Identity: Azure assigns an identity to your app
+// App can authenticate to other Azure services WITHOUT storing credentials
+
+// 1. Enable managed identity on App Service:
+// az webapp identity assign --name myblogapi --resource-group blogapi-rg
+
+// 2. Grant access to Key Vault:
+// az keyvault set-policy --name mykeyvault --object-id <identity-id>
+//     --secret-permissions get list
+
+// 3. In Program.cs:
+if (builder.Environment.IsProduction())
+{
+    builder.Configuration.AddAzureKeyVault(
+        new Uri($"https://{builder.Configuration["KeyVault:Name"]}.vault.azure.net/"),
+        new DefaultAzureCredential());
+    // DefaultAzureCredential automatically uses Managed Identity in Azure
+}
+
+// 4. Access SQL Database with managed identity (no password!):
+builder.Services.AddDbContext<AppDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("Default");
+    options.UseSqlServer(connectionString, sqlOptions =>
+        sqlOptions.UseAzureActiveDirectoryAuthentication(new DefaultAzureCredential()));
+});
+// SQL: uses Entra ID (AAD) authentication — no password in connection string
+```
+
+## Azure Container Apps — Serverless Containers
+
+```bash
+# Better for microservices and containerized workloads
+# Scale to zero = no cost when not in use
+
+# Install extension
+az extension add --name containerapp
+
+# Create Container Apps environment
+az containerapp env create \
+    --name blogapi-env \
+    --resource-group blogapi-rg \
+    --location eastus
+
+# Deploy container (from GitHub Container Registry)
+az containerapp create \
+    --name blog-api \
+    --resource-group blogapi-rg \
+    --environment blogapi-env \
+    --image ghcr.io/yourusername/blog-api:latest \
+    --target-port 8080 \
+    --ingress external \
+    --min-replicas 0 \
+    --max-replicas 10 \
+    --cpu 0.5 \
+    --memory 1.0Gi \
+    --registry-server ghcr.io \
+    --registry-username $GITHUB_USER \
+    --registry-password $GITHUB_TOKEN \
+    --env-vars \
+        "ASPNETCORE_ENVIRONMENT=Production" \
+        "Jwt__Issuer=https://blog-api.azurecontainerapps.io"
+```
+
+## Bicep Infrastructure as Code
+
+```bicep
+// main.bicep — define all Azure resources declaratively
+param location string = resourceGroup().location
+param appName string = 'blogapi'
+
+// Container Apps Environment
+resource environment 'Microsoft.App/managedEnvironments@2023-05-01' = {
+  name: '${appName}-env'
+  location: location
+  properties: {
+    daprAIInstrumentationKey: appInsights.properties.InstrumentationKey
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalytics.properties.customerId
+        sharedKey: logAnalytics.listKeys().primarySharedKey
+      }
+    }
+  }
+}
+
+// Container App
+resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
+  name: appName
+  location: location
+  properties: {
+    managedEnvironmentId: environment.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 8080
+        transport: 'http'
+      }
+      secrets: [
+        {
+          name: 'registry-password'
+          value: containerRegistryPassword
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: appName
+          image: 'ghcr.io/youruser/blog-api:latest'
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+          env: [
+            { name: 'ASPNETCORE_ENVIRONMENT', value: 'Production' }
+            { name: 'Jwt__Issuer', value: 'https://${appName}.azurecontainerapps.io' }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 0
+        maxReplicas: 10
+        rules: [
+          {
+            name: 'http-scale'
+            http: { metadata: { concurrentRequests: '100' } }
+          }
+        ]
+      }
+    }
+  }
+}
+
+// Deploy with:
+// az deployment group create --resource-group blogapi-rg --template-file main.bicep
+```
+
+## Deployment Slots — Zero-Downtime Deployments
+
+```bash
+# Staging slot — deploy here first, swap when ready
+az webapp deployment slot create \
+    --name myblogapi \
+    --resource-group blogapi-rg \
+    --slot staging
+
+# Deploy to staging
+az webapp deployment source config-zip \
+    --name myblogapi \
+    --resource-group blogapi-rg \
+    --slot staging \
+    --src app.zip
+
+# Test staging: https://myblogapi-staging.azurewebsites.net
+
+# Swap staging → production (zero downtime!)
+az webapp deployment slot swap \
+    --name myblogapi \
+    --resource-group blogapi-rg \
+    --slot staging
+# Azure warms up the new version before switching traffic
+# If something goes wrong, swap back instantly
+```
+
+<ConceptCallout type="tip" title="App Service vs Container Apps">
+- **App Service**: Best for traditional web apps and APIs. Simpler setup, built-in features (custom domains, SSL, deployment slots). Fixed pricing even when idle.
+- **Container Apps**: Best for containerized microservices. Scale to zero (no cost when idle). Better for bursty workloads. Requires Docker knowledge.
+- **For a Flutter + .NET backend**: Container Apps is often ideal — it scales to zero overnight, costs nothing during off-hours, and handles traffic spikes automatically.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Deploy your blog API to Azure App Service using the Azure CLI. Configure all environment variables via `az webapp config appsettings set` — no secrets should be in code or config files. Verify the deployed API responds correctly at the Azure URL.
+2. Enable Managed Identity on your App Service. Create an Azure Key Vault and store your JWT key there. Configure your app to read from Key Vault using `DefaultAzureCredential`. Verify the app starts successfully with the Key Vault as the secret source.
+3. Set up a staging deployment slot. Create a GitHub Actions step that deploys to staging, runs smoke tests, and only swaps to production if all tests pass. Test the zero-downtime swap by watching response headers change while refreshing.
+</ExerciseBlock>

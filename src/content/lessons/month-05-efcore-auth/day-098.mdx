@@ -1,0 +1,254 @@
+---
+title: "EF Core: Performance Optimization"
+day: 98
+week: 20
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "drift query optimization, sqflite indexes"
+csharpConcept: "query batching, indexes, connection pooling, DbContext pooling, benchmarking"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+EF Core convenience can hide expensive operations. Understanding what SQL it generates — and when — separates mediocre APIs from fast ones. This lesson covers the most impactful EF Core performance techniques.
+
+## Log Generated SQL — Always Do This
+
+```csharp
+// Development: log all SQL and parameters
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite(connectionString)
+           .LogTo(Console.WriteLine, LogLevel.Information)
+           .EnableSensitiveDataLogging()  // shows parameter values
+           .EnableDetailedErrors());
+
+// Or with Serilog:
+options.LogTo(
+    msg => Log.Debug(msg),
+    new[] { DbLoggerCategory.Database.Command.Name },
+    LogLevel.Information);
+```
+
+## Indexes — The Biggest Win
+
+```csharp
+// Indexes are the #1 performance factor — misconfigured indexes cause full table scans
+modelBuilder.Entity<Order>(entity =>
+{
+    // Single column index for common filter
+    entity.HasIndex(o => o.CustomerId);
+
+    // Composite index for combined filters (order matters!)
+    entity.HasIndex(o => new { o.Status, o.CreatedAt });
+    // Use when query: WHERE status = 'Pending' ORDER BY created_at
+
+    // Filtered index — only indexes pending orders
+    entity.HasIndex(o => o.CreatedAt)
+        .HasFilter("status = 'Pending'");
+
+    // Unique index
+    entity.HasIndex(o => o.OrderNumber).IsUnique();
+
+    // Include non-key columns (covering index — avoids table lookup)
+    entity.HasIndex(o => o.CustomerId)
+        .IncludeProperties(o => new { o.Total, o.Status });
+});
+```
+
+## Pagination — Skip/Take Done Right
+
+```csharp
+// BAD: offset pagination degrades at high page numbers
+// SQL: SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 50000
+// Problem: DB must read and discard 50,000 rows
+var page = await db.Orders
+    .OrderBy(o => o.Id)
+    .Skip(50000)
+    .Take(20)
+    .ToListAsync();
+
+// GOOD: keyset pagination (cursor-based) — O(1) regardless of page
+// SQL: SELECT * FROM orders WHERE id > 50020 ORDER BY id LIMIT 20
+var cursor = 50020;
+var nextPage = await db.Orders
+    .Where(o => o.Id > cursor)
+    .OrderBy(o => o.Id)
+    .Take(20)
+    .AsNoTracking()
+    .ToListAsync();
+// Next cursor: nextPage.LastOrDefault()?.Id
+```
+
+## Avoid Select * — Project What You Need
+
+```csharp
+// BAD: loads all columns including large text/binary fields
+var orders = await db.Orders
+    .Include(o => o.Customer)
+    .ToListAsync();
+
+// GOOD: project only what the UI needs
+var orderList = await db.Orders
+    .AsNoTracking()
+    .Select(o => new OrderSummaryDto
+    {
+        Id = o.Id,
+        CustomerName = o.Customer!.Name,  // auto-joins
+        Total = o.Total,
+        Status = o.Status,
+        CreatedAt = o.CreatedAt
+    })
+    .ToListAsync();
+// SQL: SELECT o.id, c.name, o.total, o.status, o.created_at
+//      FROM orders o INNER JOIN customers c ON o.customer_id = c.id
+```
+
+## Connection Pooling and DbContext Pooling
+
+```csharp
+// Default: DbContext is Scoped — new instance per HTTP request
+// The underlying SQL connection IS pooled by ADO.NET automatically
+
+// DbContext Pooling: reuse DbContext instances across requests
+// Saves allocation cost — good for high-throughput APIs
+builder.Services.AddDbContextPool<AppDbContext>(options =>
+    options.UseSqlServer(connectionString),
+    poolSize: 128);  // default 1024
+
+// When using DbContextPool, avoid storing state in DbContext itself
+// (fields, custom properties) — they're shared across requests
+
+// AddDbContextFactory: for background services, batch jobs
+builder.Services.AddDbContextFactory<AppDbContext>(options =>
+    options.UseSqlite(connectionString));
+
+// Usage:
+public class BatchJob(IDbContextFactory<AppDbContext> factory)
+{
+    public async Task ProcessAsync()
+    {
+        await using var db = await factory.CreateDbContextAsync();
+        // db is a fresh scoped context
+    }
+}
+```
+
+## Batch Operations — Minimize Round Trips
+
+```csharp
+// BAD: N+1 insert pattern — N round trips to the database
+foreach (var dto in importedProducts)
+{
+    db.Products.Add(new Product { Name = dto.Name, Price = dto.Price });
+    await db.SaveChangesAsync();  // N round trips!
+}
+
+// GOOD: single SaveChanges for all changes
+var products = importedProducts.Select(dto => new Product
+{
+    Name = dto.Name, Price = dto.Price
+}).ToList();
+db.Products.AddRange(products);
+await db.SaveChangesAsync();  // 1 round trip, batched INSERT
+
+// EF Core batches up to 42 statements per round trip by default
+// Configure: options.UseSqlServer(cs, o => o.MaxBatchSize(100))
+
+// For truly massive imports (10k+ rows), use BulkExtensions or COPY:
+// dotnet add package EFCore.BulkExtensions
+await db.BulkInsertAsync(products);  // single BULK INSERT — fastest
+```
+
+## Change Tracker Optimization
+
+```csharp
+// EF Core's change tracker scans all tracked entities on SaveChanges
+// For bulk reads, disable tracking:
+var products = await db.Products.AsNoTracking().ToListAsync();
+
+// For read-heavy DbContexts, disable globally:
+public class ReadOnlyDbContext(DbContextOptions options) : DbContext(options)
+{
+    public ReadOnlyDbContext() : this(new DbContextOptions<ReadOnlyDbContext>()) { }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
+}
+
+// Detach entities after saving if you don't need to track them:
+var order = new Order { /* ... */ };
+db.Orders.Add(order);
+await db.SaveChangesAsync();
+db.Entry(order).State = EntityState.Detached;  // free from change tracker
+```
+
+## Query Tags — Identify Queries in Logs
+
+```csharp
+// Tag queries so you can find them in SQL logs / monitoring
+var orders = await db.Orders
+    .TagWith("GetPendingOrders-DashboardPage")
+    .Where(o => o.Status == OrderStatus.Pending)
+    .ToListAsync();
+// SQL: -- GetPendingOrders-DashboardPage
+//      SELECT ... FROM orders WHERE status = 'Pending'
+
+// Automatically tag with caller info:
+var products = await db.Products
+    .TagWithCallSite()  // adds file:line to SQL comment
+    .ToListAsync();
+```
+
+## Benchmarking EF Core Queries
+
+```csharp
+// BenchmarkDotNet — measure actual performance differences
+[MemoryDiagnoser]
+public class EfBenchmarks
+{
+    private AppDbContext _db = null!;
+
+    [GlobalSetup]
+    public void Setup() => _db = new AppDbContext(/* ... */);
+
+    [Benchmark(Baseline = true)]
+    public async Task<List<Order>> WithTracking()
+        => await _db.Orders.Include(o => o.Customer).Take(100).ToListAsync();
+
+    [Benchmark]
+    public async Task<List<Order>> WithoutTracking()
+        => await _db.Orders.AsNoTracking().Include(o => o.Customer).Take(100).ToListAsync();
+
+    [Benchmark]
+    public async Task<List<OrderDto>> WithProjection()
+        => await _db.Orders
+            .AsNoTracking()
+            .Take(100)
+            .Select(o => new OrderDto(o.Id, o.Customer!.Name, o.Total))
+            .ToListAsync();
+}
+// Result: projection is typically 2-5x faster and allocates 3-10x less memory
+```
+
+<ConceptCallout type="tip" title="Performance Checklist">
+1. **Log SQL** in development — know what queries run
+2. **Index** filtered/sorted columns — check execution plans
+3. **AsNoTracking()** for all read-only queries
+4. **Project with Select()** instead of loading full entities
+5. **Batch SaveChanges** — don't call it in loops
+6. **Avoid N+1** — use Include() or Split queries
+7. **Keyset pagination** for large datasets
+8. **DbContext pooling** for high-throughput APIs
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Enable SQL logging and run 5 different queries against your database. Identify: which query has the most round trips? Which generates the largest result set? Add indexes and re-run to compare execution time.
+2. Benchmark these three approaches for loading 1000 orders with customer names: (a) `Include` with tracking, (b) `Include` with `AsNoTracking`, (c) projection with `Select`. Measure time and allocations with `BenchmarkDotNet` or `Stopwatch` + `GC.GetTotalAllocatedBytes()`.
+3. Implement cursor-based pagination for an orders endpoint. The cursor is the last seen `CreatedAt` + `Id` (to handle ties). Compare SQL and performance against skip/take for page 1000.
+</ExerciseBlock>

@@ -1,0 +1,244 @@
+---
+title: "Mini-Project: Real-Time Dashboard API"
+day: 90
+week: 18
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "WebSocket-based dashboards, StreamBuilder in Flutter"
+csharpConcept: "SignalR, caching, rate limiting, health checks, JWT auth, BackgroundService"
+estimatedMinutes: 30
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This capstone for Module 7 brings together: Minimal APIs, JWT auth, SignalR, caching, rate limiting, health checks, and background services. You'll build a real-time metrics dashboard backend.
+
+## Project: System Metrics Dashboard
+
+A server that collects system metrics (CPU, memory, request counts), exposes REST endpoints for historical data, and pushes live updates via SignalR.
+
+### Architecture
+
+```
+Clients (browsers, mobile apps)
+    │
+    ├── REST: GET /api/metrics/history     → IMemoryCache
+    ├── REST: POST /api/auth/login         → JWT token
+    └── SignalR: /hubs/metrics             → Live updates
+                ↑
+    [MetricsBackgroundService] — collects system metrics every second
+                ↑
+    [MetricsStore] — ring buffer of recent samples
+```
+
+### Domain Models
+
+```csharp
+public record MetricsSample(
+    DateTime Timestamp,
+    double CpuPercent,
+    double MemoryMb,
+    long TotalRequests,
+    long ActiveConnections,
+    double AverageResponseMs);
+
+public record MetricsSummary(
+    MetricsSample Latest,
+    IReadOnlyList<MetricsSample> History,
+    double PeakCpu,
+    double AvgCpu,
+    double PeakMemory);
+```
+
+### Metrics Store
+
+```csharp
+public class MetricsStore
+{
+    private readonly Queue<MetricsSample> _samples = new();
+    private readonly int _maxSamples;
+    private long _requestCount;
+    private long _activeConnections;
+
+    public MetricsStore(int maxSamples = 300) => _maxSamples = maxSamples;
+
+    public void AddSample(MetricsSample sample)
+    {
+        lock (_samples)
+        {
+            _samples.Enqueue(sample);
+            if (_samples.Count > _maxSamples)
+                _samples.Dequeue();
+        }
+    }
+
+    public IReadOnlyList<MetricsSample> GetHistory(int count = 60)
+    {
+        lock (_samples)
+            return _samples.TakeLast(count).ToList();
+    }
+
+    public MetricsSample? GetLatest()
+    {
+        lock (_samples)
+            return _samples.Count > 0 ? _samples.Last() : null;
+    }
+
+    public void IncrementRequests() => Interlocked.Increment(ref _requestCount);
+    public void TrackConnection(bool connected)
+        => Interlocked.Add(ref _activeConnections, connected ? 1 : -1);
+
+    public long TotalRequests => Interlocked.Read(ref _requestCount);
+    public long ActiveConnections => Interlocked.Read(ref _activeConnections);
+}
+```
+
+### Background Metrics Collector
+
+```csharp
+public class MetricsCollectorService(
+    MetricsStore store,
+    IHubContext<MetricsHub, IMetricsClient> hubContext,
+    ILogger<MetricsCollectorService> logger)
+    : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        logger.LogInformation("Metrics collector started");
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var sample = CollectCurrentMetrics();
+                store.AddSample(sample);
+
+                // Push to all connected dashboard clients
+                await hubContext.Clients.Group("dashboard")
+                    .ReceiveMetrics(sample);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Error collecting metrics");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+        }
+    }
+
+    private MetricsSample CollectCurrentMetrics()
+    {
+        // Use actual system metrics in production
+        // Simulated here for the project:
+        return new MetricsSample(
+            Timestamp: DateTime.UtcNow,
+            CpuPercent: 20 + Random.Shared.NextDouble() * 60,
+            MemoryMb: 512 + Random.Shared.NextDouble() * 512,
+            TotalRequests: store.TotalRequests,
+            ActiveConnections: store.ActiveConnections,
+            AverageResponseMs: 10 + Random.Shared.NextDouble() * 90);
+    }
+}
+```
+
+### SignalR Hub
+
+```csharp
+public interface IMetricsClient
+{
+    Task ReceiveMetrics(MetricsSample sample);
+    Task ReceiveAlert(string message, string severity);
+}
+
+[Authorize]
+public class MetricsHub(MetricsStore store) : Hub<IMetricsClient>
+{
+    public override async Task OnConnectedAsync()
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, "dashboard");
+
+        // Send history to new client
+        var history = store.GetHistory(60);
+        foreach (var sample in history)
+            await Clients.Caller.ReceiveMetrics(sample);
+
+        store.TrackConnection(true);
+        await base.OnConnectedAsync();
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        store.TrackConnection(false);
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, "dashboard");
+        await base.OnDisconnectedAsync(exception);
+    }
+}
+```
+
+### REST API
+
+```csharp
+// Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSingleton<MetricsStore>();
+builder.Services.AddHostedService<MetricsCollectorService>();
+builder.Services.AddSignalR();
+builder.Services.AddMemoryCache();
+builder.Services.AddRateLimiter(o => o.AddFixedWindowLimiter("api",
+    opts => { opts.PermitLimit = 60; opts.Window = TimeSpan.FromMinutes(1); }));
+// JWT auth setup...
+
+var app = builder.Build();
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Auth endpoint
+app.MapPost("/api/auth/login", (LoginRequest req) =>
+{
+    if (req.Username == "admin" && req.Password == "admin")
+        return Results.Ok(new { Token = GenerateJwt() });
+    return Results.Unauthorized();
+}).AllowAnonymous();
+
+// Metrics REST endpoints
+var api = app.MapGroup("/api/metrics").RequireAuthorization();
+
+api.MapGet("/", (MetricsStore store, IMemoryCache cache) =>
+{
+    return cache.GetOrCreate("metrics-summary", entry =>
+    {
+        entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5);
+        var history = store.GetHistory(300);
+        return new MetricsSummary(
+            Latest: store.GetLatest()!,
+            History: history,
+            PeakCpu: history.Max(s => s.CpuPercent),
+            AvgCpu: history.Average(s => s.CpuPercent),
+            PeakMemory: history.Max(s => s.MemoryMb));
+    });
+}).RequireRateLimiting("api");
+
+api.MapGet("/history", (MetricsStore store, int minutes = 5) =>
+    Results.Ok(store.GetHistory(minutes * 60)));
+
+// Health check
+app.MapHealthChecks("/health");
+
+// SignalR
+app.MapHub<MetricsHub>("/hubs/metrics");
+
+await app.RunAsync();
+```
+
+<ExerciseBlock>
+1. Add alerting: when CPU exceeds 80% for more than 10 consecutive samples, broadcast a `ReceiveAlert("High CPU", "warning")` to all clients via the hub. Reset when it drops below 70%.
+2. Add a `GET /api/metrics/export?from=ISO8601&to=ISO8601` endpoint that returns historical data in CSV format as a file download. Limit the export to a maximum of 24 hours of data.
+3. Add a `POST /api/metrics/simulate-load` endpoint (admin only) that generates an artificial CPU spike in the metrics for 30 seconds — useful for testing alert thresholds. Implement it as a background task that temporarily overrides the CPU metric.
+4. Write integration tests for the REST endpoints using `WebApplicationFactory`. Test that unauthenticated requests return 401, authenticated requests return data, and the metrics endpoint returns the expected structure.
+</ExerciseBlock>

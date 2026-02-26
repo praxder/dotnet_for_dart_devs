@@ -1,0 +1,226 @@
+---
+title: "Interfaces: Explicit Definition and Implementation"
+day: 28
+week: 6
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart implicit interfaces (every class is an interface)"
+csharpConcept: "Explicit interface keyword, I prefix convention, explicit interface implementation"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+In Dart, every class implicitly defines an interface — you can `implements` any class. C# requires you to explicitly declare an `interface`. This is more verbose but produces cleaner, more intentional APIs.
+
+## Declaring and Implementing Interfaces
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: every class is implicitly an interface
+  class Saveable {
+    Future<void> save() async {}
+    Future<void> delete() async {}
+  }
+
+  class User implements Saveable {
+    final String name;
+    User(this.name);
+
+    @override
+    Future<void> save() async {
+      // save to DB
+    }
+
+    @override
+    Future<void> delete() async {
+      // delete from DB
+    }
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: must declare interface explicitly
+  public interface ISaveable
+  {
+      Task SaveAsync();
+      Task DeleteAsync();
+  }
+
+  public class User : ISaveable
+  {
+      public string Name { get; init; }
+
+      // Must implement all interface members
+      public async Task SaveAsync()
+      {
+          // save to DB
+          await Task.CompletedTask;
+      }
+
+      public async Task DeleteAsync()
+      {
+          // delete from DB
+          await Task.CompletedTask;
+      }
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="The I Prefix Convention">
+C# has a strong convention of prefixing interfaces with `I`: `IRepository`, `ILogger`, `IDisposable`. This is deeply ingrained in the .NET ecosystem. Violating it will confuse every C# developer who reads your code.
+</ConceptCallout>
+
+## Multiple Interface Implementation
+
+```csharp
+public interface IReadable
+{
+    string Read();
+}
+
+public interface IWritable
+{
+    void Write(string content);
+}
+
+public interface ISeekable
+{
+    void Seek(int position);
+    int Position { get; }
+}
+
+// Implement multiple interfaces
+public class Buffer : IReadable, IWritable, ISeekable
+{
+    private readonly List<string> _lines = new();
+    private int _position;
+
+    public string Read() => _position < _lines.Count ? _lines[_position] : "";
+    public void Write(string content) => _lines.Add(content);
+    public void Seek(int position) => _position = Math.Clamp(position, 0, _lines.Count);
+    public int Position => _position;
+}
+```
+
+## Default Interface Methods (C# 8+)
+
+Interfaces can now provide default implementations for methods — useful for adding methods to an interface without breaking existing implementors:
+
+```csharp
+public interface ILogger
+{
+    void Log(string message, LogLevel level);
+
+    // Default implementation — implementors don't have to override this
+    void LogInfo(string message) => Log(message, LogLevel.Information);
+    void LogWarning(string message) => Log(message, LogLevel.Warning);
+    void LogError(string message) => Log(message, LogLevel.Error);
+}
+
+// Minimal implementation — only needs to implement Log()
+public class ConsoleLogger : ILogger
+{
+    public void Log(string message, LogLevel level)
+        => Console.WriteLine($"[{level}] {message}");
+
+    // Gets LogInfo, LogWarning, LogError for free
+}
+```
+
+<ConceptCallout type="tip">
+Default interface methods are primarily for evolving interfaces in libraries without breaking clients. For new interfaces in application code, prefer abstract base classes if you need shared behavior — they're clearer.
+</ConceptCallout>
+
+## Explicit Interface Implementation
+
+When two interfaces have methods with the same name, explicit implementation disambiguates:
+
+```csharp
+public interface IShape
+{
+    double Area { get; }
+}
+
+public interface IFigure
+{
+    double Area { get; }  // same name, different semantic context
+}
+
+public class Square : IShape, IFigure
+{
+    public double Side { get; }
+    public Square(double side) { Side = side; }
+
+    // Regular implementation — satisfies both
+    // public double Area => Side * Side;
+
+    // OR explicit implementation — each interface gets its own
+    double IShape.Area => Side * Side;
+    double IFigure.Area => Side * Side;
+
+    // Explicit members are only accessible through the interface type
+}
+
+var sq = new Square(5);
+// sq.Area;          // ERROR if only explicit implementations
+((IShape)sq).Area;   // 25 — access through interface cast
+((IFigure)sq).Area;  // 25
+```
+
+## Interfaces vs Abstract Classes — When to Use Each
+
+```csharp
+// Use INTERFACE when:
+// - Multiple unrelated classes need the same capability
+// - Defining a contract without any implementation
+// - A type needs to implement multiple "roles"
+public interface IDisposable    // unrelated types can all be disposable
+public interface IComparable<T> // any type can be comparable
+public interface IRepository<T> // defines data access contract
+
+// Use ABSTRACT CLASS when:
+// - There's shared implementation to inherit
+// - The hierarchy is truly "is-a" (Dog is-a Animal)
+// - You need non-public members (protected, internal)
+// - You want to force a single inheritance chain
+
+public abstract class BaseController // shared ASP.NET controller behavior
+public abstract class Shape          // shared area/perimeter contract + implementations
+```
+
+## Key .NET Interfaces to Know
+
+```csharp
+// IDisposable — cleanup resources (used with 'using')
+public interface IDisposable { void Dispose(); }
+
+// IEnumerable<T> — the LINQ foundation
+public interface IEnumerable<T> { IEnumerator<T> GetEnumerator(); }
+
+// IComparable<T> — enable sorting
+public interface IComparable<T> { int CompareTo(T? other); }
+
+// IEquatable<T> — type-safe equality
+public interface IEquatable<T> { bool Equals(T? other); }
+
+// IReadOnlyList<T> — expose collection without mutation
+public interface IReadOnlyList<T> : IReadOnlyCollection<T>, IEnumerable<T>
+{
+    T this[int index] { get; }
+}
+```
+
+<ExerciseBlock>
+1. Define `ICache<TKey, TValue>` interface with `Get`, `Set`, `Remove`, and `Clear` methods. Add default implementations for `GetOrSet(TKey key, Func<TKey, TValue> factory)` using the default interface method feature. Implement `InMemoryCache<TKey, TValue>`.
+2. Create an `IValidator<T>` interface with `Validate(T value) : ValidationResult`. Implement `EmailValidator`, `PasswordValidator`, and `CompositeValidator<T>` that runs multiple validators. Use explicit interface implementation for a class that implements both `IValidator<string>` and `IDisposable`.
+3. Implement `IComparable<Product>` on a `Product` class to sort by price. Test with `List<Product>.Sort()` and `products.OrderBy(x => x)`.
+</ExerciseBlock>

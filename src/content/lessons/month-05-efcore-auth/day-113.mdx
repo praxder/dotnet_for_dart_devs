@@ -1,0 +1,269 @@
+---
+title: "Security Testing and Vulnerability Prevention"
+day: 113
+week: 23
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "Flutter security testing, penetration testing concepts"
+csharpConcept: "OWASP Top 10, XSS, CSRF, IDOR, security unit tests, Snyk, dependency scanning"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Security isn't a one-time setup — it requires ongoing testing and vigilance. This lesson covers the OWASP API Security Top 10, writing security-focused tests, and building automated checks into your CI pipeline.
+
+## OWASP API Security Top 10 Applied to .NET
+
+### 1. Broken Object Level Authorization (BOLA / IDOR)
+
+```csharp
+// Insecure Direct Object Reference — most common API vulnerability
+// VULNERABLE: no ownership check
+app.MapGet("/api/orders/{id}", async (int id, AppDbContext db) =>
+    await db.Orders.FindAsync(id));  // any authenticated user can see any order!
+
+// SECURE: always filter by current user's ID
+app.MapGet("/api/orders/{id}", async (
+    int id,
+    AppDbContext db,
+    ClaimsPrincipal user) =>
+{
+    var userId = user.GetUserId();
+    var order = await db.Orders
+        .FirstOrDefaultAsync(o => o.Id == id && o.CustomerId == userId);
+    return order is null ? Results.NotFound() : Results.Ok(order);
+}).RequireAuthorization();
+```
+
+### 2. Broken Authentication
+
+```csharp
+// Test: verify tokens can't be forged
+[Fact]
+public async Task FakeToken_ShouldReturn401()
+{
+    var client = factory.CreateClient();
+    client.DefaultRequestHeaders.Authorization =
+        new AuthenticationHeaderValue("Bearer", "fake.token.value");
+
+    var response = await client.GetAsync("/api/me");
+    Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+}
+
+// Test: expired tokens are rejected
+[Fact]
+public async Task ExpiredToken_ShouldReturn401()
+{
+    var expiredToken = GenerateToken(expiresAt: DateTime.UtcNow.AddMinutes(-1));
+    var client = factory.CreateClient();
+    client.DefaultRequestHeaders.Authorization =
+        new AuthenticationHeaderValue("Bearer", expiredToken);
+
+    var response = await client.GetAsync("/api/me");
+    Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+}
+```
+
+### 3. Excessive Data Exposure
+
+```csharp
+// VULNERABLE: returns entire entity including sensitive fields
+app.MapGet("/api/users/{id}", async (int id, UserManager<AppUser> um) =>
+    await um.FindByIdAsync(id.ToString()));  // exposes PasswordHash, SecurityStamp!
+
+// SECURE: explicit DTO with only necessary fields
+app.MapGet("/api/users/{id}", async (int id, UserManager<AppUser> um) =>
+{
+    var user = await um.FindByIdAsync(id.ToString());
+    if (user is null) return Results.NotFound();
+    return Results.Ok(new UserProfileDto(
+        user.Id, user.DisplayName, user.AvatarUrl, user.JoinedAt));
+    // Never expose: PasswordHash, SecurityStamp, TwoFactorEnabled status, etc.
+});
+```
+
+### 4. Rate Limiting / Resource Exhaustion
+
+```csharp
+// Test: verify rate limits are enforced
+[Fact]
+public async Task ExcessiveLoginAttempts_ShouldReturn429()
+{
+    var client = factory.CreateClient();
+    for (int i = 0; i < 5; i++)
+    {
+        await client.PostAsJsonAsync("/api/auth/login",
+            new { Email = "test@test.com", Password = "wrong" });
+    }
+
+    var response = await client.PostAsJsonAsync("/api/auth/login",
+        new { Email = "test@test.com", Password = "wrong" });
+    Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+}
+```
+
+### 5. Function Level Authorization
+
+```csharp
+// Test: admin endpoints reject non-admin users
+[Theory]
+[InlineData("/api/admin/users", "GET")]
+[InlineData("/api/admin/users/123", "DELETE")]
+[InlineData("/api/admin/system/logs", "GET")]
+public async Task AdminEndpoint_WithUserRole_ShouldReturn403(string path, string method)
+{
+    var client = factory.CreateDefaultClient();
+    var token = GenerateTestToken(roles: ["User"]);  // not Admin
+    client.DefaultRequestHeaders.Authorization =
+        new AuthenticationHeaderValue("Bearer", token);
+
+    var request = new HttpRequestMessage(new HttpMethod(method), path);
+    var response = await client.SendAsync(request);
+
+    Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+}
+```
+
+## Security Unit Tests
+
+```csharp
+public class SecurityTests(BlogApiFactory factory) : IClassFixture<BlogApiFactory>
+{
+    // Test BOLA — user A can't access user B's data
+    [Fact]
+    public async Task GetOrder_OtherUsersOrder_Returns404()
+    {
+        var userAToken = await LoginAsync("usera@test.com");
+        var userBOrder = await CreateOrderAs("userb@test.com");
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", userAToken);
+
+        var response = await client.GetAsync($"/api/orders/{userBOrder.Id}");
+        // Should be 404, not 403 — don't reveal the resource exists
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // Test mass assignment — can't update fields we don't own
+    [Fact]
+    public async Task UpdatePost_CannotChangeAuthor()
+    {
+        var authorToken = await LoginAsync("author@test.com");
+        var post = await CreatePostAs("author@test.com");
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", authorToken);
+
+        var response = await client.PutAsJsonAsync($"/api/posts/{post.Id}",
+            new { Title = "New Title", AuthorId = 999 });  // try to change author
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var updated = await response.Content.ReadFromJsonAsync<PostDto>();
+        Assert.NotEqual(999, updated!.AuthorId);  // AuthorId should not have changed
+    }
+
+    // Test that deleted resources return 404
+    [Fact]
+    public async Task GetPost_SoftDeleted_Returns404()
+    {
+        var adminToken = await LoginAs("admin");
+        var post = await CreateAndDeletePost(adminToken);
+
+        var response = await factory.CreateClient().GetAsync($"/api/posts/{post.Slug}");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+}
+```
+
+## Dependency Scanning in CI
+
+```yaml
+# .github/workflows/security.yml
+name: Security Scan
+
+on: [push, pull_request]
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.x'
+
+      # Scan for vulnerable NuGet packages
+      - name: Audit dependencies
+        run: dotnet list package --vulnerable --include-transitive
+
+      # SAST with CodeQL
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+
+      - name: Build
+        run: dotnet build
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      # OWASP Dependency Check
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'MyApp'
+          path: '.'
+          format: 'HTML'
+```
+
+## Runtime Security Checks
+
+```csharp
+// Detect suspicious patterns at runtime
+public class SecurityAuditMiddleware(RequestDelegate next, ILogger<SecurityAuditMiddleware> logger)
+{
+    private static readonly string[] SuspiciousPatterns =
+        ["<script", "javascript:", "' OR '", "'; DROP", "UNION SELECT", "../", "etc/passwd"];
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Check query string for injection attempts
+        foreach (var (key, value) in context.Request.Query)
+        {
+            if (SuspiciousPatterns.Any(p =>
+                value.ToString().Contains(p, StringComparison.OrdinalIgnoreCase)))
+            {
+                logger.LogWarning(
+                    "Suspicious input detected from {IP}: key={Key}, value={Value}",
+                    context.Connection.RemoteIpAddress,
+                    key, value);
+                context.Response.StatusCode = 400;
+                await context.Response.WriteAsJsonAsync(new { error = "Invalid input" });
+                return;
+            }
+        }
+
+        await next(context);
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Security Testing Mindset">
+For each endpoint, ask: (1) What if an unauthenticated user calls this? (2) What if a low-privilege user calls this? (3) What if the ID in the URL belongs to another user? (4) What if I send a massive payload? (5) What if I replay the same request 1000 times? Write tests for the "no" answers. Security tests are often the most valuable tests in a codebase.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Write a comprehensive security test suite for your blog API. Cover: unauthenticated access to protected routes (401), low-privilege access to admin routes (403), BOLA (accessing another user's resource returns 404), and rate limiting (6th login attempt returns 429).
+2. Run `dotnet list package --vulnerable` on your project. If vulnerabilities are found, research and update the affected packages. Set up a GitHub Actions workflow that fails the build if vulnerable packages are detected.
+3. Implement a "security honeypot": add fake endpoints like `/api/admin/backup`, `/api/internal/config`, and `/api/v1/admin` that are never publicly advertised. If called, log the caller's IP and JWT (if any) as a security event. This helps detect automated scanners probing your API.
+</ExerciseBlock>

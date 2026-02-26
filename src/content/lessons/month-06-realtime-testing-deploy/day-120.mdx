@@ -1,0 +1,237 @@
+---
+title: "Background Jobs: Hangfire and Quartz.NET"
+day: 120
+week: 24
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "WorkManager in Flutter, background isolates"
+csharpConcept: "Hangfire, Quartz.NET, BackgroundService, recurring jobs, job queues, retries"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Most production applications need background jobs: sending emails, generating reports, processing imports, cleanup tasks. `BackgroundService` handles simple cases; Hangfire and Quartz.NET handle persistent, scheduled, and retryable jobs.
+
+## BackgroundService — Simple Recurring Tasks
+
+```csharp
+// Good for: heartbeats, polling, simple recurring operations
+// NOT good for: tasks that must survive app restarts, complex scheduling
+
+public class EmailDigestService(
+    IServiceScopeFactory scopeFactory,
+    ILogger<EmailDigestService> logger)
+    : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Wait for app startup to complete
+        await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await SendDailyDigestsAsync(stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "Error sending daily digests");
+            }
+
+            // Wait until next midnight
+            var nextRun = DateTime.UtcNow.Date.AddDays(1);
+            var delay = nextRun - DateTime.UtcNow;
+            await Task.Delay(delay, stoppingToken);
+        }
+    }
+
+    private async Task SendDailyDigestsAsync(CancellationToken ct)
+    {
+        // Use IServiceScopeFactory to get scoped services in a singleton
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var emailService = scope.ServiceProvider.GetRequiredService<IEmailService>();
+
+        var subscribers = await db.Users
+            .Where(u => u.EmailDigestEnabled && u.IsActive)
+            .ToListAsync(ct);
+
+        logger.LogInformation("Sending digest to {Count} subscribers", subscribers.Count);
+
+        foreach (var subscriber in subscribers)
+        {
+            await emailService.SendDigestAsync(subscriber.Email, ct);
+        }
+    }
+}
+
+builder.Services.AddHostedService<EmailDigestService>();
+```
+
+## Hangfire — Persistent Background Jobs
+
+```csharp
+// Hangfire persists jobs to a database — survives app restarts
+// Great for: email sending, report generation, import/export
+// dotnet add package Hangfire.AspNetCore
+// dotnet add package Hangfire.PostgreSql  (or .SqlServer, .InMemory)
+
+builder.Services.AddHangfire(config =>
+    config
+        .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+        .UseSimpleAssemblyNameTypeSerializer()
+        .UseRecommendedSerializerSettings()
+        .UsePostgreSqlStorage(builder.Configuration.GetConnectionString("Default")));
+
+builder.Services.AddHangfireServer(options =>
+{
+    options.WorkerCount = 5;  // parallel job workers
+    options.Queues = ["critical", "default", "low"];  // priority queues
+});
+
+// Dashboard (password-protect in production!)
+app.MapHangfireDashboard("/hangfire", new DashboardOptions
+{
+    Authorization = [new HangfireAdminAuthFilter()]
+});
+
+// Job types:
+public class EmailService
+{
+    // Fire-and-forget: runs immediately, once
+    public void SendWelcomeEmail(string userId)
+        => BackgroundJob.Enqueue<EmailJobHandler>(
+            x => x.SendWelcomeEmailAsync(userId, null!));
+
+    // Delayed: runs after a delay
+    public void SchedulePasswordReset(string userId)
+        => BackgroundJob.Schedule<EmailJobHandler>(
+            x => x.SendPasswordResetAsync(userId, null!),
+            TimeSpan.FromHours(24));  // resend reminder if not clicked
+
+    // Recurring: cron schedule
+    public void SetupRecurringJobs()
+    {
+        RecurringJob.AddOrUpdate<ReportJobHandler>(
+            "daily-report",
+            x => x.GenerateDailyReportAsync(null!),
+            Cron.Daily(hour: 6));  // 6 AM UTC
+
+        RecurringJob.AddOrUpdate<CleanupJobHandler>(
+            "cleanup-old-sessions",
+            x => x.CleanupExpiredSessionsAsync(null!),
+            "0 */4 * * *");  // every 4 hours (cron expression)
+
+        RecurringJob.AddOrUpdate<SitemapJobHandler>(
+            "regenerate-sitemap",
+            x => x.RegenerateSitemapAsync(null!),
+            Cron.Weekly(DayOfWeek.Sunday));
+    }
+}
+```
+
+## Hangfire Job Handlers
+
+```csharp
+// Job handlers use DI — same as any other service
+[Queue("critical")]  // high-priority queue
+public class EmailJobHandler(
+    IEmailService emailService,
+    UserManager<AppUser> userManager,
+    ILogger<EmailJobHandler> logger)
+{
+    // Hangfire automatically retries failed jobs (default: 10 attempts with exponential backoff)
+    [AutomaticRetry(Attempts = 3, DelaysInSeconds = [60, 300, 900])]
+    public async Task SendWelcomeEmailAsync(string userId, PerformContext? context)
+    {
+        // PerformContext is injected by Hangfire — optional
+        logger.LogInformation("Sending welcome email to {UserId}. Job: {JobId}",
+            userId, context?.BackgroundJob.Id);
+
+        var user = await userManager.FindByIdAsync(userId)
+            ?? throw new InvalidOperationException($"User {userId} not found");
+
+        await emailService.SendWelcomeAsync(user.Email!, user.DisplayName);
+    }
+}
+
+[Queue("default")]
+public class ReportJobHandler(AppDbContext db, IStorageService storage)
+{
+    public async Task GenerateDailyReportAsync(PerformContext? context)
+    {
+        var yesterday = DateTime.UtcNow.Date.AddDays(-1);
+
+        var report = await db.Orders
+            .Where(o => o.CreatedAt.Date == yesterday)
+            .GroupBy(o => 1)
+            .Select(g => new
+            {
+                TotalOrders = g.Count(),
+                Revenue = g.Sum(o => o.Total),
+                AvgOrderValue = g.Average(o => o.Total)
+            })
+            .FirstOrDefaultAsync();
+
+        var pdf = GeneratePdf(report);
+        await storage.UploadAsync($"reports/daily/{yesterday:yyyy-MM-dd}.pdf", pdf);
+    }
+}
+```
+
+## Quartz.NET — Complex Scheduling
+
+```csharp
+// Quartz.NET: more control than Hangfire, cron + calendar-based scheduling
+// dotnet add package Quartz.AspNetCore
+// dotnet add package Quartz.Extensions.Hosting
+
+builder.Services.AddQuartz(q =>
+{
+    q.UseMicrosoftDependencyInjectionJobFactory();
+    q.UseDefaultThreadPool(maxConcurrency: 5);
+
+    // Schedule a job with triggers
+    var reportJobKey = new JobKey("DailyReport");
+    q.AddJob<DailyReportJob>(opts => opts.WithIdentity(reportJobKey));
+    q.AddTrigger(opts => opts
+        .ForJob(reportJobKey)
+        .WithIdentity("DailyReport-Trigger")
+        .WithCronSchedule("0 0 6 * * ?",  // 6 AM every day
+            x => x.InTimeZone(TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time")))
+        .StartNow());
+});
+
+builder.Services.AddQuartzHostedService(options =>
+    options.WaitForJobsToComplete = true);  // graceful shutdown
+
+// Job implementation
+public class DailyReportJob(AppDbContext db, ILogger<DailyReportJob> logger) : IJob
+{
+    public async Task Execute(IJobExecutionContext context)
+    {
+        logger.LogInformation("Running daily report job");
+        // ... report generation
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Choosing a Background Job Library">
+- **`BackgroundService`**: Simple periodic tasks, no persistence needed, app-lifetime jobs.
+- **Hangfire**: Best overall choice. Persistent (survives restarts), great UI dashboard, automatic retries, priority queues. Use PostgreSQL or SQL Server as storage.
+- **Quartz.NET**: More control over complex scheduling (business hours, holiday calendars, misfired jobs). Heavier but more enterprise-grade.
+- **Azure Service Bus / RabbitMQ**: For distributed systems where jobs need to cross service boundaries (covered in day 127).
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Add Hangfire to your blog API with PostgreSQL storage. Schedule recurring jobs: (a) "send daily post digest" at 8 AM, (b) "cleanup expired sessions" every hour, (c) "regenerate search index" every night. View them in the Hangfire dashboard.
+2. Implement "async email sending": instead of sending emails synchronously in your auth endpoints, enqueue Hangfire jobs. Verify that: registration still responds in <50ms, the email job runs in the background, and if the email fails it retries up to 3 times with increasing delays.
+3. Build a "batch import" endpoint: `POST /api/admin/import/posts` accepts a CSV file and enqueues a Hangfire job to process it. The endpoint returns a job ID immediately. Add `GET /api/admin/jobs/{jobId}` that returns the job's progress (pending/processing/succeeded/failed) by querying the Hangfire job state.
+</ExerciseBlock>

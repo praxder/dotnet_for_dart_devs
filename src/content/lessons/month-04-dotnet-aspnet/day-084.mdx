@@ -1,0 +1,199 @@
+---
+title: "SignalR: Real-Time Communication"
+day: 84
+week: 17
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "WebSocket, web_socket_channel package"
+csharpConcept: "SignalR, Hub, HubContext, groups, streaming, scaling with Redis backplane"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+SignalR provides real-time, bidirectional communication between server and clients. It abstracts over WebSockets, Server-Sent Events, and Long Polling — automatically choosing the best transport. If you've used WebSocket packages in Dart, SignalR is the production-grade, opinionated version.
+
+## SignalR vs Raw WebSockets
+
+| | SignalR Hub | Raw WebSocket |
+|--|--|--|
+| Connection management | Automatic reconnect | Manual |
+| Protocol | JSON or MessagePack | Raw bytes |
+| Groups | Built-in | Manual |
+| Scaling | Redis backplane | Hard |
+| Client libraries | .NET, JS, Swift, Java | Per-platform |
+| Server push | Yes | Yes |
+| RPC model | Yes | No |
+
+## Your First Hub
+
+```csharp
+using Microsoft.AspNetCore.SignalR;
+
+// Hub — server-side connection manager
+public class ChatHub : Hub
+{
+    // Called by connected clients
+    public async Task SendMessage(string user, string message)
+    {
+        // Broadcast to ALL connected clients
+        await Clients.All.SendAsync("ReceiveMessage", user, message);
+    }
+
+    public async Task SendPrivateMessage(string connectionId, string message)
+    {
+        // Send to specific client by connection ID
+        await Clients.Client(connectionId).SendAsync("ReceiveMessage", "System", message);
+    }
+
+    public async Task JoinRoom(string roomName)
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, roomName);
+        await Clients.Group(roomName).SendAsync("UserJoined", Context.ConnectionId);
+    }
+
+    public async Task LeaveRoom(string roomName)
+    {
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, roomName);
+        await Clients.Group(roomName).SendAsync("UserLeft", Context.ConnectionId);
+    }
+
+    // Lifecycle callbacks
+    public override async Task OnConnectedAsync()
+    {
+        Console.WriteLine($"Connected: {Context.ConnectionId}");
+        await Clients.Caller.SendAsync("Welcome", Context.ConnectionId);
+        await base.OnConnectedAsync();
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        Console.WriteLine($"Disconnected: {Context.ConnectionId}");
+        await base.OnDisconnectedAsync(exception);
+    }
+}
+
+// Register in Program.cs
+builder.Services.AddSignalR();
+// ...
+app.MapHub<ChatHub>("/hubs/chat");
+```
+
+## Typed Hubs — Type-Safe Client Calls
+
+```csharp
+// Define the client interface
+public interface IChatClient
+{
+    Task ReceiveMessage(string user, string message);
+    Task UserJoined(string connectionId, string username);
+    Task UserLeft(string connectionId);
+    Task SystemMessage(string message);
+}
+
+// Hub with typed client
+public class ChatHub : Hub<IChatClient>
+{
+    public async Task SendMessage(string message)
+    {
+        var username = Context.User?.Identity?.Name ?? Context.ConnectionId;
+        await Clients.All.ReceiveMessage(username, message);  // Typed!
+    }
+
+    public async Task JoinRoom(string room)
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, room);
+        await Clients.Group(room).UserJoined(Context.ConnectionId, "Alice");
+    }
+}
+```
+
+## Authentication with SignalR
+
+```csharp
+// Hub with authorization
+[Authorize]
+public class SecureChatHub : Hub<IChatClient>
+{
+    public async Task SendMessage(string message)
+    {
+        var userId = Context.UserIdentifier;  // from NameIdentifier claim
+        var username = Context.User!.Identity!.Name;
+        await Clients.All.ReceiveMessage(username!, message);
+    }
+}
+
+// Register with auth in Program.cs
+builder.Services.AddSignalR();
+// Auth must be set up before MapHub
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapHub<SecureChatHub>("/hubs/chat").RequireAuthorization();
+```
+
+## Calling Clients from Outside a Hub
+
+```csharp
+// Use IHubContext<T> to send messages from services/controllers
+public class NotificationService(IHubContext<ChatHub, IChatClient> hubContext)
+{
+    // Broadcast to all connected users
+    public async Task BroadcastAsync(string message)
+        => await hubContext.Clients.All.SystemMessage(message);
+
+    // Send to specific user (by claim NameIdentifier)
+    public async Task SendToUserAsync(string userId, string message)
+        => await hubContext.Clients.User(userId).SystemMessage(message);
+
+    // Send to a group
+    public async Task SendToRoomAsync(string roomName, string sender, string message)
+        => await hubContext.Clients.Group(roomName).ReceiveMessage(sender, message);
+}
+
+// Inject and use in an API endpoint
+app.MapPost("/api/admin/broadcast", async (
+    BroadcastRequest req,
+    NotificationService notifications) =>
+{
+    await notifications.BroadcastAsync(req.Message);
+    return Results.NoContent();
+}).RequireAuthorization("Admin");
+```
+
+## Server-to-Client Streaming
+
+```csharp
+// Stream data from server to client
+public async IAsyncEnumerable<StockQuote> StreamStockPrices(
+    string symbol,
+    [EnumeratorCancellation] CancellationToken ct)
+{
+    while (!ct.IsCancellationRequested)
+    {
+        yield return new StockQuote(symbol, GetCurrentPrice(symbol), DateTime.UtcNow);
+        await Task.Delay(1000, ct);  // update every second
+    }
+}
+```
+
+## Scaling with Redis Backplane
+
+```csharp
+// Multiple servers — need Redis to propagate messages across instances
+builder.Services.AddSignalR()
+    .AddStackExchangeRedis(builder.Configuration.GetConnectionString("Redis")!, options =>
+    {
+        options.Configuration.ChannelPrefix = RedisChannel.Literal("MyApp");
+    });
+```
+
+<ExerciseBlock>
+1. Build a real-time order tracking hub: clients can subscribe to an order's status updates with `SubscribeToOrder(Guid orderId)`. When an order's status changes (via a REST endpoint), push the update to all subscribed clients using `IHubContext`.
+2. Implement a collaborative whiteboard hub where users can draw and others see the strokes in real time. Store recent strokes in a `ConcurrentQueue<DrawEvent>` and send history to new joiners via `Clients.Caller.ReceiveHistory(recentEvents)`.
+3. Create a live dashboard that streams real-time metrics (CPU usage, request count, active users) to all connected admins every second using `IAsyncEnumerable<MetricsSnapshot>` streaming from the hub.
+</ExerciseBlock>

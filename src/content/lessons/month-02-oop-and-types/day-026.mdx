@@ -1,0 +1,213 @@
+---
+title: "Inheritance: virtual, override, and Method Hiding"
+day: 26
+week: 6
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart all methods are virtual by default, @override annotation"
+csharpConcept: "virtual keyword, override keyword, new keyword (hiding), sealed"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+The biggest inheritance difference between Dart and C#: **in Dart, ALL methods are virtual by default**. In C#, they're **NOT** — you have to explicitly mark methods `virtual` to allow overriding. Forgetting this is a common source of bugs for Dart developers moving to C#.
+
+## Explicit virtual/override
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  class Animal {
+    // ALL methods are implicitly virtual in Dart
+    String speak() => 'Some sound';
+    String describe() => 'Animal: ${runtimeType}';
+  }
+
+  class Dog extends Animal {
+    @override  // annotation, not enforced by compiler
+    String speak() => 'Woof!';
+    // describe() not overridden — inherits base version
+  }
+
+  Animal a = Dog();
+  print(a.speak());    // "Woof!" — polymorphism works
+  print(a.describe()); // "Animal: Dog"
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  public class Animal
+  {
+      // NOT virtual — cannot be overridden (default in C#)
+      public string Describe() => $"Animal: {GetType().Name}";
+
+      // virtual — CAN be overridden by subclasses
+      public virtual string Speak() => "Some sound";
+  }
+
+  public class Dog : Animal
+  {
+      // override — must match a virtual/abstract method
+      public override string Speak() => "Woof!";
+      // Describe() not overridden — inherits base version
+  }
+
+  Animal a = new Dog();
+  Console.WriteLine(a.Speak());    // "Woof!" — polymorphism works
+  Console.WriteLine(a.Describe()); // "Animal: Dog"
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="gotcha" title="Methods Are NOT Virtual by Default in C#">
+This trips up every Dart developer new to C#. If you forget `virtual`, a subclass can't override the method — the base class version always runs when called through a base class reference. The compiler warns you if you try to override a non-virtual method.
+</ConceptCallout>
+
+## The `new` Keyword — Method Hiding (Not Overriding)
+
+C# has a concept Dart doesn't: **method hiding** with the `new` keyword. This is NOT polymorphism — it creates a new method that shadows the base class version only when accessed through the derived type:
+
+```csharp
+public class Base
+{
+    public string Method() => "Base.Method";
+}
+
+public class Derived : Base
+{
+    // 'new' hides Base.Method (compiler warns without 'new')
+    public new string Method() => "Derived.Method";
+}
+
+Base b = new Derived();
+Derived d = new Derived();
+
+Console.WriteLine(b.Method());  // "Base.Method"   — NOT polymorphic!
+Console.WriteLine(d.Method());  // "Derived.Method"
+
+// COMPARE to virtual/override (polymorphic):
+// If Method was virtual + override:
+// b.Method() would return "Derived.Method"
+```
+
+<ConceptCallout type="gotcha" title="new vs override — A Critical Difference">
+
+| | `virtual` + `override` | `new` (hiding) |
+|---|---|---|
+| Called through base type? | Uses derived implementation | Uses base implementation |
+| Polymorphic? | Yes | No |
+| Common use? | Normal polymorphism | Rare — avoiding it is usually better |
+
+Avoid method hiding unless you have a very specific reason (e.g., a name collision from an interface that got added later). It creates confusing behavior and is considered a code smell.
+</ConceptCallout>
+
+## `sealed` — Preventing Further Overrides
+
+`sealed` on a method prevents subclasses from overriding it further:
+
+```csharp
+public class Animal
+{
+    public virtual string Speak() => "Some sound";
+}
+
+public class Dog : Animal
+{
+    // sealed override — Dog.Speak can be called but not overridden further
+    public sealed override string Speak() => "Woof!";
+}
+
+public class Labrador : Dog
+{
+    // ERROR — cannot override sealed method
+    // public override string Speak() => "Woof woof!";
+}
+```
+
+`sealed` on the class itself prevents all inheritance:
+
+```csharp
+public sealed class Singleton
+{
+    // Nobody can subclass this
+    private static readonly Singleton _instance = new();
+    public static Singleton Instance => _instance;
+    private Singleton() {}
+}
+```
+
+## `base` — Calling the Parent Implementation
+
+```csharp
+public class Logger
+{
+    public virtual void Log(string message)
+        => Console.WriteLine($"[LOG] {message}");
+}
+
+public class TimestampLogger : Logger
+{
+    public override void Log(string message)
+    {
+        // Call base implementation first
+        base.Log($"[{DateTime.Now:HH:mm:ss}] {message}");
+    }
+}
+
+public class FileLogger : TimestampLogger
+{
+    private readonly string _path;
+
+    public FileLogger(string path) { _path = path; }
+
+    public override void Log(string message)
+    {
+        base.Log(message);  // calls TimestampLogger.Log
+        File.AppendAllText(_path, message + "\n");
+    }
+}
+```
+
+## Abstract Members
+
+Abstract members must be overridden in non-abstract subclasses:
+
+```csharp
+public abstract class Shape
+{
+    // Abstract — no implementation, must override
+    public abstract double Area { get; }
+    public abstract double Perimeter { get; }
+
+    // Virtual — has implementation, can override
+    public virtual string Describe()
+        => $"{GetType().Name}: area={Area:F2}, perimeter={Perimeter:F2}";
+
+    // Non-virtual — cannot override
+    public bool IsLargerThan(Shape other) => Area > other.Area;
+}
+
+public class Circle : Shape
+{
+    public double Radius { get; }
+    public Circle(double radius) { Radius = radius; }
+
+    public override double Area => Math.PI * Radius * Radius;
+    public override double Perimeter => 2 * Math.PI * Radius;
+
+    // Optionally override virtual method
+    public override string Describe() => $"Circle(r={Radius:F2})";
+}
+```
+
+<ExerciseBlock>
+1. Create a `Vehicle` base class with `virtual` methods `StartEngine()` and `GetFuelType()`. Create `ElectricCar` and `GasCar` subclasses that override them. Assign both to `Vehicle` variables and confirm polymorphism works.
+2. Demonstrate method hiding by creating a `Base` class with a non-virtual `GetValue()`, a `Derived` class with `new GetValue()`, and show the difference in behavior when accessing through `Base` vs `Derived` references.
+3. Build a logging hierarchy: `LoggerBase` (abstract, with abstract `WriteMessage()`), `ConsoleLogger`, `FileLogger`, and `CompositeLogger` (holds a list of loggers and calls all). Use `sealed` on the final implementations.
+</ExerciseBlock>

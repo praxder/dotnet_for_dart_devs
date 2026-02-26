@@ -1,0 +1,198 @@
+---
+title: "Source Generators"
+day: 61
+week: 13
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "build_runner, code generation with source_gen"
+csharpConcept: "IIncrementalGenerator, Roslyn, compile-time code generation"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Source generators are C#'s answer to Dart's `build_runner` + `source_gen`. They generate C# code at **compile time** based on your existing code — eliminating boilerplate, enabling reflection-free serialization, and powering AOT-compatible libraries.
+
+## Why Source Generators?
+
+The traditional alternatives — reflection and `T4` templates — have problems:
+
+- **Reflection**: runtime cost, no AOT support, breaks with trimming
+- **T4 templates**: run at design time, poor IDE integration
+- **Source generators**: compile-time, IDE-integrated, incremental, AOT-safe
+
+Dart developers recognize the pattern: `build_runner` runs before compilation; source generators run **during** compilation via the Roslyn compiler API.
+
+## What's Generated for You (Built-In)
+
+Several .NET libraries already use source generators — you benefit without writing them:
+
+```csharp
+// System.Text.Json source generation — no reflection!
+[JsonSerializable(typeof(User))]
+[JsonSerializable(typeof(List<Order>))]
+internal partial class AppJsonContext : JsonSerializerContext { }
+
+// Generated code serializes/deserializes without reflection
+var json = JsonSerializer.Serialize(user, AppJsonContext.Default.User);
+var user = JsonSerializer.Deserialize(json, AppJsonContext.Default.User);
+
+// LoggerMessage source generator — zero-allocation structured logging
+public partial class MyService
+{
+    private readonly ILogger<MyService> _logger;
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Processing order {OrderId}")]
+    private partial void LogProcessing(int orderId);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to process {OrderId}: {Error}")]
+    private partial void LogFailure(int orderId, string error);
+
+    public void Process(int orderId)
+    {
+        LogProcessing(orderId);  // Generated — no string formatting unless enabled
+        // ...
+    }
+}
+
+// Regex source generator — compiled regex at build time
+public partial class Validator
+{
+    [GeneratedRegex(@"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")]
+    private static partial Regex EmailRegex();
+
+    public bool IsValidEmail(string input) => EmailRegex().IsMatch(input);
+}
+```
+
+## Writing a Simple Source Generator
+
+```csharp
+// A source generator lives in a separate project (usually *.SourceGenerator)
+// It references the Roslyn compiler APIs
+
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
+[Generator]
+public class ToStringGenerator : IIncrementalGenerator
+{
+    public void Initialize(IncrementalGeneratorInitializationContext context)
+    {
+        // Find all classes marked with [GenerateToString]
+        var classes = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "GenerateToStringAttribute",
+                predicate: (node, _) => node is ClassDeclarationSyntax,
+                transform: GetClassInfo)
+            .Where(info => info is not null);
+
+        // Register output
+        context.RegisterSourceOutput(classes, GenerateToString!);
+    }
+
+    private ClassInfo? GetClassInfo(
+        GeneratorAttributeSyntaxContext ctx,
+        CancellationToken ct)
+    {
+        var symbol = ctx.TargetSymbol as INamedTypeSymbol;
+        if (symbol is null) return null;
+
+        var properties = symbol.GetMembers()
+            .OfType<IPropertySymbol>()
+            .Where(p => p.DeclaredAccessibility == Accessibility.Public)
+            .Select(p => p.Name)
+            .ToList();
+
+        return new ClassInfo(symbol.Name, symbol.ContainingNamespace.ToString(), properties);
+    }
+
+    private void GenerateToString(SourceProductionContext ctx, ClassInfo info)
+    {
+        var propStrings = info.Properties.Select(p => $"{p}={{{p}}}");
+        var format = string.Join(", ", propStrings);
+
+        var source = $$"""
+            namespace {{info.Namespace}};
+
+            partial class {{info.ClassName}}
+            {
+                public override string ToString()
+                    => $"{{info.ClassName}}({{format}})";
+            }
+            """;
+
+        ctx.AddSource($"{info.ClassName}.ToString.g.cs", source);
+    }
+}
+
+record ClassInfo(string ClassName, string Namespace, List<string> Properties);
+```
+
+## Using the Generator in Your App
+
+```csharp
+// 1. Reference the generator project:
+// <ItemGroup>
+//   <ProjectReference Include="..\MyGenerators\MyGenerators.csproj"
+//     OutputItemType="Analyzer"
+//     ReferenceOutputAssembly="false" />
+// </ItemGroup>
+
+// 2. Apply the attribute and make the class partial:
+[GenerateToString]
+public partial class User
+{
+    public string Name { get; init; }
+    public int Age { get; init; }
+    public string Email { get; init; }
+}
+
+// 3. The generator creates User.ToString.g.cs automatically
+// The generated code:
+// public override string ToString()
+//     => $"User(Name={Name}, Age={Age}, Email={Email})";
+
+// 4. Just use it:
+var user = new User { Name = "Alice", Age = 30, Email = "alice@example.com" };
+Console.WriteLine(user);
+// User(Name=Alice, Age=30, Email=alice@example.com)
+```
+
+## Popular Libraries Using Source Generators
+
+```csharp
+// System.Text.Json — reflection-free serialization (shown above)
+
+// Mapperly — object mapping without reflection
+[Mapper]
+public partial class UserMapper
+{
+    public partial UserDto ToDto(User user);
+}
+// Generates the mapping code at compile time
+
+// StronglyTypedId — type-safe IDs
+[StronglyTypedId]
+public partial struct UserId { }
+// Generates: UserId is a struct wrapping Guid with conversions, JSON support
+
+// Mediator — compile-time validated mediator
+// Generates dispatch code, no runtime reflection
+
+// AutoMapper (8.0+) — optional source gen mode
+```
+
+<ConceptCallout type="tip" title="View Generated Code">
+In your IDE (Rider or Visual Studio), you can navigate to the generated code: look in the solution explorer under **Dependencies → Analyzers → [GeneratorName]**. This is invaluable for debugging generator output. The generated files are in your `obj/` directory as `.g.cs` files.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Use `System.Text.Json` with source generation for a `WeatherForecast` record. Compare the generated code to what reflection-based serialization would do. Verify it works with `dotnet publish -r linux-x64 --self-contained` (AOT-safe).
+2. Use `[GeneratedRegex]` to compile three regexes (email, phone, postal code) at build time. Benchmark them against `new Regex(pattern)` using `Stopwatch` — the generated version should be faster on repeated calls.
+3. Add the `Mapperly` or `Riok.Mapperly` NuGet package and create a mapper between `UserEntity` (EF model with all fields) and `UserDto` (public-facing subset). Generate mappings for a list of entities. Compare the generated code to a manual mapping method.
+</ExerciseBlock>

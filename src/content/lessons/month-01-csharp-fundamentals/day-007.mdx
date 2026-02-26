@@ -1,0 +1,222 @@
+---
+title: "Type Inference: var, dynamic, and object"
+day: 7
+week: 2
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "Dart var, dynamic, Object"
+csharpConcept: "C# var (local inference), dynamic (runtime dispatch), object (base type)"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# has three ways to work with types loosely, and they map almost directly to Dart's `var`, `dynamic`, and `Object` — with one important addition: the distinction between `object` (base class) and `dynamic` (runtime dispatch) is much more meaningful in C# than in Dart.
+
+## `var` — Local Type Inference
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart var — infers type, immutable binding
+  var name = "Flutter";     // String
+  var items = [1, 2, 3];    // List<int>
+  var map = {"a": 1};       // Map<String, int>
+
+  // Can reassign to same type
+  name = "Dart";
+  // name = 42; // ERROR — type is fixed as String
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# var — identical semantics to Dart's var
+  var name = "dotnet";      // string (inferred)
+  var items = new[] { 1, 2, 3 };   // int[]
+  var map = new Dictionary<string, int> { {"a", 1} };
+
+  // Can reassign to same type
+  name = "C#";
+  // name = 42; // ERROR — type is fixed as string
+
+  // var in foreach — very common
+  var products = GetProducts();
+  foreach (var product in products)
+  {
+      Console.WriteLine(product.Name);
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="same" title="var Works Identically">
+`var` in C# and Dart is semantically identical. The type is inferred at compile time, is fixed after inference, and there is no runtime overhead. Use it freely for local variables when the type is obvious from context.
+</ConceptCallout>
+
+### When to Use `var` vs Explicit Types
+
+The C# community guideline (from Microsoft's style guide):
+
+```csharp
+// USE var when the type is obvious from the right side
+var orders = new List<Order>();
+var count = items.Count;
+var dto = new ProductDto { Name = "Widget" };
+
+// USE explicit type when it adds clarity
+IEnumerable<Order> pendingOrders = GetOrders().Where(o => !o.IsShipped);
+HttpResponseMessage response = await _client.GetAsync(url);
+
+// AVOID var for primitive literals (ambiguous)
+int timeout = 30;     // clear: it's an int
+double ratio = 0.5;   // clear: it's a double
+// var timeout = 30;  // is this int? long? short? — less clear
+```
+
+## `object` — The Universal Base Type
+
+In C#, `object` is the root of the entire type hierarchy — every type inherits from `object`. This is different from Dart where `Object` is the same concept but null safety changed the picture (`Object?` vs `Object`).
+
+```csharp
+// object can hold any value
+object anything = "hello";
+anything = 42;
+anything = new DateTime();
+anything = new List<string>();
+
+// To use the actual type, you must cast
+object boxed = 42;
+int unboxed = (int)boxed;      // explicit cast — throws if wrong type
+int? safe = boxed as int?;     // safe cast — returns null if wrong type
+
+// Value types get "boxed" when stored in object
+object boxedInt = 42;          // heap allocation (boxing)
+int unboxedInt = (int)boxedInt; // unboxing
+
+// Common use: heterogeneous collections (use sparingly)
+var mixed = new List<object> { "hello", 42, true, DateTime.Now };
+
+// Checking the actual type
+foreach (var item in mixed)
+{
+    if (item is string s) Console.WriteLine($"String: {s}");
+    else if (item is int n) Console.WriteLine($"Int: {n}");
+}
+```
+
+<ConceptCallout type="tip" title="Avoid object in Modern C#">
+Using `object` usually means you need generics instead. `List<object>` should almost always be `List<T>`. Reserve `object` for truly heterogeneous scenarios or when interfacing with legacy APIs.
+</ConceptCallout>
+
+## `dynamic` — Runtime Type Dispatch
+
+`dynamic` tells the compiler to skip type checking entirely and resolve method calls at runtime. This is where C# diverges from Dart.
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart dynamic — skips static type checking
+  dynamic anything = "hello";
+  anything.nonExistentMethod(); // no compile error, runtime error
+
+  // Common in Dart for JSON
+  dynamic json = jsonDecode(response.body);
+  var name = json['user']['name'] as String;
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# dynamic — same concept
+  dynamic anything = "hello";
+  anything.NonExistentMethod(); // no compile error, RuntimeBinderException at runtime
+
+  Console.WriteLine(anything.Length); // works — string has Length
+  anything = 42;
+  Console.WriteLine(anything + 8);    // works — int supports +
+
+  // Primary use case: COM interop and reflection-heavy scenarios
+  dynamic excelApp = Activator.CreateInstance(Type.GetTypeFromProgID("Excel.Application")!);
+  excelApp.Visible = true;
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="dynamic vs object in C#">
+
+| | `object` | `dynamic` |
+|---|---|---|
+| Type checking | Compile-time (cast required) | None (all at runtime) |
+| Method calls | Must cast first | Resolved at runtime |
+| Performance | Boxing/unboxing overhead | DLR overhead |
+| Use case | Base type, boxing | COM interop, scripting |
+
+In Dart, `dynamic` skips static type analysis. In C#, `dynamic` uses the **Dynamic Language Runtime (DLR)** to resolve every member access at runtime — it's more powerful but also slower.
+</ConceptCallout>
+
+### `dynamic` and JSON
+
+In older C# code you might see `dynamic` used for JSON, but modern C# uses `JsonElement` or strongly-typed deserialization:
+
+```csharp
+// OLD way (avoid)
+dynamic json = JsonConvert.DeserializeObject(jsonString)!;
+var name = (string)json.user.name;
+
+// MODERN way (preferred)
+using var doc = JsonDocument.Parse(jsonString);
+var name = doc.RootElement
+    .GetProperty("user")
+    .GetProperty("name")
+    .GetString();
+
+// BEST way — deserialize to a typed class
+var response = JsonSerializer.Deserialize<ApiResponse>(jsonString);
+var name = response?.User?.Name;
+```
+
+## C# 9: Target-Typed `new` Expressions
+
+A related feature — when the type is already known from context, you can omit it from `new`:
+
+```csharp
+// Explicit type on the left — can omit on the right
+List<string> names = new();          // new List<string>()
+Dictionary<int, User> cache = new(); // new Dictionary<int, User>()
+
+// In method calls
+var result = ProcessItems(new() { "a", "b", "c" });
+
+// In field initializers
+private readonly List<Order> _orders = new();
+
+// With constructors that have args
+HttpClient client = new(handler);
+```
+
+<ConceptCallout type="tip" title="Target-Typed new Is Modern C#">
+Target-typed `new()` is the modern way to avoid repeating the type on both sides of an assignment. It's like `var` but for when the type is on the left instead of the right.
+</ConceptCallout>
+
+## Summary
+
+```csharp
+// var — compile-time inference (use freely for locals)
+var x = GetSomething(); // type inferred, never null-safe issue
+
+// object — base type (use for truly polymorphic scenarios)
+object box = 42;         // boxes the int
+
+// dynamic — runtime dispatch (use only for COM/interop)
+dynamic d = GetDynamic(); // all member access resolved at runtime
+```
+
+<ExerciseBlock>
+1. Take this code and refactor all appropriate explicit types to `var`: `List<string> names = new List<string>(); Dictionary<string, int> scores = new Dictionary<string, int>(); string first = names.FirstOrDefault();`
+2. Write a method that takes `object input` and uses pattern matching to return a formatted string for `int`, `double`, `bool`, `string`, and "unknown" for anything else.
+3. Parse this JSON string using `JsonDocument` (no `dynamic`): `{"status": "ok", "count": 42, "items": ["a", "b"]}`. Extract each field with proper types.
+</ExerciseBlock>

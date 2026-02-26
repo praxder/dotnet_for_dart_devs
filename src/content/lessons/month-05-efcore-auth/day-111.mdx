@@ -1,0 +1,246 @@
+---
+title: "API Security: Input Validation, CORS, and Security Headers"
+day: 111
+week: 22
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "form validation in Flutter, HTTP security headers"
+csharpConcept: "FluentValidation, CORS policy, Content-Security-Policy, HSTS, rate limiting, antiforgery"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+A secured authentication system is undermined by poor input validation, missing security headers, or misconfigured CORS. This lesson covers the defensive security measures that turn a working API into a hardened one.
+
+## Input Validation — Never Trust Client Data
+
+```csharp
+// FluentValidation: expressive, testable validators
+// dotnet add package FluentValidation.AspNetCore
+
+public class CreatePostValidator : AbstractValidator<CreatePostCommand>
+{
+    public CreatePostValidator()
+    {
+        RuleFor(x => x.Title)
+            .NotEmpty().WithMessage("Title is required")
+            .MaximumLength(500)
+            .Must(NotContainScript).WithMessage("Title contains invalid content");
+
+        RuleFor(x => x.Body)
+            .NotEmpty()
+            .MinimumLength(100).WithMessage("Post body must be at least 100 characters");
+
+        RuleFor(x => x.Tags)
+            .NotNull()
+            .Must(t => t.Count <= 10).WithMessage("Maximum 10 tags allowed")
+            .ForEach(t => t
+                .NotEmpty()
+                .MaximumLength(50)
+                .Matches(@"^[a-z0-9-]+$").WithMessage("Tags can only contain lowercase letters, numbers, and hyphens"));
+
+        RuleFor(x => x.AuthorId)
+            .GreaterThan(0);
+    }
+
+    private static bool NotContainScript(string value)
+        => !value.Contains("<script", StringComparison.OrdinalIgnoreCase)
+            && !value.Contains("javascript:", StringComparison.OrdinalIgnoreCase);
+}
+
+// Register in Program.cs:
+builder.Services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+
+// Auto-validate on Minimal API endpoints:
+app.MapPost("/api/posts", async (
+    CreatePostCommand cmd,
+    IValidator<CreatePostCommand> validator,
+    IMediator mediator) =>
+{
+    var validation = await validator.ValidateAsync(cmd);
+    if (!validation.IsValid)
+        return Results.ValidationProblem(validation.ToDictionary());
+
+    var result = await mediator.Send(cmd);
+    return Results.Created($"/api/posts/{result.PostId}", result);
+});
+```
+
+## SQL Injection Prevention
+
+```csharp
+// EF Core parameterizes ALL LINQ queries — safe by default
+var name = userInput;
+var products = await db.Products
+    .Where(p => p.Name == name)  // SQL: WHERE name = @p0 — SAFE
+    .ToListAsync();
+
+// Safe raw SQL with interpolation (EF Core 8):
+var products2 = await db.Products
+    .FromSql($"SELECT * FROM products WHERE name = {name}")  // parameterized — SAFE
+    .ToListAsync();
+
+// DANGEROUS — never do this:
+var products3 = await db.Products
+    .FromSqlRaw($"SELECT * FROM products WHERE name = '{name}'")  // SQL INJECTION!
+    .ToListAsync();
+
+// Safe raw SQL with explicit parameters:
+var products4 = await db.Products
+    .FromSqlRaw("SELECT * FROM products WHERE name = {0}", name)  // SAFE
+    .ToListAsync();
+```
+
+## CORS — Cross-Origin Resource Sharing
+
+```csharp
+// CORS controls which origins can call your API from a browser
+// Mobile apps (Flutter) don't need CORS — only browser-based clients do
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("FlutterWeb", policy =>
+        policy
+            .WithOrigins(
+                "http://localhost:3000",           // local dev
+                "https://app.yourcompany.com")     // production
+            .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH")
+            .WithHeaders("Authorization", "Content-Type", "X-API-Key")
+            .AllowCredentials()  // needed for cookies
+            .SetPreflightMaxAge(TimeSpan.FromHours(1)));  // cache preflight
+
+    options.AddPolicy("PublicRead", policy =>
+        policy
+            .AllowAnyOrigin()          // any origin for public API
+            .WithMethods("GET")         // read only
+            .WithHeaders("Authorization"));
+
+    options.AddPolicy("AllowAll", policy =>  // DEVELOPMENT ONLY
+        policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+});
+
+// Apply globally:
+app.UseCors("FlutterWeb");  // applies to all endpoints
+
+// Or per endpoint:
+app.MapGet("/api/public/posts", handler)
+    .RequireCors("PublicRead");
+```
+
+## Security Headers
+
+```csharp
+// Security headers protect against common browser attacks
+app.Use(async (context, next) =>
+{
+    // Prevent MIME type sniffing
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+
+    // Clickjacking protection
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+
+    // XSS protection (old browsers)
+    context.Response.Headers["X-XSS-Protection"] = "1; mode=block";
+
+    // HTTPS only (combined with HSTS middleware)
+    // context.Response.Headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
+
+    // Remove server information
+    context.Response.Headers.Remove("Server");
+    context.Response.Headers.Remove("X-Powered-By");
+
+    // Referrer policy
+    context.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+
+    // Permissions policy
+    context.Response.Headers["Permissions-Policy"] =
+        "accelerometer=(), camera=(), geolocation=(), microphone=()";
+
+    // Content Security Policy — for web UI, not pure APIs
+    // context.Response.Headers["Content-Security-Policy"] =
+    //     "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self'";
+
+    await next();
+});
+
+// HTTPS and HSTS (HTTP Strict Transport Security):
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();    // adds HSTS header — browsers remember HTTPS-only
+}
+app.UseHttpsRedirection();  // redirect HTTP → HTTPS
+```
+
+## Rate Limiting (Revisited — Auth Context)
+
+```csharp
+// Rate limit by user ID after authentication
+builder.Services.AddRateLimiter(options =>
+{
+    // General API rate limit
+    options.AddFixedWindowLimiter("api", cfg =>
+    {
+        cfg.Window = TimeSpan.FromMinutes(1);
+        cfg.PermitLimit = 60;
+        cfg.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
+
+    // Strict limit for auth endpoints (prevent brute force)
+    options.AddFixedWindowLimiter("auth", cfg =>
+    {
+        cfg.Window = TimeSpan.FromMinutes(15);
+        cfg.PermitLimit = 5;
+    });
+
+    // Per-user rate limiting after authentication
+    options.AddPolicy("per-user", context =>
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return userId is not null
+            ? RateLimitPartition.GetTokenBucketLimiter(userId, _ =>
+                new TokenBucketRateLimiterOptions
+                {
+                    TokenLimit = 100,
+                    ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+                    TokensPerPeriod = 100
+                })
+            : RateLimitPartition.GetFixedWindowLimiter("anonymous", _ =>
+                new FixedWindowRateLimiterOptions
+                {
+                    Window = TimeSpan.FromMinutes(1),
+                    PermitLimit = 10
+                });
+    });
+});
+
+// Apply to auth endpoints:
+app.MapPost("/api/auth/login", handler)
+    .RequireRateLimiting("auth");
+
+app.MapPost("/api/auth/register", handler)
+    .RequireRateLimiting("auth");
+```
+
+<ConceptCallout type="tip" title="API Security Defense Layers">
+Think in layers — each layer stops different attacks:
+1. **HTTPS + HSTS**: encrypts transit, prevents MITM
+2. **Rate limiting**: prevents brute force, DDoS
+3. **Input validation**: prevents injection, malformed data
+4. **Authentication**: verifies identity
+5. **Authorization**: enforces permissions
+6. **Security headers**: protects browsers from XSS, clickjacking
+7. **Parameterized queries**: prevents SQL injection
+8. **Audit logging**: detects attacks after the fact
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Implement a `SecurityHeadersMiddleware` class that adds all recommended security headers. Make it configurable (e.g., disable CSP for development). Write a test that verifies all expected headers are present in responses.
+2. Create a "login lockout" system: after 5 failed login attempts within 15 minutes for the same email, block further attempts and return a `429 Too Many Requests` with a `Retry-After` header. Use the rate limiter and Identity's lockout feature together.
+3. Write a security audit of your blog API: list every endpoint, its HTTP method, auth requirement, rate limit, and validation. Identify any endpoint that (a) accepts untrusted input without validation, (b) returns more data than the caller needs, or (c) lacks rate limiting.
+</ExerciseBlock>

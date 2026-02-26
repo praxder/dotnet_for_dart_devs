@@ -1,0 +1,182 @@
+---
+title: "Health Checks and Readiness"
+day: 87
+week: 18
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "No direct Dart equivalent — Docker/k8s patterns"
+csharpConcept: "IHealthCheck, health check UI, liveness, readiness, dependency checks"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Health checks are standard signals your app sends to orchestrators (Docker, Kubernetes) and load balancers. ASP.NET Core has a built-in health check system that integrates with both `dotnet-monitor` and third-party dashboards.
+
+## Built-In Health Checks
+
+```csharp
+builder.Services.AddHealthChecks()
+    // Built-in checks via NuGet packages:
+    .AddSqlServer(                    // Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore
+        builder.Configuration.GetConnectionString("Default")!,
+        name: "database",
+        tags: ["db", "sql"])
+    .AddRedis(                        // AspNetCore.HealthChecks.Redis
+        builder.Configuration.GetConnectionString("Redis")!,
+        name: "redis",
+        tags: ["cache"])
+    .AddUrlGroup(                     // AspNetCore.HealthChecks.Uris
+        new Uri("https://api.github.com"),
+        name: "github-api",
+        tags: ["external"]);
+
+// Map endpoints
+app.MapHealthChecks("/health");          // all checks
+app.MapHealthChecks("/health/live",      // liveness: is the process alive?
+    new HealthCheckOptions { Predicate = _ => false });  // no checks = always healthy
+
+app.MapHealthChecks("/health/ready",     // readiness: can it handle traffic?
+    new HealthCheckOptions
+    {
+        Predicate = check => check.Tags.Contains("db"),  // only DB check
+        ResponseWriter = WriteHealthCheckResponse
+    });
+```
+
+## Custom Health Checks
+
+```csharp
+public class OrderQueueHealthCheck : IHealthCheck
+{
+    private readonly IOrderQueue _queue;
+
+    public OrderQueueHealthCheck(IOrderQueue queue) => _queue = queue;
+
+    public async Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var depth = await _queue.GetDepthAsync(cancellationToken);
+
+            if (depth > 10_000)
+                return HealthCheckResult.Unhealthy(
+                    $"Queue too deep: {depth:N0} items",
+                    data: new Dictionary<string, object> { ["depth"] = depth });
+
+            if (depth > 1_000)
+                return HealthCheckResult.Degraded(
+                    $"Queue elevated: {depth:N0} items",
+                    data: new Dictionary<string, object> { ["depth"] = depth });
+
+            return HealthCheckResult.Healthy(
+                $"Queue normal: {depth:N0} items",
+                data: new Dictionary<string, object> { ["depth"] = depth });
+        }
+        catch (Exception ex)
+        {
+            return HealthCheckResult.Unhealthy("Queue check failed", ex);
+        }
+    }
+}
+
+// Register
+builder.Services.AddHealthChecks()
+    .AddCheck<OrderQueueHealthCheck>("order-queue", tags: ["queue"])
+    .AddCheck("clock-skew", () =>
+    {
+        // Inline check — simple, no class needed
+        var offset = Math.Abs((DateTime.UtcNow - NtpTime.GetUtcNow()).TotalSeconds);
+        return offset < 5
+            ? HealthCheckResult.Healthy($"Clock offset: {offset:F1}s")
+            : HealthCheckResult.Degraded($"Clock skew: {offset:F1}s");
+    });
+```
+
+## JSON Health Check Response
+
+```csharp
+// Rich JSON response with details for monitoring tools
+static async Task WriteHealthCheckResponse(HttpContext ctx, HealthReport report)
+{
+    ctx.Response.ContentType = "application/json";
+
+    var result = new
+    {
+        status = report.Status.ToString(),
+        totalDuration = report.TotalDuration.TotalMilliseconds,
+        checks = report.Entries.Select(e => new
+        {
+            name = e.Key,
+            status = e.Value.Status.ToString(),
+            description = e.Value.Description,
+            duration = e.Value.Duration.TotalMilliseconds,
+            error = e.Value.Exception?.Message,
+            data = e.Value.Data
+        })
+    };
+
+    await ctx.Response.WriteAsync(JsonSerializer.Serialize(result,
+        new JsonSerializerOptions { WriteIndented = true }));
+}
+```
+
+## Health Check UI (Optional Dashboard)
+
+```bash
+dotnet add package AspNetCore.HealthChecks.UI
+dotnet add package AspNetCore.HealthChecks.UI.InMemory.Storage
+```
+
+```csharp
+builder.Services
+    .AddHealthChecksUI(setup =>
+    {
+        setup.SetEvaluationTimeInSeconds(15);
+        setup.MaximumHistoryEntriesPerEndpoint(50);
+        setup.AddHealthCheckEndpoint("MyApp", "/health");
+        setup.AddHealthCheckEndpoint("External Dependencies", "/health/external");
+    })
+    .AddInMemoryStorage();
+
+app.MapHealthChecksUI(options => options.UIPath = "/health-ui");
+// Visit /health-ui for a visual dashboard
+```
+
+## Liveness vs Readiness vs Startup
+
+```csharp
+// Kubernetes probe pattern:
+// - Startup: is the app finished initializing? (one-time)
+// - Liveness: is the process alive? (restart if failing)
+// - Readiness: can it receive traffic? (remove from load balancer if failing)
+
+app.MapHealthChecks("/health/startup", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("startup")
+});
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    // Liveness = just the process health, not dependencies
+    Predicate = _ => false,  // no checks = always returns 200 Healthy
+});
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    // Readiness = all critical dependencies must be healthy
+    Predicate = check => check.Tags.Contains("critical"),
+    ResponseWriter = WriteHealthCheckResponse
+});
+```
+
+<ExerciseBlock>
+1. Add health checks to the Blog API (Day 80): database connectivity, memory usage (`< 1GB = Healthy, < 2GB = Degraded, > 2GB = Unhealthy`), and a custom check that verifies the JWT secret is configured.
+2. Implement a `ServiceDependencyHealthCheck` that checks a list of URLs from configuration and returns Degraded if any are slow (> 500ms) or Unhealthy if any return non-2xx responses. Parallelize the checks.
+3. Write an integration test that calls `/health/ready` and asserts it returns 200 with `{"status": "Healthy"}`. Then configure a dependency that always fails and verify the endpoint returns 503.
+</ExerciseBlock>

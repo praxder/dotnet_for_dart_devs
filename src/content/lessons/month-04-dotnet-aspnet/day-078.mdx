@@ -1,0 +1,213 @@
+---
+title: "Authentication: JWT and Cookie Auth"
+day: 78
+week: 16
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "firebase_auth, JWT packages, token storage"
+csharpConcept: "JWT Bearer, cookie auth, IAuthenticationService, ClaimsPrincipal"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+ASP.NET Core has built-in authentication infrastructure that supports JWT Bearer tokens, cookies, OAuth, OpenID Connect, and more — all through a consistent `ClaimsPrincipal` model. This lesson covers the two most common schemes: JWT for APIs and cookies for web apps.
+
+## Claims-Based Identity
+
+```csharp
+// ClaimsPrincipal — the authenticated user
+// Claims — key/value pairs about the user
+
+// After authentication, access the user in controllers:
+public class OrdersController : ControllerBase
+{
+    [HttpGet("my-orders")]
+    [Authorize]
+    public async Task<IActionResult> GetMyOrders()
+    {
+        // User is the authenticated ClaimsPrincipal
+        string userId = User.FindFirstValue(ClaimTypes.NameIdentifier)!;
+        string email = User.FindFirstValue(ClaimTypes.Email)!;
+        string role = User.FindFirstValue(ClaimTypes.Role)!;
+        bool isAdmin = User.IsInRole("Admin");
+        string? customClaim = User.FindFirstValue("subscription_tier");
+
+        var orders = await _orders.GetByUserAsync(userId);
+        return Ok(orders);
+    }
+}
+```
+
+## JWT Bearer Authentication
+
+```bash
+dotnet add package Microsoft.AspNetCore.Authentication.JwtBearer
+```
+
+```csharp
+// Program.cs — configure JWT
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+
+            ValidateAudience = true,
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromSeconds(30),  // allow 30s clock drift
+
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:SecretKey"]!))
+        };
+    });
+
+builder.Services.AddAuthorization();
+
+// Don't forget in middleware pipeline:
+app.UseAuthentication();  // BEFORE UseAuthorization
+app.UseAuthorization();
+```
+
+## Token Generation
+
+```csharp
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+
+public class TokenService(IConfiguration config)
+{
+    public string GenerateToken(User user)
+    {
+        var key = new SymmetricSecurityKey(
+            Encoding.UTF8.GetBytes(config["Jwt:SecretKey"]!));
+
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+            new Claim(JwtRegisteredClaimNames.Email, user.Email),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new Claim(ClaimTypes.Role, user.Role),
+            new Claim("subscription_tier", user.SubscriptionTier),
+        };
+
+        var token = new JwtSecurityToken(
+            issuer: config["Jwt:Issuer"],
+            audience: config["Jwt:Audience"],
+            claims: claims,
+            expires: DateTime.UtcNow.AddHours(1),
+            signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    public string GenerateRefreshToken() => Convert.ToBase64String(
+        RandomNumberGenerator.GetBytes(64));
+}
+```
+
+## Login Endpoint
+
+```csharp
+[ApiController]
+[Route("api/auth")]
+public class AuthController(IUserService users, TokenService tokens) : ControllerBase
+{
+    [HttpPost("login")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Login(LoginRequest request)
+    {
+        var user = await users.ValidateCredentialsAsync(request.Email, request.Password);
+        if (user is null)
+            return Unauthorized(new { message = "Invalid credentials" });
+
+        var accessToken = tokens.GenerateToken(user);
+        var refreshToken = tokens.GenerateRefreshToken();
+
+        await users.SaveRefreshTokenAsync(user.Id, refreshToken);
+
+        return Ok(new
+        {
+            AccessToken = accessToken,
+            RefreshToken = refreshToken,
+            ExpiresIn = 3600
+        });
+    }
+
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh(RefreshRequest request) { ... }
+
+    [HttpPost("logout")]
+    [Authorize]
+    public async Task<IActionResult> Logout()
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier)!;
+        await users.RevokeRefreshTokenAsync(userId);
+        return NoContent();
+    }
+}
+```
+
+## Cookie Authentication (Web Apps)
+
+```csharp
+// For server-rendered apps (Razor Pages, MVC)
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath = "/login";
+        options.LogoutPath = "/logout";
+        options.AccessDeniedPath = "/access-denied";
+        options.ExpireTimeSpan = TimeSpan.FromDays(14);
+        options.SlidingExpiration = true;
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+        options.Cookie.SameSite = SameSiteMode.Strict;
+    });
+
+// Sign in (after validating credentials)
+var claims = new List<Claim>
+{
+    new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+    new(ClaimTypes.Email, user.Email),
+    new(ClaimTypes.Role, user.Role)
+};
+var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+var principal = new ClaimsPrincipal(identity);
+
+await HttpContext.SignInAsync(
+    CookieAuthenticationDefaults.AuthenticationScheme,
+    principal,
+    new AuthenticationProperties { IsPersistent = true });
+
+// Sign out
+await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+```
+
+<ConceptCallout type="tip" title="JWT vs Cookie — When to Use Each">
+**JWT Bearer**: APIs consumed by mobile apps, SPAs, or other services. Stateless — no server-side session storage. Good for microservices.
+
+**Cookie**: Server-rendered web apps, Blazor Server. Stateful — session stored server-side (or encrypted in cookie). Better CSRF protection built-in.
+
+**Both together**: APIs (JWT) for programmatic clients + cookies for browser UI — common pattern.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Build a complete JWT auth flow: `/register` (create user, return token), `/login` (validate, return token), `/me` (return current user — requires auth). Use an in-memory user store.
+2. Add a refresh token flow: store refresh tokens in a `ConcurrentDictionary` (keyed by user ID), validate on `/refresh`, issue new access + refresh tokens. Revoke on `/logout`.
+3. Implement role-based endpoints: `/admin/stats` requires `Admin` role, `/api/orders` requires any authenticated user, `/health` is public. Test all three cases with and without valid tokens.
+</ExerciseBlock>

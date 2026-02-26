@@ -1,0 +1,372 @@
+---
+title: "Properties: get, set, init, and Auto-Properties"
+day: 22
+week: 5
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart implicit getters/setters for all fields"
+csharpConcept: "C# properties with get/set/init, auto-properties, computed properties"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Properties are one of the most-used features in C# and one of the areas that most surprises Dart developers. In Dart, every field is implicitly a getter/setter pair — you only write explicit `get`/`set` syntax when you want custom logic. In C#, the distinction between *fields* and *properties* is explicit and meaningful, and the `{ get; set; }` syntax you'll see everywhere is not redundant — it carries real semantic weight.
+
+## Dart: Fields Are Implicitly Properties
+
+In Dart, a plain field declaration gives you an implicit getter and setter for free:
+
+```dart
+class Person {
+  String name;     // implicit get + set
+  int age;         // implicit get + set
+  final String id; // implicit get only (final = no setter)
+
+  Person(this.id, this.name, this.age);
+}
+
+// Usage:
+var p = Person('abc', 'Alice', 30);
+print(p.name);   // uses implicit getter
+p.name = 'Bob';  // uses implicit setter
+```
+
+When you want custom logic, you add explicit `get`/`set`:
+
+```dart
+class Circle {
+  double _radius;
+
+  Circle(this._radius);
+
+  double get radius => _radius;
+  set radius(double value) {
+    if (value < 0) throw ArgumentError('Radius cannot be negative');
+    _radius = value;
+  }
+
+  double get area => 3.14159 * _radius * _radius; // computed, no setter
+}
+```
+
+## C#: Fields vs Properties Are Distinct
+
+In C#, there is a hard distinction:
+
+- A **field** is raw storage — a variable on the class. Use `private` fields to hold data.
+- A **property** is a named accessor that may back onto a field, compute a value, or do anything you want.
+
+Exposing a public field directly is considered bad practice in C# because it bypasses the ability to add logic later without breaking callers. Properties give you that hook.
+
+```csharp
+public class Person
+{
+    // This is a FIELD — raw storage, considered bad practice to make public
+    public string Name;   // bad: public field
+
+    // This is a PROPERTY — syntactic sugar over a getter/setter pair
+    public string Name { get; set; }  // good: auto-property
+}
+```
+
+<ConceptCallout type="gotcha">
+`public string Name;` (field) and `public string Name { get; set; }` (property) look similar but are fundamentally different. Properties are methods under the hood — the compiler generates `get_Name()` and `set_Name()` methods. Reflection, data binding frameworks, serializers, and ORM tools like Entity Framework treat them differently. Always use properties for public members.
+</ConceptCallout>
+
+## Auto-Properties
+
+The most common form. The compiler generates a hidden backing field automatically:
+
+```csharp
+public class Product
+{
+    public string Name { get; set; }        // read-write
+    public decimal Price { get; set; }      // read-write
+    public string Sku { get; }              // read-only (set only in constructor)
+    public int StockCount { get; private set; } // public read, private write
+
+    public Product(string sku, string name, decimal price)
+    {
+        Sku = sku;       // allowed — setting in constructor
+        Name = name;
+        Price = price;
+    }
+
+    public void Restock(int count) => StockCount += count;
+    // StockCount++ works here because we're inside the class
+}
+```
+
+Auto-property defaults (C# 6+):
+
+```csharp
+public class Config
+{
+    public int MaxRetries { get; set; } = 3;       // default value
+    public string Environment { get; set; } = "Production";
+    public List<string> Tags { get; set; } = new();  // new() = new List<string>()
+}
+```
+
+## Custom Getter and Setter Logic
+
+When you need validation or transformation, write the backing field and accessor logic explicitly:
+
+```csharp
+public class Circle
+{
+    private double _radius;
+
+    public double Radius
+    {
+        get => _radius;
+        set
+        {
+            if (value < 0) throw new ArgumentException("Radius cannot be negative.");
+            _radius = value;
+        }
+    }
+
+    // Computed property — no backing field needed
+    public double Area => Math.PI * _radius * _radius;
+    public double Circumference => 2 * Math.PI * _radius;
+
+    public Circle(double radius) => Radius = radius; // uses the setter (validation runs)
+}
+```
+
+<DartEquivalent>
+C#'s explicit `get` / `set` property syntax maps directly to Dart's explicit getter/setter syntax. The key difference is that in Dart you only write the explicit form when you need custom logic; in C# you write `{ get; set; }` (the auto-property form) for ALL public data, even when there is no custom logic. The verbosity is intentional — it preserves binary compatibility when you later add logic.
+</DartEquivalent>
+
+## The `init` Accessor (C# 9)
+
+`init` is a write-once accessor. Like `set`, but only callable during object construction or in an object initializer (more on those in Day 25). After construction, the property is read-only.
+
+```csharp
+public class Order
+{
+    public string OrderId { get; init; }
+    public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
+    public string CustomerId { get; init; }
+
+    // No explicit constructor needed — use object initializer syntax:
+    // var order = new Order { OrderId = "ORD-001", CustomerId = "CUST-123" };
+}
+
+// At construction time:
+var order = new Order { OrderId = "ORD-001", CustomerId = "CUST-123" };
+
+// After construction:
+// order.OrderId = "ORD-002"; // COMPILE ERROR — init-only property
+```
+
+<ConceptCallout type="new">
+`init` is a C# 9 addition that solves a real problem: how do you make an object immutable after construction while still allowing flexible initialization syntax? Previously you had to choose between immutability (constructor-only) and flexibility (object initializer with mutable setters). `init` gives you both. This pattern is very common in modern C# with records and ASP.NET configuration.
+</ConceptCallout>
+
+## Expression-Bodied Properties
+
+For computed properties with simple expressions, use the `=>` syntax:
+
+```csharp
+public class Rectangle
+{
+    public double Width { get; set; }
+    public double Height { get; set; }
+
+    // Expression-bodied computed property (getter only)
+    public double Area => Width * Height;
+    public double Perimeter => 2 * (Width + Height);
+    public bool IsSquare => Width == Height;
+
+    // Expression-bodied with getter and setter
+    private double _diagonal;
+    public double Diagonal
+    {
+        get => _diagonal;
+        set => _diagonal = value > 0 ? value : throw new ArgumentException("Must be positive");
+    }
+}
+```
+
+## Private Setters
+
+A common pattern for read-mostly properties that can be modified by the class itself:
+
+```csharp
+public class BankAccount
+{
+    public string AccountId { get; }               // set in constructor only
+    public decimal Balance { get; private set; }   // class can modify, outsiders cannot
+    public List<string> Transactions { get; } = new(); // same pattern for collections
+
+    public BankAccount(string accountId, decimal initialBalance)
+    {
+        AccountId = accountId;
+        Balance = initialBalance;
+    }
+
+    public void Deposit(decimal amount)
+    {
+        if (amount <= 0) throw new ArgumentException("Amount must be positive.");
+        Balance += amount;  // private set allows this
+        Transactions.Add($"+{amount:C}");
+    }
+
+    public void Withdraw(decimal amount)
+    {
+        if (amount > Balance) throw new InvalidOperationException("Insufficient funds.");
+        Balance -= amount;  // private set allows this
+        Transactions.Add($"-{amount:C}");
+    }
+}
+```
+
+<CodeComparison>
+  <div slot="dart">```dart
+class BankAccount {
+  final String accountId;
+  double _balance;          // private field, exposed via getter
+  final List<String> _transactions = [];
+
+  BankAccount(this.accountId, this._balance);
+
+  double get balance => _balance;  // public read
+  // no setter — mutation only via methods
+
+  List<String> get transactions => List.unmodifiable(_transactions);
+
+  void deposit(double amount) {
+    if (amount <= 0) throw ArgumentError('Amount must be positive.');
+    _balance += amount;
+    _transactions.add('+\$${amount.toStringAsFixed(2)}');
+  }
+
+  void withdraw(double amount) {
+    if (amount > _balance) throw StateError('Insufficient funds.');
+    _balance -= amount;
+    _transactions.add('-\$${amount.toStringAsFixed(2)}');
+  }
+}
+```</div>
+  <div slot="csharp">```csharp
+public class BankAccount
+{
+    public string AccountId { get; }
+    public decimal Balance { get; private set; }
+    // private set = class can mutate, outside world cannot
+
+    private readonly List<string> _transactions = new();
+    public IReadOnlyList<string> Transactions => _transactions;
+    // expose as read-only view — callers cannot Add() to it
+
+    public BankAccount(string accountId, decimal initialBalance)
+    {
+        AccountId = accountId;
+        Balance = initialBalance;
+    }
+
+    public void Deposit(decimal amount)
+    {
+        if (amount <= 0) throw new ArgumentException("Amount must be positive.");
+        Balance += amount;
+        _transactions.Add($"+{amount:C}");
+    }
+
+    public void Withdraw(decimal amount)
+    {
+        if (amount > Balance) throw new InvalidOperationException("Insufficient funds.");
+        Balance -= amount;
+        _transactions.Add($"-{amount:C}");
+    }
+}
+```</div>
+</CodeComparison>
+
+## Property Patterns You Will See Constantly
+
+### Read-only via constructor only
+```csharp
+public string Id { get; }  // Only settable in the constructor body
+```
+
+### Read-only with default
+```csharp
+public DateTime CreatedAt { get; } = DateTime.UtcNow;
+```
+
+### Init-only (object initializer friendly)
+```csharp
+public string Name { get; init; }
+```
+
+### Read-write with default
+```csharp
+public bool IsActive { get; set; } = true;
+```
+
+### Computed (no backing field)
+```csharp
+public string FullName => $"{FirstName} {LastName}";
+```
+
+### Lazily computed
+```csharp
+private string? _cachedValue;
+public string ExpensiveValue => _cachedValue ??= ComputeExpensiveValue();
+```
+
+<ConceptCallout type="tip">
+When designing a class, ask yourself: should callers be able to set this? If yes, `{ get; set; }`. If only at construction, `{ get; init; }` or just `{ get; }`. If only the class itself, `{ get; private set; }`. If it's computed, `=> expression`. This decision tree covers 95% of cases.
+</ConceptCallout>
+
+## Properties in Interfaces and Abstract Classes
+
+Properties can be declared in interfaces and abstract classes:
+
+```csharp
+public interface IShape
+{
+    double Area { get; }       // implementors must provide a getter
+    double Perimeter { get; }  // implementors must provide a getter
+    string Name { get; set; }  // implementors must provide get and set
+}
+
+public abstract class Shape : IShape
+{
+    public abstract double Area { get; }
+    public abstract double Perimeter { get; }
+    public string Name { get; set; } = string.Empty;
+}
+```
+
+<ExerciseBlock>
+**Exercise: Design a Temperature Class**
+
+Design a `Temperature` class with the following requirements:
+
+1. Store temperature in Celsius internally as a `private` field.
+2. Expose `Celsius` as a property with validation (cannot be below -273.15).
+3. Expose `Fahrenheit` as a computed property that converts from Celsius (F = C × 9/5 + 32). It should also have a setter that converts Fahrenheit to Celsius and stores it.
+4. Expose `Kelvin` as a read-only computed property (K = C + 273.15).
+5. Add an `IsAbsoluteZero` computed property.
+6. Add a `Unit` property using `init` that stores a `string` ("metric" or "imperial") and cannot be changed after construction.
+
+Write the complete class. Then write a usage example that creates a Temperature from Fahrenheit, reads all properties, and attempts (but fails) to reassign `Unit`.
+</ExerciseBlock>
+
+## Key Takeaways
+
+- C# distinguishes fields (raw storage) from properties (accessor pairs). Never make public fields.
+- Auto-properties `{ get; set; }` are the most common form — the compiler generates the backing field.
+- `init` creates write-once properties that work with object initializer syntax (C# 9).
+- `{ get; private set; }` exposes read access publicly while restricting write to the class.
+- Expression-bodied `=>` syntax is idiomatic for computed properties.
+- Properties can carry validation, transformation, and lazy-loading logic.

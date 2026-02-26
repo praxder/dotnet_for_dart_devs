@@ -1,0 +1,248 @@
+---
+title: "Testing ASP.NET Core APIs"
+day: 85
+week: 17
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "flutter_test, mockito, integration tests"
+csharpConcept: "xUnit, WebApplicationFactory, integration tests, Moq, TestContainers"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Testing .NET APIs has two primary forms: unit tests (fast, isolated, mock dependencies) and integration tests (test the real HTTP stack). Both are essential, and ASP.NET Core makes integration testing remarkably easy with `WebApplicationFactory`.
+
+## xUnit Fundamentals
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: test package
+  import 'package:test/test.dart';
+  import 'package:mockito/mockito.dart';
+
+  void main() {
+    group('OrderService', () {
+      late MockOrderRepository mockRepo;
+      late OrderService service;
+
+      setUp(() {
+        mockRepo = MockOrderRepository();
+        service = OrderService(mockRepo);
+      });
+
+      test('places order correctly', () async {
+        when(mockRepo.save(any)).thenAnswer((_) async {});
+        await service.placeOrder(testOrder);
+        verify(mockRepo.save(testOrder)).called(1);
+      });
+    });
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: xUnit + Moq
+  public class OrderServiceTests
+  {
+      private readonly Mock<IOrderRepository> _mockRepo;
+      private readonly Mock<IEmailSender> _mockEmail;
+      private readonly OrderService _sut;  // System Under Test
+
+      public OrderServiceTests()  // xUnit calls this per test (like setUp)
+      {
+          _mockRepo = new Mock<IOrderRepository>();
+          _mockEmail = new Mock<IEmailSender>();
+          _sut = new OrderService(_mockRepo.Object, _mockEmail.Object);
+      }
+
+      [Fact]
+      public async Task PlaceOrderAsync_ValidOrder_SavesAndSendsEmail()
+      {
+          // Arrange
+          var order = new Order { CustomerId = "CUST-1", Total = 99.99m };
+          _mockRepo.Setup(r => r.AddAsync(It.IsAny<Order>())).Returns(Task.CompletedTask);
+          _mockEmail.Setup(e => e.SendConfirmationAsync(It.IsAny<string>())).Returns(Task.CompletedTask);
+
+          // Act
+          await _sut.PlaceOrderAsync(order);
+
+          // Assert
+          _mockRepo.Verify(r => r.AddAsync(order), Times.Once);
+          _mockEmail.Verify(e => e.SendConfirmationAsync(order.CustomerEmail), Times.Once);
+      }
+
+      [Theory]
+      [InlineData(-1)]
+      [InlineData(0)]
+      public async Task PlaceOrderAsync_InvalidTotal_ThrowsArgumentException(decimal total)
+      {
+          var order = new Order { Total = total };
+          await Assert.ThrowsAsync<ArgumentException>(() => _sut.PlaceOrderAsync(order));
+      }
+  }
+  ```
+  </div>
+</CodeComparison>
+
+## WebApplicationFactory — Integration Tests
+
+```csharp
+// No need to run the server — WebApplicationFactory hosts the app in-memory
+public class OrdersApiTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+
+    public OrdersApiTests(WebApplicationFactory<Program> factory)
+    {
+        // Customize the test app — override services for testing
+        _client = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                // Remove real repository, add test fake
+                services.RemoveAll<IOrderRepository>();
+                services.AddSingleton<IOrderRepository, FakeOrderRepository>();
+
+                // Override config for tests
+                services.Configure<EmailSettings>(opts => opts.SmtpHost = "test");
+            });
+        }).CreateClient();
+    }
+
+    [Fact]
+    public async Task GetOrders_ReturnsOk()
+    {
+        var response = await _client.GetAsync("/api/orders");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var orders = await response.Content.ReadFromJsonAsync<List<OrderDto>>();
+        Assert.NotNull(orders);
+    }
+
+    [Fact]
+    public async Task CreateOrder_ValidRequest_Returns201()
+    {
+        var request = new CreateOrderRequest
+        {
+            CustomerId = "CUST-1",
+            Lines = [new OrderLine("PROD-1", 29.99m, 2)]
+        };
+
+        var response = await _client.PostAsJsonAsync("/api/orders", request);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.NotNull(response.Headers.Location);
+
+        var order = await response.Content.ReadFromJsonAsync<OrderDto>();
+        Assert.NotNull(order);
+        Assert.Equal("CUST-1", order.CustomerId);
+    }
+}
+```
+
+## Testing with Authentication
+
+```csharp
+// Add auth to test client
+public class AuthorizedApiTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+
+    public AuthorizedApiTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                // Replace JWT auth with always-succeed test auth
+                services.AddAuthentication("Test")
+                    .AddScheme<AuthenticationSchemeOptions, TestAuthHandler>("Test", _ => { });
+            });
+        }).CreateClient();
+
+        // Add auth header
+        _client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Test");
+    }
+}
+
+// Test auth handler — always authenticates as test user
+public class TestAuthHandler(
+    IOptionsMonitor<AuthenticationSchemeOptions> options,
+    ILoggerFactory logger, UrlEncoder encoder)
+    : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
+{
+    protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+    {
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, "test-user-id"),
+            new Claim(ClaimTypes.Name, "Test User"),
+            new Claim(ClaimTypes.Role, "Admin"),
+        };
+        var identity = new ClaimsIdentity(claims, "Test");
+        var principal = new ClaimsPrincipal(identity);
+        var ticket = new AuthenticationTicket(principal, "Test");
+
+        return Task.FromResult(AuthenticateResult.Success(ticket));
+    }
+}
+```
+
+## TestContainers — Real Database in Tests
+
+```bash
+dotnet add package Testcontainers.PostgreSql  # or .SqlServer, .Redis, etc.
+```
+
+```csharp
+// Spin up a real PostgreSQL container for integration tests
+public class DatabaseIntegrationTests : IAsyncLifetime
+{
+    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
+        .WithImage("postgres:16-alpine")
+        .WithDatabase("testdb")
+        .WithUsername("test")
+        .WithPassword("test")
+        .Build();
+
+    public async Task InitializeAsync()
+    {
+        await _postgres.StartAsync();
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _postgres.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task OrderRepository_AddAndRetrieve_Works()
+    {
+        var connectionString = _postgres.GetConnectionString();
+        await using var context = CreateDbContext(connectionString);
+        await context.Database.MigrateAsync();
+
+        var repo = new OrderRepository(context);
+        var order = new Order { CustomerId = "CUST-1", Total = 99m };
+        await repo.AddAsync(order);
+
+        var retrieved = await repo.GetByIdAsync(order.Id);
+        Assert.NotNull(retrieved);
+        Assert.Equal(order.CustomerId, retrieved.CustomerId);
+    }
+}
+```
+
+<ExerciseBlock>
+1. Write unit tests for a `PricingService` with methods `CalculateTotal(Order order)` and `ApplyDiscount(Order order, Coupon coupon)`. Use `[Theory]` with `[InlineData]` to test multiple discount scenarios and edge cases.
+2. Write integration tests for the Blog API from Day 80: test all CRUD endpoints, test that unauthenticated requests to protected endpoints return 401, test that authors can't edit other users' posts (should return 403).
+3. Use TestContainers to run integration tests against a real SQLite database: set up the schema with EF migrations in `InitializeAsync`, run 5 CRUD tests, then tear down. Verify tests are fully isolated (each test gets a fresh database).
+</ExerciseBlock>

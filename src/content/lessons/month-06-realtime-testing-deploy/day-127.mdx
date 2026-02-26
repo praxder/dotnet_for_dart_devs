@@ -1,0 +1,276 @@
+---
+title: "Domain-Driven Design: Bounded Contexts and Aggregates"
+day: 127
+week: 26
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "domain modeling in Dart, feature-first folder structure"
+csharpConcept: "DDD bounded contexts, aggregates, domain events, event storming, domain services"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Domain-Driven Design (DDD) is a set of patterns for modeling complex business domains. You've already applied several DDD tactical patterns (value objects, owned entities, CQRS). This lesson covers the strategic patterns — how to structure large systems.
+
+## Bounded Contexts — Drawing Clear Boundaries
+
+```
+# Blog platform — multiple bounded contexts
+
+┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
+│   Content Context   │  │   Identity Context  │  │  Analytics Context  │
+│                     │  │                     │  │                     │
+│  Post (root)        │  │  User (root)        │  │  PageView           │
+│  Comment            │  │  Role               │  │  SearchQuery        │
+│  Tag                │  │  Permission         │  │  Engagement         │
+│                     │  │                     │  │                     │
+│  Author = User ref  │  │  Author is User     │  │  Author = User ref  │
+└─────────────────────┘  └─────────────────────┘  └─────────────────────┘
+         │                         │                         │
+         └──────────── domain events ─────────────────────────┘
+
+Each context has its own:
+  - Entities (same word may mean different things)
+  - Database tables (or schema)
+  - API routes
+  - Team ownership
+```
+
+## Aggregates — Consistency Boundaries
+
+```csharp
+// An Aggregate is a cluster of entities treated as a unit
+// Only the Aggregate Root can be accessed from outside
+// All changes go through the root — ensures invariants are maintained
+
+public class Order  // AGGREGATE ROOT
+{
+    private readonly List<OrderLine> _lines = [];
+    private readonly List<IDomainEvent> _domainEvents = [];
+
+    public int Id { get; private set; }
+    public OrderStatus Status { get; private set; } = OrderStatus.Draft;
+    public Money Total { get; private set; } = Money.Zero("USD");
+
+    // Read-only external view of lines
+    public IReadOnlyList<OrderLine> Lines => _lines.AsReadOnly();
+    public IReadOnlyList<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+
+    // PROTECTED: only Order can create lines
+    private Order() { }  // for EF Core
+
+    public static Order Create(int customerId)
+    {
+        var order = new Order { CustomerId = customerId };
+        order.RaiseEvent(new OrderCreated(order.Id, customerId));
+        return order;
+    }
+
+    // Business logic lives on the aggregate root
+    public void AddLine(Product product, int quantity)
+    {
+        if (Status != OrderStatus.Draft)
+            throw new DomainException("Cannot modify a submitted order");
+
+        if (quantity <= 0)
+            throw new DomainException("Quantity must be positive");
+
+        var existing = _lines.FirstOrDefault(l => l.ProductId == product.Id);
+        if (existing is not null)
+        {
+            existing.IncreaseQuantity(quantity);
+        }
+        else
+        {
+            _lines.Add(new OrderLine(product.Id, product.Name, product.Price, quantity));
+        }
+
+        RecalculateTotal();
+    }
+
+    public void Submit()
+    {
+        if (!_lines.Any())
+            throw new DomainException("Cannot submit an empty order");
+
+        Status = OrderStatus.Submitted;
+        RaiseEvent(new OrderSubmitted(Id, CustomerId, Total, DateTime.UtcNow));
+    }
+
+    private void RecalculateTotal()
+        => Total = new Money(_lines.Sum(l => l.Subtotal.Amount), "USD");
+
+    protected void RaiseEvent(IDomainEvent @event)
+        => _domainEvents.Add(@event);
+
+    public void ClearEvents() => _domainEvents.Clear();
+}
+
+// Order Line is NOT accessible directly — only through Order
+public class OrderLine
+{
+    internal OrderLine(int productId, string productName, Money unitPrice, int quantity)
+    {
+        ProductId = productId; ProductName = productName;
+        UnitPrice = unitPrice; Quantity = quantity;
+    }
+
+    public int ProductId { get; private set; }
+    public string ProductName { get; private set; } = "";
+    public Money UnitPrice { get; private set; } = null!;
+    public int Quantity { get; private set; }
+    public Money Subtotal => new(UnitPrice.Amount * Quantity, UnitPrice.Currency);
+
+    internal void IncreaseQuantity(int additional) => Quantity += additional;
+}
+```
+
+## Domain Events — Communicating Between Contexts
+
+```csharp
+// Domain events express what happened, not what to do about it
+// Handlers (in same or different bounded contexts) react to events
+
+public interface IDomainEvent { DateTime OccurredAt { get; } }
+
+public record OrderSubmitted(
+    int OrderId,
+    int CustomerId,
+    Money Total,
+    DateTime OccurredAt) : IDomainEvent;
+
+public record PostPublished(
+    int PostId,
+    string Slug,
+    int AuthorId,
+    DateTime OccurredAt) : IDomainEvent;
+
+// Dispatch domain events after saving:
+public class AppDbContext : DbContext
+{
+    private readonly IMediator _mediator;
+
+    public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+    {
+        var result = await base.SaveChangesAsync(ct);
+
+        // Collect and dispatch domain events
+        var domainEvents = ChangeTracker
+            .Entries<AggregateRoot>()
+            .SelectMany(e => e.Entity.DomainEvents)
+            .ToList();
+
+        foreach (var entry in ChangeTracker.Entries<AggregateRoot>())
+            entry.Entity.ClearEvents();
+
+        foreach (var @event in domainEvents)
+            await _mediator.Publish(@event, ct);
+
+        return result;
+    }
+}
+```
+
+## Domain Services — Logic That Doesn't Fit an Entity
+
+```csharp
+// Some domain logic doesn't belong on a single entity
+// Domain services operate on multiple aggregates or require external data
+
+public class PricingService(
+    IProductPriceRepository prices,
+    IDiscountRepository discounts,
+    ICustomerRepository customers)
+{
+    public async Task<Money> CalculatePriceAsync(
+        int productId,
+        int customerId,
+        int quantity,
+        CancellationToken ct)
+    {
+        var basePrice = await prices.GetCurrentPriceAsync(productId, ct);
+        var customer = await customers.GetAsync(customerId, ct);
+
+        // Loyalty discount (5% per year, max 20%)
+        var loyaltyDiscount = Math.Min(customer.YearsAsMember * 5m, 20m);
+
+        // Volume discount
+        var volumeDiscount = quantity >= 10 ? 10m : quantity >= 5 ? 5m : 0m;
+
+        // Best discount applies (not stacked)
+        var discount = Math.Max(loyaltyDiscount, volumeDiscount);
+
+        // Active promotional codes
+        var promo = await discounts.GetActivePromoAsync(productId, ct);
+        if (promo is not null && promo.Discount > discount)
+            discount = promo.Discount;
+
+        return new Money(basePrice.Amount * quantity * (1 - discount / 100), "USD");
+    }
+}
+```
+
+## Specification Pattern — Reusable Query Logic
+
+```csharp
+// Encapsulate query criteria as objects — reuse across queries and in-memory filtering
+
+public abstract class Specification<T>
+{
+    public abstract Expression<Func<T, bool>> ToExpression();
+
+    public bool IsSatisfiedBy(T entity)
+        => ToExpression().Compile()(entity);
+
+    public Specification<T> And(Specification<T> other)
+        => new AndSpecification<T>(this, other);
+
+    public Specification<T> Or(Specification<T> other)
+        => new OrSpecification<T>(this, other);
+}
+
+public class PublishedPostSpecification : Specification<Post>
+{
+    public override Expression<Func<Post, bool>> ToExpression()
+        => post => post.Status == PostStatus.Published && !post.IsDeleted;
+}
+
+public class PostByTagSpecification(string tagSlug) : Specification<Post>
+{
+    public override Expression<Func<Post, bool>> ToExpression()
+        => post => post.Tags.Any(t => t.Slug == tagSlug);
+}
+
+public class RecentPostSpecification(int days) : Specification<Post>
+{
+    public override Expression<Func<Post, bool>> ToExpression()
+        => post => post.PublishedAt >= DateTime.UtcNow.AddDays(-days);
+}
+
+// Usage — compose specs:
+var published = new PublishedPostSpecification();
+var recent = new RecentPostSpecification(30);
+var byTag = new PostByTagSpecification("dotnet");
+
+var spec = published.And(recent).And(byTag);
+
+var posts = await db.Posts
+    .Where(spec.ToExpression())
+    .ToListAsync();
+```
+
+<ConceptCallout type="tip" title="DDD as a Toolbox, Not a Religion">
+Don't apply all DDD patterns to everything. Use them where they add clarity: (1) Value Objects when you have concepts defined by their values (Money, Address), (2) Aggregates when you have business rules across multiple entities, (3) Domain Events when business actions need to trigger reactions in other parts of the system, (4) Specifications when query logic is reused in multiple places. A simple CRUD app doesn't need aggregates.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Model an `Order` aggregate for an e-commerce system. The invariants: total always equals sum of lines, can't add items to a submitted order, can't submit with zero items, can't have duplicate product lines (increase quantity instead). Write unit tests that verify each invariant by trying to violate it.
+2. Implement domain events for the order: `OrderCreated`, `ItemAdded`, `OrderSubmitted`, `OrderCancelled`. After `OrderSubmitted`, dispatch `OrderSubmitted` event which triggers: inventory reservation, payment initiation, and confirmation email (three separate notification handlers).
+3. Apply the Specification pattern to your blog API: implement `PublishedPostSpec`, `PostByAuthorSpec`, `PostByTagSpec`, `FeaturedPostSpec`. Combine them in query handlers using `.And()` / `.Or()`. Write tests verifying the specs work both with EF Core (database) and in-memory (list filtering).
+</ExerciseBlock>

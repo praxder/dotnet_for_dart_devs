@@ -1,0 +1,243 @@
+---
+title: "Message Queues with Azure Service Bus"
+day: 122
+week: 25
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "event-driven architecture, pub/sub in Dart"
+csharpConcept: "Azure Service Bus, RabbitMQ, MassTransit, publisher/consumer, dead letter queue"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Message queues decouple services — the sender doesn't wait for the receiver. This enables resilience (the receiver can be down), scaling (multiple consumers process in parallel), and event-driven architectures. Azure Service Bus and RabbitMQ are the main options.
+
+## Why Message Queues?
+
+```
+Without queue:
+  Blog API → EmailService.SendAsync(email) → waits 500ms → continues
+
+With queue:
+  Blog API → queue.PublishAsync(EmailRequested) → returns immediately (5ms)
+  EmailWorker (separate process) → reads from queue → sends email → acks
+
+Benefits:
+  - API is faster and more resilient
+  - Email failures don't fail the API
+  - Email service can be scaled independently
+  - Messages are stored durably — no lost emails on crash
+```
+
+## MassTransit — Unified Abstraction
+
+```csharp
+// MassTransit works with RabbitMQ, Azure Service Bus, Amazon SQS, in-memory
+// dotnet add package MassTransit.RabbitMQ
+// OR: dotnet add package MassTransit.Azure.ServiceBus.Core
+
+// Messages — plain records (no inheritance required)
+public record OrderPlaced(
+    int OrderId,
+    int CustomerId,
+    decimal Total,
+    DateTime PlacedAt);
+
+public record SendOrderConfirmation(
+    int OrderId,
+    string CustomerEmail,
+    string CustomerName);
+
+// Producer — any service can publish
+public class OrderService(IBus bus, AppDbContext db)
+{
+    public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request, CancellationToken ct)
+    {
+        var order = /* ... create order ... */;
+        db.Orders.Add(order);
+        await db.SaveChangesAsync(ct);
+
+        // Publish message — fire and forget
+        await bus.Publish(new OrderPlaced(
+            order.Id, order.CustomerId, order.Total, DateTime.UtcNow));
+
+        return order;
+    }
+}
+
+// Consumer — separate process or background service
+public class OrderPlacedConsumer(IEmailService email, AppDbContext db)
+    : IConsumer<OrderPlaced>
+{
+    public async Task Consume(ConsumeContext<OrderPlaced> context)
+    {
+        var customer = await db.Customers.FindAsync(context.Message.CustomerId);
+        await email.SendOrderConfirmationAsync(
+            customer!.Email, context.Message.OrderId, context.Message.Total);
+    }
+}
+```
+
+## Setup with RabbitMQ
+
+```csharp
+// Run RabbitMQ locally:
+// docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672
+//   rabbitmq:3-management
+// Dashboard: http://localhost:15672 (guest/guest)
+
+// Producer service (Blog API):
+builder.Services.AddMassTransit(x =>
+{
+    x.UsingRabbitMq((ctx, cfg) =>
+    {
+        cfg.Host("localhost", "/", h =>
+        {
+            h.Username("guest");
+            h.Password("guest");
+        });
+        cfg.ConfigureEndpoints(ctx);
+    });
+});
+
+// Consumer service (Email Worker — separate project):
+builder.Services.AddMassTransit(x =>
+{
+    x.AddConsumer<OrderPlacedConsumer>();
+    x.AddConsumer<SendOrderConfirmationConsumer>();
+
+    x.UsingRabbitMq((ctx, cfg) =>
+    {
+        cfg.Host("localhost", "/", h =>
+        {
+            h.Username("guest");
+            h.Password("guest");
+        });
+        cfg.ReceiveEndpoint("order-placed", e =>
+        {
+            e.ConfigureConsumer<OrderPlacedConsumer>(ctx);
+            // Retry failed messages before dead-lettering
+            e.UseMessageRetry(r => r.Exponential(5,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(60),
+                TimeSpan.FromSeconds(5)));
+        });
+    });
+});
+```
+
+## Azure Service Bus
+
+```csharp
+// Azure Service Bus: managed, fully durable, enterprise features
+// Queues: one consumer per message
+// Topics with subscriptions: fan-out (one message → multiple consumers)
+
+builder.Services.AddMassTransit(x =>
+{
+    x.AddConsumer<OrderPlacedConsumer>();
+
+    x.UsingAzureServiceBus((ctx, cfg) =>
+    {
+        cfg.Host(builder.Configuration["ServiceBus:ConnectionString"]);
+
+        // Configure topic subscriptions (fan-out)
+        cfg.SubscriptionEndpoint<OrderPlaced>(
+            "email-service",  // subscription name
+            e =>
+            {
+                e.ConfigureConsumer<OrderPlacedConsumer>(ctx);
+                e.MaxDeliveryCount = 5;  // retry count before dead-letter
+            });
+    });
+});
+
+// Publish to a topic (all subscriptions receive it):
+await bus.Publish(new OrderPlaced(orderId, customerId, total, DateTime.UtcNow));
+// EmailService subscription gets it, InventoryService subscription gets it, etc.
+```
+
+## Request/Response Over Service Bus
+
+```csharp
+// Async request/response — like HTTP but reliable and decoupled
+public record CheckInventoryRequest(int ProductId, int Quantity);
+public record CheckInventoryResponse(bool Available, int CurrentStock);
+
+// Requester:
+var client = bus.CreateRequestClient<CheckInventoryRequest>();
+var response = await client.GetResponse<CheckInventoryResponse>(
+    new CheckInventoryRequest(productId, quantity),
+    timeout: RequestTimeout.After(s: 5));
+
+if (!response.Message.Available)
+    throw new InsufficientStockException();
+
+// Responder (inventory service):
+public class InventoryCheckConsumer(AppDbContext db)
+    : IConsumer<CheckInventoryRequest>
+{
+    public async Task Consume(ConsumeContext<CheckInventoryRequest> context)
+    {
+        var product = await db.Products.FindAsync(context.Message.ProductId);
+        await context.RespondAsync(new CheckInventoryResponse(
+            Available: product?.StockQuantity >= context.Message.Quantity,
+            CurrentStock: product?.StockQuantity ?? 0));
+    }
+}
+```
+
+## Dead Letter Queue Monitoring
+
+```csharp
+// Messages that fail all retries go to the dead letter queue (DLQ)
+// Monitor and reprocess them
+
+// Background service to monitor DLQ:
+public class DeadLetterMonitorService(
+    ServiceBusClient serviceBusClient,
+    ILogger<DeadLetterMonitorService> logger)
+    : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Get the DLQ receiver
+        var receiver = serviceBusClient.CreateReceiver(
+            "order-placed",
+            "email-service",
+            new ServiceBusReceiverOptions
+            {
+                SubQueue = SubQueue.DeadLetter
+            });
+
+        await foreach (var message in receiver.ReceiveMessagesAsync(stoppingToken))
+        {
+            logger.LogError(
+                "Dead-lettered message: {MessageId}, Reason: {Reason}, Body: {Body}",
+                message.MessageId,
+                message.DeadLetterReason,
+                message.Body);
+
+            // Alert ops team or write to monitoring
+            // Optionally: reprocess or discard
+            await receiver.CompleteMessageAsync(message, stoppingToken);
+        }
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Queues vs Direct HTTP">
+Use message queues when: (1) the sender should be decoupled from receiver availability, (2) you need reliable delivery with retries, (3) multiple services need to react to one event, (4) you have bursty load and want to smooth it out (queue absorbs the burst). Use direct HTTP when: you need a synchronous response, latency is critical, or the operation is simple CRUD. Message queues add complexity — don't use them for everything.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Set up MassTransit with RabbitMQ (run via docker-compose). Implement `OrderPlaced` message: blog API publishes when an order is created, a separate console app consumer sends a welcome email (log it). Run both simultaneously and verify the email is logged without the API waiting.
+2. Implement a saga: when `UserRegistered` is published, a saga coordinates: (a) send welcome email, (b) create user profile, (c) enroll in onboarding sequence. If any step fails, the saga retries that step. Use MassTransit's saga state machine.
+3. Add dead letter queue monitoring: any message that fails 5 times should be moved to the DLQ and an alert logged. Simulate a consumer failure (throw an exception) and verify messages end up in the DLQ after 5 attempts with exponential backoff.
+</ExerciseBlock>

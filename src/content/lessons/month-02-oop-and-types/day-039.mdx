@@ -1,0 +1,244 @@
+---
+title: "IEnumerable<T>: The Foundation of LINQ"
+day: 39
+week: 8
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Iterable<T>, Stream<T>, generator functions"
+csharpConcept: "IEnumerable<T>, IEnumerator<T>, yield return, lazy evaluation"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+`IEnumerable<T>` is the interface that powers everything in .NET collections. Every `List<T>`, array, `HashSet<T>`, and LINQ query implements it. Understanding it deeply means understanding how LINQ's lazy evaluation works and how to write memory-efficient iterators.
+
+## The Interface
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart's Iterable<T> is the equivalent
+  Iterable<int> evens = [1, 2, 3, 4, 5, 6].where((n) => n.isEven);
+
+  // Iterator protocol
+  var iter = evens.iterator;
+  while (iter.moveNext()) {
+    print(iter.current);
+  }
+
+  // Generator function (sync*)
+  Iterable<int> fibonacci() sync* {
+    int a = 0, b = 1;
+    while (true) {
+      yield a;
+      (a, b) = (b, a + b);
+    }
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // IEnumerable<T> is the C# equivalent of Dart's Iterable<T>
+  IEnumerable<int> evens = new[] { 1, 2, 3, 4, 5, 6 }.Where(n => n % 2 == 0);
+
+  // IEnumerator<T> protocol
+  using var enumerator = evens.GetEnumerator();
+  while (enumerator.MoveNext())
+  {
+      Console.WriteLine(enumerator.Current);
+  }
+
+  // yield return — iterator method (C#'s sync* equivalent)
+  IEnumerable<int> Fibonacci()
+  {
+      int a = 0, b = 1;
+      while (true)
+      {
+          yield return a;
+          (a, b) = (b, a + b);
+      }
+  }
+  ```
+  </div>
+</CodeComparison>
+
+## `yield return` — Iterator Methods
+
+C#'s `yield return` (like Dart's `sync*`) creates lazy sequences without materializing them in memory:
+
+```csharp
+// Generates values on-demand — no list ever created
+IEnumerable<int> Range(int start, int end, int step = 1)
+{
+    for (int i = start; i < end; i += step)
+        yield return i;
+}
+
+// yield break — stops iteration early
+IEnumerable<string> TakeUntilEmpty(IEnumerable<string> source)
+{
+    foreach (var item in source)
+    {
+        if (string.IsNullOrEmpty(item))
+            yield break;  // stops the iterator
+        yield return item;
+    }
+}
+
+// Pipeline of lazy operations — nothing executes until foreach
+var result = Range(1, 1_000_000)
+    .Where(n => n % 3 == 0)      // lazy
+    .Select(n => n * n)          // lazy
+    .Take(5);                    // lazy
+
+foreach (var n in result)        // EXECUTES NOW
+    Console.WriteLine(n);        // 9, 36, 81, 144, 225
+```
+
+<ConceptCallout type="tip" title="Lazy Evaluation — Nothing Runs Until Foreach">
+LINQ operations like `Where`, `Select`, `OrderBy` return `IEnumerable<T>` objects that represent *how to compute* results. The actual computation only happens when you iterate (with `foreach`, `.ToList()`, `.First()`, etc.). This is identical to Dart's `Iterable` laziness.
+</ConceptCallout>
+
+## Implementing IEnumerable\<T\>
+
+You can make any class iterable by implementing `IEnumerable<T>`:
+
+```csharp
+public class DateRange : IEnumerable<DateTime>
+{
+    private readonly DateTime _start;
+    private readonly DateTime _end;
+
+    public DateRange(DateTime start, DateTime end)
+    {
+        _start = start;
+        _end = end;
+    }
+
+    // Using yield return — simplest approach
+    public IEnumerator<DateTime> GetEnumerator()
+    {
+        for (var d = _start; d <= _end; d = d.AddDays(1))
+            yield return d;
+    }
+
+    // Non-generic IEnumerable (required boilerplate)
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
+// Now it works with foreach and all LINQ methods
+var week = new DateRange(DateTime.Today, DateTime.Today.AddDays(6));
+foreach (var day in week)
+    Console.WriteLine(day.DayOfWeek);
+
+// Works with LINQ
+var weekdays = week.Where(d => d.DayOfWeek != DayOfWeek.Saturday
+                             && d.DayOfWeek != DayOfWeek.Sunday);
+```
+
+## Lazy vs Eager — The Critical Distinction
+
+```csharp
+var numbers = new List<int> { 1, 2, 3, 4, 5 };
+
+// LAZY — query is re-evaluated each time
+IEnumerable<int> lazy = numbers.Where(n => n > 2);
+numbers.Add(6);
+Console.WriteLine(lazy.Count()); // 4! (includes 6, added after query)
+
+// EAGER — snapshot at this moment
+List<int> eager = numbers.Where(n => n > 2).ToList();
+numbers.Add(7);
+Console.WriteLine(eager.Count); // still 4 (snapshot taken before Add)
+
+// Multiple enumeration problem
+IEnumerable<int> query = numbers.Where(n => {
+    Console.WriteLine($"Checking {n}");  // runs TWICE below
+    return n > 2;
+});
+
+int count = query.Count();    // runs the filter once
+int first = query.First();    // runs the filter AGAIN from scratch
+
+// Fix: materialize once
+var materialized = query.ToList();  // runs filter once
+int count2 = materialized.Count;    // free (already computed)
+int first2 = materialized.First();  // free (already computed)
+```
+
+<ConceptCallout type="gotcha" title="Multiple Enumeration Is a Hidden Perf Bug">
+If you enumerate an `IEnumerable<T>` twice (e.g., `Count()` then `First()`), the whole pipeline reruns each time. Resharper and Rider have a "Possible multiple enumeration" warning for this. Fix it by calling `.ToList()` or `.ToArray()` to materialize once.
+</ConceptCallout>
+
+## Useful IEnumerable Tricks
+
+```csharp
+// Infinite sequence + Take
+IEnumerable<int> NaturalNumbers()
+{
+    int n = 1;
+    while (true) yield return n++;
+}
+
+var firstHundred = NaturalNumbers().Take(100).ToList();
+
+// Interleave two sequences
+IEnumerable<T> Interleave<T>(IEnumerable<T> a, IEnumerable<T> b)
+{
+    using var ea = a.GetEnumerator();
+    using var eb = b.GetEnumerator();
+    while (ea.MoveNext() && eb.MoveNext())
+    {
+        yield return ea.Current;
+        yield return eb.Current;
+    }
+}
+
+var result = Interleave(new[] { 1, 3, 5 }, new[] { 2, 4, 6 });
+// 1, 2, 3, 4, 5, 6
+
+// Chunk/batch (built-in .NET 6+)
+var data = Enumerable.Range(1, 10);
+foreach (var chunk in data.Chunk(3))
+    Console.WriteLine(string.Join(", ", chunk));
+// 1, 2, 3
+// 4, 5, 6
+// 7, 8, 9
+// 10
+```
+
+## `IAsyncEnumerable<T>` — Async Streams
+
+The async equivalent — like Dart's `Stream<T>` but pull-based:
+
+```csharp
+// Async generator — yield in async context
+async IAsyncEnumerable<string> ReadLinesAsync(string path)
+{
+    await using var stream = File.OpenRead(path);
+    using var reader = new StreamReader(stream);
+    while (await reader.ReadLineAsync() is string line)
+        yield return line;
+}
+
+// Consume with await foreach
+await foreach (var line in ReadLinesAsync("data.txt"))
+    Console.WriteLine(line);
+
+// With cancellation
+await foreach (var line in ReadLinesAsync("data.txt")
+    .WithCancellation(cancellationToken))
+    Console.WriteLine(line);
+```
+
+<ExerciseBlock>
+1. Write a `IEnumerable<T> Flatten<T>(IEnumerable<IEnumerable<T>> nested)` method using `yield return` that flattens one level of nesting without calling `.SelectMany()`.
+2. Implement a `IEnumerable<IReadOnlyList<T>> SlidingWindow<T>(IEnumerable<T> source, int size)` that yields overlapping windows: `[1,2,3,4,5]` with size 3 → `[1,2,3]`, `[2,3,4]`, `[3,4,5]`.
+3. Demonstrate the multiple-enumeration bug: create an `IEnumerable<int>` with a side-effect in the predicate (e.g., increment a counter), call `.Count()` then `.First()`, and print the counter to show it ran twice. Then fix it with `.ToList()`.
+</ExerciseBlock>

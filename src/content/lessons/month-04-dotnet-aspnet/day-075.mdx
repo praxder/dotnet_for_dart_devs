@@ -1,0 +1,271 @@
+---
+title: "Mini-Project: Full-Stack Console Tool"
+day: 75
+week: 15
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "Dart CLI tools, process management"
+csharpConcept: "System.CommandLine, DI, configuration, logging, NuGet packages"
+estimatedMinutes: 30
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This mini-project ties together Module 6: dependency injection, configuration, logging, NuGet packages, and the Generic Host — all in a well-structured console application. You'll build a CLI database health-check tool.
+
+## Project: `db-doctor` CLI Tool
+
+A command-line tool that connects to a database, runs health checks, reports results, and optionally repairs common issues.
+
+### Project Structure
+
+```
+db-doctor/
+├── db-doctor.csproj
+├── Program.cs               ← entry point + DI setup
+├── appsettings.json         ← connection strings, check config
+├── Commands/
+│   ├── CheckCommand.cs      ← run health checks
+│   └── ReportCommand.cs     ← generate report
+├── Checks/
+│   ├── IHealthCheck.cs      ← interface
+│   ├── ConnectionCheck.cs   ← can we connect?
+│   ├── TableCountCheck.cs   ← expected tables exist?
+│   └── IndexCheck.cs        ← missing indexes?
+├── Services/
+│   ├── ICheckOrchestrator.cs
+│   └── CheckOrchestrator.cs
+└── Models/
+    ├── CheckResult.cs
+    └── HealthReport.cs
+```
+
+### Add Dependencies
+
+```bash
+dotnet add package System.CommandLine --prerelease
+dotnet add package Microsoft.Data.Sqlite
+dotnet add package Serilog.Extensions.Hosting
+dotnet add package Serilog.Sinks.Console
+dotnet add package Spectre.Console  # beautiful terminal output
+```
+
+### Domain Models
+
+```csharp
+public enum CheckStatus { Passed, Warning, Failed }
+
+public record CheckResult(
+    string CheckName,
+    CheckStatus Status,
+    string Message,
+    TimeSpan Duration,
+    string? Detail = null);
+
+public record HealthReport(
+    DateTime RunAt,
+    string DatabaseName,
+    IReadOnlyList<CheckResult> Results)
+{
+    public int PassedCount => Results.Count(r => r.Status == CheckStatus.Passed);
+    public int WarningCount => Results.Count(r => r.Status == CheckStatus.Warning);
+    public int FailedCount => Results.Count(r => r.Status == CheckStatus.Failed);
+    public bool IsHealthy => FailedCount == 0;
+}
+```
+
+### Health Check Interface and Implementations
+
+```csharp
+public interface IHealthCheck
+{
+    string Name { get; }
+    Task<CheckResult> RunAsync(CancellationToken ct = default);
+}
+
+// Connection check
+public class ConnectionCheck : IHealthCheck
+{
+    private readonly string _connectionString;
+    private readonly ILogger<ConnectionCheck> _logger;
+
+    public string Name => "Database Connectivity";
+
+    public ConnectionCheck(IConfiguration config, ILogger<ConnectionCheck> logger)
+    {
+        _connectionString = config.GetConnectionString("Default")!;
+        _logger = logger;
+    }
+
+    public async Task<CheckResult> RunAsync(CancellationToken ct = default)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync(ct);
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            await cmd.ExecuteScalarAsync(ct);
+
+            sw.Stop();
+            _logger.LogDebug("Connection check passed in {Ms}ms", sw.ElapsedMilliseconds);
+
+            return new CheckResult(Name, CheckStatus.Passed,
+                $"Connected successfully in {sw.ElapsedMilliseconds}ms", sw.Elapsed);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            _logger.LogWarning(ex, "Connection check failed");
+            return new CheckResult(Name, CheckStatus.Failed,
+                "Failed to connect to database", sw.Elapsed, ex.Message);
+        }
+    }
+}
+
+// Table existence check
+public class TableExistenceCheck : IHealthCheck
+{
+    private readonly string _connectionString;
+    private readonly string[] _requiredTables;
+
+    public string Name => "Required Tables";
+
+    public TableExistenceCheck(IConfiguration config)
+    {
+        _connectionString = config.GetConnectionString("Default")!;
+        _requiredTables = config.GetSection("Checks:RequiredTables")
+            .Get<string[]>() ?? [];
+    }
+
+    public async Task<CheckResult> RunAsync(CancellationToken ct = default)
+    {
+        var sw = Stopwatch.StartNew();
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        var existingTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table'";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            existingTables.Add(reader.GetString(0));
+
+        var missing = _requiredTables.Where(t => !existingTables.Contains(t)).ToList();
+        sw.Stop();
+
+        return missing.Count == 0
+            ? new CheckResult(Name, CheckStatus.Passed,
+                $"All {_requiredTables.Length} required tables exist", sw.Elapsed)
+            : new CheckResult(Name, CheckStatus.Failed,
+                $"{missing.Count} required tables missing", sw.Elapsed,
+                $"Missing: {string.Join(", ", missing)}");
+    }
+}
+```
+
+### Orchestrator and Program
+
+```csharp
+public class CheckOrchestrator(
+    IEnumerable<IHealthCheck> checks,
+    ILogger<CheckOrchestrator> logger)
+{
+    public async Task<HealthReport> RunAllAsync(string dbName, CancellationToken ct = default)
+    {
+        logger.LogInformation("Running {Count} health checks", checks.Count());
+
+        var results = await Task.WhenAll(
+            checks.Select(check => check.RunAsync(ct)));
+
+        return new HealthReport(DateTime.UtcNow, dbName, results);
+    }
+}
+```
+
+```csharp
+// Program.cs
+using Serilog;
+using Spectre.Console;
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Warning()
+    .WriteTo.Console()
+    .CreateLogger();
+
+var builder = Host.CreateApplicationBuilder(args);
+builder.Logging.ClearProviders();
+builder.Logging.AddSerilog();
+
+// Register all health checks
+builder.Services.AddScoped<IHealthCheck, ConnectionCheck>();
+builder.Services.AddScoped<IHealthCheck, TableExistenceCheck>();
+builder.Services.AddScoped<CheckOrchestrator>();
+
+var host = builder.Build();
+
+// Run checks
+using var scope = host.Services.CreateScope();
+var orchestrator = scope.ServiceProvider.GetRequiredService<CheckOrchestrator>();
+var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+var report = await orchestrator.RunAllAsync("MyDatabase", cts.Token);
+
+// Display with Spectre.Console
+var table = new Table()
+    .AddColumn("Check")
+    .AddColumn("Status")
+    .AddColumn("Message")
+    .AddColumn("Duration");
+
+foreach (var result in report.Results)
+{
+    var statusStyle = result.Status switch
+    {
+        CheckStatus.Passed  => new Style(Color.Green),
+        CheckStatus.Warning => new Style(Color.Yellow),
+        CheckStatus.Failed  => new Style(Color.Red),
+        _                   => Style.Plain
+    };
+
+    table.AddRow(
+        new Markup(result.CheckName),
+        new Markup($"[{(result.Status == CheckStatus.Passed ? "green" : result.Status == CheckStatus.Warning ? "yellow" : "red")}]{result.Status}[/]"),
+        new Markup(result.Message),
+        new Markup($"{result.Duration.TotalMilliseconds:F0}ms"));
+}
+
+AnsiConsole.Write(table);
+AnsiConsole.WriteLine();
+AnsiConsole.MarkupLine(report.IsHealthy
+    ? "[bold green]✓ Database is healthy[/]"
+    : $"[bold red]✗ {report.FailedCount} check(s) failed[/]");
+
+return report.IsHealthy ? 0 : 1;
+```
+
+### appsettings.json
+
+```json
+{
+  "ConnectionStrings": {
+    "Default": "Data Source=myapp.db"
+  },
+  "Checks": {
+    "RequiredTables": ["users", "orders", "products", "sessions"]
+  }
+}
+```
+
+<ExerciseBlock>
+1. Add a `RowCountCheck` that reads expected row count ranges from config (e.g., `users: { min: 1, max: 10000 }`) and reports `Warning` when outside the expected range.
+2. Add a `--json` flag using `System.CommandLine` that outputs the report as JSON (`System.Text.Json`) instead of the Spectre.Console table — useful for CI/CD pipelines.
+3. Add a `--fix` flag that attempts to create missing tables (from a schema file defined in config). Log each fix attempt and report success/failure.
+4. Export the final report to a JSON file with timestamp in the filename, and display a "View report saved to: ..." message at the end.
+</ExerciseBlock>

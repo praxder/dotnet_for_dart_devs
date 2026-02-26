@@ -1,0 +1,280 @@
+---
+title: "Performance Monitoring and APM"
+day: 119
+week: 24
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Firebase Performance, Flutter DevTools"
+csharpConcept: "Application Insights, OpenTelemetry, Prometheus, Grafana, structured logging, distributed tracing"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+You can't improve what you can't measure. Production observability — logs, metrics, traces — is what lets you diagnose issues, track performance regressions, and understand user behavior in real systems.
+
+## The Three Pillars of Observability
+
+```
+Logs      → What happened? (events, errors, warnings)
+Metrics   → How is the system performing? (request rate, latency, error rate)
+Traces    → Why was this request slow? (which service/query took how long)
+```
+
+## OpenTelemetry — Vendor-Neutral Observability
+
+```csharp
+// OpenTelemetry is the standard — export to any backend (Jaeger, Prometheus, OTLP)
+// dotnet add package OpenTelemetry.Extensions.Hosting
+// dotnet add package OpenTelemetry.Instrumentation.AspNetCore
+// dotnet add package OpenTelemetry.Instrumentation.EntityFrameworkCore
+// dotnet add package OpenTelemetry.Exporter.Prometheus.AspNetCore
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing =>
+    {
+        tracing
+            .SetResourceBuilder(ResourceBuilder.CreateDefault()
+                .AddService(serviceName: "BlogApi", serviceVersion: "1.0.0"))
+            .AddAspNetCoreInstrumentation(options =>
+            {
+                options.RecordException = true;
+                options.Filter = ctx =>
+                    // Don't trace health checks
+                    !ctx.Request.Path.StartsWithSegments("/health");
+            })
+            .AddEntityFrameworkCoreInstrumentation(options =>
+            {
+                options.SetDbStatementForText = true;  // include SQL in traces
+            })
+            .AddHttpClientInstrumentation()
+            .AddSource("BlogApi.*")  // custom traces
+            .AddOtlpExporter(options =>
+                options.Endpoint = new Uri("http://jaeger:4317"));  // Jaeger
+    })
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddAspNetCoreInstrumentation()
+            .AddRuntimeInstrumentation()  // GC, thread pool, etc.
+            .AddMeter("BlogApi.Metrics")  // custom metrics
+            .AddPrometheusExporter();     // expose /metrics endpoint
+    });
+
+// Expose Prometheus metrics
+app.MapPrometheusScrapingEndpoint("/metrics").RequireAuthorization("Admin");
+```
+
+## Custom Metrics
+
+```csharp
+// Define meters and instruments
+public class BlogMetrics
+{
+    private readonly Counter<long> _postViews;
+    private readonly Histogram<double> _searchDuration;
+    private readonly UpDownCounter<long> _activeSessions;
+    private readonly ObservableGauge<int> _pendingComments;
+
+    public BlogMetrics(IMeterFactory meterFactory, AppDbContext db)
+    {
+        var meter = meterFactory.Create("BlogApi.Metrics");
+
+        _postViews = meter.CreateCounter<long>(
+            "blog.post.views",
+            unit: "{views}",
+            description: "Total post view count");
+
+        _searchDuration = meter.CreateHistogram<double>(
+            "blog.search.duration",
+            unit: "ms",
+            description: "Search query duration");
+
+        _activeSessions = meter.CreateUpDownCounter<long>(
+            "blog.active.sessions",
+            unit: "{sessions}");
+
+        // Observable: polled on demand
+        _pendingComments = meter.CreateObservableGauge<int>(
+            "blog.comments.pending",
+            () => db.Comments.Count(c => c.Status == CommentStatus.Pending),
+            unit: "{comments}");
+    }
+
+    public void RecordPostView(string slug, string? authorName)
+        => _postViews.Add(1,
+            new TagList
+            {
+                { "post.slug", slug },
+                { "author.name", authorName ?? "unknown" }
+            });
+
+    public IDisposable MeasureSearch(string query)
+        => new SearchTimer(_searchDuration, query);
+
+    private class SearchTimer(Histogram<double> histogram, string query) : IDisposable
+    {
+        private readonly Stopwatch _sw = Stopwatch.StartNew();
+        public void Dispose() =>
+            histogram.Record(_sw.Elapsed.TotalMilliseconds,
+                new TagList { { "query.length", query.Length } });
+    }
+}
+
+// Register and use:
+builder.Services.AddSingleton<BlogMetrics>();
+
+// In a query handler:
+public class GetPostHandler(AppDbContext db, BlogMetrics metrics) : ...
+{
+    public async Task<PostDetailDto?> Handle(GetPostQuery request, CancellationToken ct)
+    {
+        metrics.RecordPostView(request.Slug, null);
+        // ...
+    }
+}
+```
+
+## Custom Distributed Traces
+
+```csharp
+public class PostSearchService(AppDbContext db, BlogMetrics metrics)
+{
+    private static readonly ActivitySource Source = new("BlogApi.Search");
+
+    public async Task<List<PostSummaryDto>> SearchAsync(string query, CancellationToken ct)
+    {
+        // Create a span for this operation — visible in Jaeger/Zipkin
+        using var activity = Source.StartActivity("SearchPosts");
+        activity?.SetTag("search.query", query);
+        activity?.SetTag("search.query.length", query.Length);
+
+        using var timer = metrics.MeasureSearch(query);
+
+        try
+        {
+            var results = await db.Posts
+                .AsNoTracking()
+                .TagWith("SearchPosts")
+                .Where(p => p.Title.Contains(query) || p.Body.Contains(query))
+                .Select(p => new PostSummaryDto(p.Id, p.Title, p.Slug, p.Summary))
+                .Take(20)
+                .ToListAsync(ct);
+
+            activity?.SetTag("search.result.count", results.Count);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return results;
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.RecordException(ex);
+            throw;
+        }
+    }
+}
+```
+
+## Application Insights
+
+```csharp
+// Azure Application Insights: managed APM service
+// dotnet add package Microsoft.ApplicationInsights.AspNetCore
+
+builder.Services.AddApplicationInsightsTelemetry(options =>
+{
+    options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+});
+
+// Enrich telemetry with custom properties
+builder.Services.ConfigureTelemetryModule<DependencyTrackingTelemetryModule>((module, o) =>
+{
+    module.EnableSqlCommandTextInstrumentation = true;  // include SQL in traces
+});
+
+// Custom telemetry client for manual tracking
+public class SearchService(TelemetryClient telemetry)
+{
+    public async Task<List<Post>> SearchAsync(string query)
+    {
+        var startTime = DateTime.UtcNow;
+        var timer = Stopwatch.StartNew();
+
+        try
+        {
+            var results = await PerformSearchAsync(query);
+
+            telemetry.TrackEvent("Search", new Dictionary<string, string>
+            {
+                ["query"] = query,
+                ["resultCount"] = results.Count.ToString()
+            }, new Dictionary<string, double>
+            {
+                ["durationMs"] = timer.Elapsed.TotalMilliseconds
+            });
+
+            return results;
+        }
+        catch (Exception ex)
+        {
+            telemetry.TrackException(ex, new Dictionary<string, string>
+            {
+                ["query"] = query,
+                ["operation"] = "Search"
+            });
+            throw;
+        }
+    }
+}
+```
+
+## Structured Logging with Serilog
+
+```csharp
+// dotnet add package Serilog.AspNetCore
+// dotnet add package Serilog.Sinks.Seq  (local development)
+// dotnet add package Serilog.Sinks.ApplicationInsights  (Azure)
+
+builder.Host.UseSerilog((ctx, cfg) =>
+{
+    cfg
+        .ReadFrom.Configuration(ctx.Configuration)
+        .Enrich.FromLogContext()
+        .Enrich.WithMachineName()
+        .Enrich.WithEnvironmentName()
+        .WriteTo.Console(new ExpressionTemplate(
+            "[{@t:HH:mm:ss} {@l:u3}] {@m} ({SourceContext}){NewLine}{@x}"))
+        .WriteTo.Seq("http://localhost:5341")  // dev: local Seq
+        .WriteTo.ApplicationInsights(
+            ctx.Configuration["ApplicationInsights:ConnectionString"],
+            TelemetryConverter.Traces);
+});
+
+// Request logging middleware
+app.UseSerilogRequestLogging(options =>
+{
+    options.MessageTemplate = "HTTP {RequestMethod} {RequestPath} → {StatusCode} ({Elapsed:0.0000}ms)";
+    options.EnrichDiagnosticContext = (diag, ctx) =>
+    {
+        diag.Set("RequestHost", ctx.Request.Host.Value);
+        diag.Set("RequestScheme", ctx.Request.Scheme);
+        var userId = ctx.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (userId is not null) diag.Set("UserId", userId);
+    };
+});
+```
+
+<ConceptCallout type="tip" title="Observability Stack for Production">
+A minimal production stack: **Serilog → Application Insights** (logs + traces) + **Prometheus + Grafana** (metrics). For infrastructure: **Azure Monitor** alerts on error rate, P95 latency, and database connection saturation. The goal is to know about problems before users report them — set alerts on error rate > 1% and P95 response time > 500ms.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Set up OpenTelemetry with a Prometheus exporter. Create custom metrics for your blog API: post view counter with tags by slug and author, search duration histogram, and a pending comments gauge. Run Prometheus and Grafana locally with docker-compose and create a dashboard.
+2. Add distributed tracing to your search endpoint. View the trace in Jaeger (run with docker) and verify you can see: the HTTP request span, the EF Core SQL query span nested inside, and any cache hit/miss information as tags.
+3. Create an alerting rule: if the API error rate (5xx responses / total requests) exceeds 5% over 5 minutes, fire a Prometheus alert. Write a Grafana dashboard panel showing error rate over time with a threshold line at 5%.
+</ExerciseBlock>

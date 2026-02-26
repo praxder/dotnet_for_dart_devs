@@ -1,0 +1,244 @@
+---
+title: "Memory Management and IDisposable"
+day: 64
+week: 13
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Dart GC, no explicit dispose, Finalizer (rarely used)"
+csharpConcept: "IDisposable, using statement, finalizers, GC, unmanaged resources, SafeHandle"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart developers rarely think about resource cleanup — the GC handles memory, and most resources are managed. C# adds explicit resource management via `IDisposable`. This matters for file handles, database connections, network sockets, and unmanaged memory.
+
+## The Dispose Pattern
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: no built-in dispose protocol
+  // Common pattern in Flutter with StatefulWidget:
+  class MyWidget extends StatefulWidget { ... }
+  class _MyState extends State<MyWidget> {
+    final controller = TextEditingController();
+
+    @override
+    void dispose() {
+      controller.dispose();  // manual cleanup
+      super.dispose();
+    }
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: IDisposable — the standard cleanup contract
+  public interface IDisposable
+  {
+      void Dispose();
+  }
+
+  // using statement — calls Dispose() automatically, even on exception
+  using (var file = new FileStream("data.txt", FileMode.Open))
+  {
+      // use file
+  }  // file.Dispose() called here, always
+
+  // Modern: using declaration (C# 8+) — cleaner
+  using var file = new FileStream("data.txt", FileMode.Open);
+  // ... use file ...
+  // Dispose() called at end of scope
+  ```
+  </div>
+</CodeComparison>
+
+## Implementing IDisposable Correctly
+
+```csharp
+// The full dispose pattern — for types with BOTH managed and unmanaged resources
+public class ResourceManager : IDisposable
+{
+    private bool _disposed = false;
+
+    // Unmanaged resource (e.g., native handle)
+    private IntPtr _nativeHandle;
+
+    // Managed resource that also needs disposal
+    private FileStream? _fileStream;
+
+    public ResourceManager()
+    {
+        _nativeHandle = NativeLib.Allocate();
+        _fileStream = new FileStream("log.txt", FileMode.Append);
+    }
+
+    public void DoWork()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        // ... use resources
+    }
+
+    // Called directly by user (via using/Dispose())
+    public void Dispose()
+    {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);  // tell GC: no need to call finalizer
+    }
+
+    // Called by finalizer (GC) — only if user forgot to call Dispose()
+    ~ResourceManager()
+    {
+        Dispose(disposing: false);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (_disposed) return;
+
+        if (disposing)
+        {
+            // Safe to dispose managed objects here
+            _fileStream?.Dispose();
+            _fileStream = null;
+        }
+
+        // Always free unmanaged resources
+        if (_nativeHandle != IntPtr.Zero)
+        {
+            NativeLib.Free(_nativeHandle);
+            _nativeHandle = IntPtr.Zero;
+        }
+
+        _disposed = true;
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Simpler Pattern: No Unmanaged Resources">
+If your class only holds managed `IDisposable` objects (no `IntPtr` handles, no native memory), you can skip the finalizer entirely. Just implement `IDisposable` and call `Dispose()` on all owned managed resources. No `~Destructor` needed.
+</ConceptCallout>
+
+## IAsyncDisposable — Async Cleanup
+
+```csharp
+// IAsyncDisposable — for async cleanup (closing connections, flushing)
+public class AsyncRepository : IAsyncDisposable
+{
+    private readonly DbConnection _connection;
+
+    public AsyncRepository(DbConnection connection)
+        => _connection = connection;
+
+    public async ValueTask DisposeAsync()
+    {
+        await _connection.CloseAsync();
+        await _connection.DisposeAsync();
+    }
+}
+
+// Use with await using
+await using var repo = new AsyncRepository(connection);
+// ... use repo ...
+// repo.DisposeAsync() called here
+
+// If type implements both IDisposable and IAsyncDisposable:
+// prefer await using (async path) over plain using (sync path)
+```
+
+## SafeHandle — Better Native Handle Management
+
+```csharp
+// Prefer SafeHandle over IntPtr for native handles
+// SafeHandle is a reference-counted, GC-integrated wrapper
+public class NativeHandle : SafeHandle
+{
+    public NativeHandle() : base(IntPtr.Zero, ownsHandle: true) { }
+
+    public NativeHandle(IntPtr handle) : base(IntPtr.Zero, ownsHandle: true)
+    {
+        SetHandle(handle);
+    }
+
+    public override bool IsInvalid => handle == IntPtr.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        NativeLib.Free(handle);
+        return true;
+    }
+}
+
+// Benefits:
+// - Finalizer is already implemented by SafeHandle
+// - Thread-safe reference counting
+// - Works with P/Invoke marshaling
+// - GC knows about it for pressure tracking
+```
+
+## The GC and Object Lifetime
+
+```csharp
+// Force GC (for testing only — never do this in production)
+GC.Collect();
+GC.WaitForPendingFinalizers();
+
+// Check if large object heap allocation is happening
+long before = GC.GetTotalAllocatedBytes();
+var largeArray = new byte[100_000];  // >85KB → Large Object Heap
+long after = GC.GetTotalAllocatedBytes();
+Console.WriteLine($"Allocated: {after - before} bytes");
+
+// WeakReference — doesn't prevent GC collection
+var data = new HugeDataObject();
+var weakRef = new WeakReference<HugeDataObject>(data);
+data = null!;  // now only weak reference exists
+
+GC.Collect();
+
+if (weakRef.TryGetTarget(out var obj))
+    Console.WriteLine("Still alive");
+else
+    Console.WriteLine("Was collected");  // this prints
+```
+
+## Using Pattern for Scope Management
+
+```csharp
+// Pattern: use using for any "scope" — not just resource cleanup
+public readonly struct Timer : IDisposable
+{
+    private readonly string _name;
+    private readonly Stopwatch _sw;
+
+    public Timer(string name)
+    {
+        _name = name;
+        _sw = Stopwatch.StartNew();
+    }
+
+    public void Dispose()
+    {
+        _sw.Stop();
+        Console.WriteLine($"[{_name}] {_sw.ElapsedMilliseconds}ms");
+    }
+}
+
+// Usage
+using (new Timer("ProcessOrders"))
+{
+    ProcessAllOrders();  // time is printed at end of block
+}
+```
+
+<ExerciseBlock>
+1. Implement a `ConnectionPool<T>` class that manages a pool of `IDisposable` connections. `Rent()` returns a rented connection wrapped in an `IDisposable` handle; disposing the handle returns the connection to the pool.
+2. Create an `UnmanagedBuffer` class that allocates memory with `Marshal.AllocHGlobal`, implements the full dispose pattern with finalizer, and `ObjectDisposedException.ThrowIf` on post-dispose access.
+3. Write a `TransactionScope` struct that implements `IDisposable`, takes an `Action` on construction (the rollback action), and calls rollback in `Dispose()` unless `Commit()` was called. Use it to implement simple transactional semantics.
+</ExerciseBlock>

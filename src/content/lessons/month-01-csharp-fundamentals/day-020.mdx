@@ -1,0 +1,207 @@
+---
+title: "Tuples, Deconstruction, and Discards"
+day: 20
+week: 4
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart records as tuples (int, String), destructuring"
+csharpConcept: "C# ValueTuple, named tuples, deconstruction, _ discard"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart 3 introduced records as the preferred way to group values. C# has had `ValueTuple` since C# 7 and it covers the same use cases. The syntax differs, but the pattern — lightweight value grouping, especially for multiple return values — is identical.
+
+## Basic Tuple Syntax
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart positional record (tuple-like)
+  (int, String) pair = (42, "hello");
+  print(pair.$1);  // 42
+  print(pair.$2);  // hello
+
+  // Named fields
+  ({int x, int y}) point = (x: 10, y: 20);
+  print(point.x);  // 10
+
+  // Return multiple values
+  (double lat, double lon) getLocation() => (51.5, -0.12);
+  var (lat, lon) = getLocation();
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# tuple — positional (Item1, Item2...)
+  (int, string) pair = (42, "hello");
+  Console.WriteLine(pair.Item1);  // 42
+  Console.WriteLine(pair.Item2);  // hello
+
+  // Named fields — strongly recommended
+  (int X, int Y) point = (X: 10, Y: 20);
+  Console.WriteLine(point.X);     // 10
+
+  // Return multiple values
+  (double Lat, double Lon) GetLocation() => (51.5, -0.12);
+  var (lat, lon) = GetLocation();
+  Console.WriteLine($"{lat}, {lon}");
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="tip" title="Always Name Your Tuple Fields">
+Positional access via `Item1` / `Item2` is hard to read. Always name fields: `(string Name, int Age)` is self-documenting. The names disappear at runtime (it's just a `ValueTuple<string, int>`) but the compiler and IDE use them.
+</ConceptCallout>
+
+## Tuples as Return Values
+
+The most common use of tuples is returning multiple values from a method:
+
+```csharp
+// Before tuples: out parameters (still common in BCL)
+bool TryDivide(int a, int b, out int quotient, out int remainder)
+{
+    if (b == 0) { quotient = 0; remainder = 0; return false; }
+    quotient = a / b;
+    remainder = a % b;
+    return true;
+}
+
+// With tuples: cleaner for new code
+(bool Success, int Quotient, int Remainder) TryDivide(int a, int b)
+{
+    if (b == 0) return (false, 0, 0);
+    return (true, a / b, a % b);
+}
+
+// Usage
+var (success, quotient, remainder) = TryDivide(17, 5);
+if (success)
+    Console.WriteLine($"17 ÷ 5 = {quotient} remainder {remainder}");
+```
+
+## Deconstruction
+
+Deconstruction unpacks a tuple (or any type with a `Deconstruct` method) into individual variables:
+
+```csharp
+// Deconstructing a tuple
+var point = (X: 10, Y: 20);
+var (x, y) = point;  // x = 10, y = 20
+
+// In a foreach
+var points = new[] { (1, 2), (3, 4), (5, 6) };
+foreach (var (px, py) in points)
+    Console.WriteLine($"({px}, {py})");
+
+// Deconstructing a dictionary entry
+var dict = new Dictionary<string, int> { ["a"] = 1, ["b"] = 2 };
+foreach (var (key, value) in dict)
+    Console.WriteLine($"{key} = {value}");
+
+// Mixed — keep some, discard others
+var (_, lat, _) = GetCoordinates();  // only want the middle value
+```
+
+## Adding `Deconstruct` to Your Own Types
+
+Any type with a `Deconstruct` method (instance or extension) can be deconstructed:
+
+```csharp
+public class User
+{
+    public string Name { get; init; }
+    public string Email { get; init; }
+    public int Age { get; init; }
+
+    // Deconstruct method — enables tuple-like destructuring
+    public void Deconstruct(out string name, out string email)
+    {
+        name = Name;
+        email = Email;
+    }
+
+    // Overload for more fields
+    public void Deconstruct(out string name, out string email, out int age)
+    {
+        name = Name;
+        email = Email;
+        age = Age;
+    }
+}
+
+// Usage
+var user = new User { Name = "Adam", Email = "a@b.com", Age = 30 };
+var (name, email) = user;
+var (n2, e2, age) = user;
+
+// In switch patterns
+if (user is { Age: > 18 } adult)
+{
+    var (uname, uemail) = adult;
+    Console.WriteLine($"Adult: {uname}");
+}
+```
+
+## The Discard `_`
+
+The `_` discard is used when you want to deconstruct but don't care about some values:
+
+```csharp
+// Ignore values you don't need
+var (important, _, _) = GetThreeValues();
+
+// Ignore out parameters
+int.TryParse("42", out _);  // just want to know if it parses
+
+// In foreach — skip the key in a dictionary
+foreach (var (_, value) in myDict)
+    ProcessValue(value);
+
+// In switch — wildcard pattern (not really a discard, but looks similar)
+var description = shape switch
+{
+    Circle c => $"circle r={c.Radius}",
+    _ => "unknown shape"  // wildcard matches anything
+};
+
+// Multiple discards — _ can be reused (unlike regular vars)
+var (_, _, thirdElement) = tuple;
+```
+
+<ConceptCallout type="tip" title="_ as Discard vs _ as Variable">
+`_` used as a discard doesn't allocate storage. But if you write `var _ = value;` it creates a variable named `_` (you can then access it). The true discard form is where it appears in a deconstruction context (`var (x, _) = ...`) or as a standalone `out _`.
+</ConceptCallout>
+
+## Tuples vs Records vs Classes — When to Use Which
+
+```csharp
+// Tuple: anonymous, temporary, not shared across method boundaries
+private static (int Min, int Max) GetRange(int[] data) => (data.Min(), data.Max());
+
+// Record: named, return from public APIs, document the shape
+public record Coordinate(double Lat, double Lon);
+public Coordinate GetCurrentLocation() => new(51.5, -0.12);
+
+// Class: when you need methods, behavior, or mutable state
+public class BoundingBox
+{
+    public Point TopLeft { get; }
+    public Point BottomRight { get; }
+    public bool Contains(Point p) => ...;
+    public BoundingBox Expand(double margin) => ...;
+}
+```
+
+<ExerciseBlock>
+1. Write a `Statistics(IEnumerable<double> data)` method that returns a named tuple `(double Min, double Max, double Mean, double StdDev)`. Test it with some sample data.
+2. Add a `Deconstruct` extension method to `DateTime` that extracts `(int Year, int Month, int Day)`. Then use `var (year, _, day) = DateTime.Now` to get year and day while discarding month.
+3. Write a method `ParseKeyValue(string input)` that parses "key=value" strings and returns `(bool Success, string Key, string Value)`. Use `_` discards in the caller for the fields you don't need in various call sites.
+</ExerciseBlock>

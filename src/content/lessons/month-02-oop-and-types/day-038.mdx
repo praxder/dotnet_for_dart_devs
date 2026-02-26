@@ -1,0 +1,218 @@
+---
+title: "Queue<T>, Stack<T>, and LinkedList<T>"
+day: 38
+week: 8
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Queue from dart:collection, manual stack with List"
+csharpConcept: "Queue<T>, Stack<T>, LinkedList<T>, specialized collection semantics"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+`List<T>` is the general-purpose workhorse, but three specialized collections shine for specific access patterns: `Queue<T>` (FIFO), `Stack<T>` (LIFO), and `LinkedList<T>` (efficient insert/delete anywhere). Choosing the right one communicates intent and improves performance.
+
+## Queue\<T\> — First In, First Out
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  import 'dart:collection';
+
+  final queue = Queue<String>();
+  queue.add('first');
+  queue.add('second');
+  queue.add('third');
+
+  print(queue.removeFirst()); // 'first'
+  print(queue.first);         // 'second' (peek)
+  print(queue.length);        // 2
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  var queue = new Queue<string>();
+  queue.Enqueue("first");
+  queue.Enqueue("second");
+  queue.Enqueue("third");
+
+  string item = queue.Dequeue();    // removes and returns 'first'
+  string peek = queue.Peek();       // 'second' — doesn't remove
+  Console.WriteLine(queue.Count);  // 2
+
+  // TryDequeue — safe version (no exception if empty)
+  if (queue.TryDequeue(out string? next))
+      Console.WriteLine(next);  // 'second'
+  ```
+  </div>
+</CodeComparison>
+
+```csharp
+// Real-world: processing work items
+var taskQueue = new Queue<WorkItem>();
+
+// Producer adds work
+taskQueue.Enqueue(new WorkItem("Send email", Priority.Low));
+taskQueue.Enqueue(new WorkItem("Process payment", Priority.High));
+taskQueue.Enqueue(new WorkItem("Update inventory", Priority.Normal));
+
+// Consumer processes in order
+while (taskQueue.TryDequeue(out var work))
+{
+    Console.WriteLine($"Processing: {work.Name}");
+    work.Execute();
+}
+
+// Queue from existing collection
+var numbers = new Queue<int>(new[] { 1, 2, 3, 4, 5 });
+```
+
+## Stack\<T\> — Last In, First Out
+
+```csharp
+var stack = new Stack<string>();
+stack.Push("first");
+stack.Push("second");
+stack.Push("third");
+
+string top = stack.Pop();    // removes and returns 'third'
+string peek = stack.Peek();  // 'second' — doesn't remove
+Console.WriteLine(stack.Count); // 2
+
+// TryPop — safe version
+if (stack.TryPop(out string? item))
+    Console.WriteLine(item);
+
+// Classic use: undo history
+var undoStack = new Stack<ICommand>();
+
+void Execute(ICommand cmd)
+{
+    cmd.Execute();
+    undoStack.Push(cmd);
+}
+
+void Undo()
+{
+    if (undoStack.TryPop(out var cmd))
+        cmd.Undo();
+}
+
+// Balanced brackets checker
+bool IsBalanced(string input)
+{
+    var stack = new Stack<char>();
+    foreach (char c in input)
+    {
+        if (c is '(' or '[' or '{')
+            stack.Push(c);
+        else if (c is ')' or ']' or '}')
+        {
+            if (!stack.TryPop(out char open)) return false;
+            if ((c == ')' && open != '(') ||
+                (c == ']' && open != '[') ||
+                (c == '}' && open != '{')) return false;
+        }
+    }
+    return stack.Count == 0;
+}
+```
+
+## LinkedList\<T\> — Efficient Insert/Remove Anywhere
+
+`LinkedList<T>` is a doubly-linked list. Unlike `List<T>`, it can insert or remove nodes in O(1) time — if you already have the node reference. Traversal is O(n).
+
+```csharp
+var list = new LinkedList<int>();
+
+// Add to ends
+list.AddFirst(1);
+list.AddLast(4);
+list.AddLast(5);
+
+// Add after/before a specific node
+var node = list.Find(4)!;
+list.AddBefore(node, 2);   // 1, 2, 4, 5
+list.AddAfter(node, 3);    // won't work as expected here — adds after 4
+// Wait — after node (which is 4): 1, 2, 4, 3, 5? Let me redo:
+
+var list2 = new LinkedList<int>(new[] { 1, 2, 4, 5 });
+var threeNode = list2.Find(4)!;
+list2.AddBefore(threeNode, 3);  // 1, 2, 3, 4, 5
+
+// Navigate with nodes
+LinkedListNode<int>? current = list2.First;
+while (current != null)
+{
+    Console.Write($"{current.Value} ");
+    current = current.Next;
+}
+// Output: 1 2 3 4 5
+
+// Remove by value or node
+list2.Remove(3);          // O(n) — finds node first
+list2.RemoveFirst();      // O(1)
+list2.RemoveLast();       // O(1)
+
+// Efficient remove when you have the node
+var target = list2.Find(4)!;
+list2.Remove(target);     // O(1) — you have the node already
+```
+
+<ConceptCallout type="tip" title="LinkedList vs List Performance">
+Use `LinkedList<T>` when you need frequent insertions/deletions **in the middle** of the list and you can keep node references. For sequential access or index-based lookup, `List<T>` is almost always faster due to CPU cache locality (contiguous memory).
+</ConceptCallout>
+
+## Choosing the Right Collection
+
+```csharp
+// FIFO processing (task queue, BFS, event queue)
+Queue<T> → Enqueue() / Dequeue() / Peek()
+
+// LIFO processing (undo stack, DFS, call stack emulation)
+Stack<T> → Push() / Pop() / Peek()
+
+// Frequent middle insertions (ordered log, LRU cache backbone)
+LinkedList<T> → AddBefore() / AddAfter() / Remove(node)
+
+// Everything else
+List<T> → general purpose, best cache performance
+```
+
+## Priority Queue — .NET 6+
+
+.NET 6 added `PriorityQueue<TElement, TPriority>` — a min-heap:
+
+```csharp
+var pq = new PriorityQueue<string, int>();
+pq.Enqueue("low priority task", 10);
+pq.Enqueue("urgent task", 1);
+pq.Enqueue("normal task", 5);
+
+// Dequeue always returns lowest priority number first
+while (pq.TryDequeue(out string? task, out int priority))
+    Console.WriteLine($"[{priority}] {task}");
+
+// Output:
+// [1] urgent task
+// [5] normal task
+// [10] low priority task
+
+// Practical: Dijkstra's algorithm, task scheduling
+var events = new PriorityQueue<GameEvent, float>();
+events.Enqueue(new GameEvent("spawn enemy"), 0.5f);
+events.Enqueue(new GameEvent("play sound"), 0.1f);
+events.Enqueue(new GameEvent("animate"), 0.3f);
+```
+
+<ExerciseBlock>
+1. Implement a `BrowserHistory` class using two stacks (`Stack<string>`) to support `Navigate(url)`, `Back()`, `Forward()`, and `Current` property — like a real browser's history.
+2. Use `LinkedList<T>` to implement an LRU (Least Recently Used) cache with O(1) get and put operations. Store nodes in a `Dictionary<K, LinkedListNode<(K,V)>>` for O(1) lookup.
+3. Simulate a printer queue: use `PriorityQueue<PrintJob, int>` where lower numbers = higher priority. Add 5 jobs with different priorities, then dequeue and "print" them in priority order.
+</ExerciseBlock>

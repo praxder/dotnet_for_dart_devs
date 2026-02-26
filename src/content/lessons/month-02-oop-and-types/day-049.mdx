@@ -1,0 +1,174 @@
+---
+title: "Collections Performance and Memory"
+day: 49
+week: 10
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Dart collection performance, List growth, typed data vs dynamic"
+csharpConcept: "List capacity, Dictionary internals, GC pressure, Span<T> alternatives, CollectionsMarshal"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Performance-critical .NET code requires understanding how collections allocate memory and grow. This lesson covers the internals and practical techniques for minimizing allocations and GC pressure.
+
+## List\<T\> Capacity and Growth
+
+```csharp
+// List<T> doubles capacity when full (amortized O(1) Add)
+var list = new List<int>();
+// Initial capacity: 0 (no allocation until first Add)
+
+list.Add(1);  // Capacity becomes 4
+list.Add(2);
+list.Add(3);
+list.Add(4);
+list.Add(5);  // Capacity doubles to 8
+// ...
+list.Add(9);  // Capacity doubles to 16
+
+Console.WriteLine(list.Capacity);  // 16
+
+// Pre-allocate if you know the size
+var knownSize = new List<int>(1000);  // capacity=1000, no reallocation up to 1000 items
+knownSize.AddRange(Enumerable.Range(1, 1000));  // one allocation only
+
+// Trim unused capacity
+var sparse = new List<int> { 1, 2, 3 };
+sparse.Capacity = 1000;
+sparse.TrimExcess();  // reduces Capacity to Count (3)
+
+// CollectionExpression — C# 12 syntax (infers type)
+int[] arr = [1, 2, 3, 4, 5];  // same as new int[] { 1, 2, 3, 4, 5 }
+List<int> lst = [1, 2, 3, 4, 5];
+```
+
+## Dictionary Internals and Performance
+
+```csharp
+// Dictionary<K,V> uses hash buckets internally
+// Performance depends on key's GetHashCode() quality
+// Bad hash code → collisions → O(n) lookup instead of O(1)
+
+// Pre-size to avoid rehashing
+var dict = new Dictionary<string, int>(capacity: 1024);
+
+// Avoid double-lookup with TryGetValue
+// BAD: ContainsKey + index = 2 lookups
+if (dict.ContainsKey("key"))
+    var val = dict["key"];
+
+// GOOD: TryGetValue = 1 lookup
+if (dict.TryGetValue("key", out int value))
+    Console.WriteLine(value);
+
+// GetValueOrDefault — .NET 7+
+int count = dict.GetValueOrDefault("key", 0);
+
+// CollectionsMarshal.GetValueRefOrAddDefault — no-allocation increment
+// (Advanced: avoids boxing for struct values)
+ref int counterRef = ref CollectionsMarshal.GetValueRefOrAddDefault(
+    dict, "key", out bool existed);
+counterRef++;  // modifies the value in-place, no dictionary write
+
+// Best key types: int, string, Guid, enum — all have good GetHashCode()
+// Avoid custom class keys unless you implement GetHashCode() carefully
+```
+
+## Avoiding GC Pressure
+
+```csharp
+// PROBLEM: LINQ chains allocate intermediate IEnumerable objects
+var result = list
+    .Where(x => x > 0)      // allocation: Where iterator
+    .Select(x => x * 2)     // allocation: Select iterator
+    .ToList();               // allocation: new List
+
+// For hot paths, consider manual loops:
+var result2 = new List<int>(list.Count);
+foreach (var x in list)
+    if (x > 0)
+        result2.Add(x * 2);
+
+// Or use ArrayPool to avoid allocation for temporary buffers
+var pool = ArrayPool<int>.Shared;
+int[] buffer = pool.Rent(list.Count);
+try
+{
+    int written = 0;
+    foreach (var x in list)
+        if (x > 0)
+            buffer[written++] = x * 2;
+    var final = buffer[..written].ToArray();
+}
+finally
+{
+    pool.Return(buffer);
+}
+```
+
+<ConceptCallout type="tip" title="Profile Before Optimizing">
+Don't micro-optimize LINQ away prematurely. Use `BenchmarkDotNet` or the `dotnet-counters` tool to identify actual bottlenecks. LINQ has its own optimizations (e.g., `Count()` on `List<T>` is O(1), not O(n)). Readable LINQ code is correct code — optimize only the measured hot paths.
+</ConceptCallout>
+
+## Collection Expressions and Spread (.NET 8)
+
+```csharp
+// C# 12: Collection expressions unify initialization syntax
+int[] array = [1, 2, 3];
+List<int> list = [1, 2, 3];
+ImmutableArray<int> immut = [1, 2, 3];
+Span<int> span = [1, 2, 3];  // stack-allocated!
+
+// Spread operator — like Dart's spread (...)
+int[] a = [1, 2, 3];
+int[] b = [4, 5, 6];
+int[] combined = [..a, ..b];          // [1,2,3,4,5,6]
+int[] withExtra = [0, ..a, ..b, 7];  // [0,1,2,3,4,5,6,7]
+```
+
+## Choosing the Right Collection for Performance
+
+| Operation | Best Type | Complexity |
+|-----------|-----------|------------|
+| Random access by index | `T[]`, `List<T>` | O(1) |
+| Add to end | `List<T>` | O(1) amortized |
+| Add to front | `LinkedList<T>` | O(1) |
+| Lookup by key | `Dictionary<K,V>` | O(1) avg |
+| Sorted lookup | `SortedDictionary<K,V>` | O(log n) |
+| Unique items | `HashSet<T>` | O(1) avg |
+| Sorted unique | `SortedSet<T>` | O(log n) |
+| FIFO | `Queue<T>` | O(1) |
+| LIFO | `Stack<T>` | O(1) |
+| Priority | `PriorityQueue<T,P>` | O(log n) |
+
+```csharp
+// SortedDictionary — kept sorted by key (O(log n) operations)
+var sorted = new SortedDictionary<string, int>(StringComparer.Ordinal);
+sorted["banana"] = 2;
+sorted["apple"] = 1;
+sorted["cherry"] = 3;
+foreach (var (key, val) in sorted)
+    Console.WriteLine($"{key}: {val}");
+// apple: 1
+// banana: 2
+// cherry: 3
+
+// SortedSet — sorted unique values
+var sortedSet = new SortedSet<int> { 5, 2, 8, 1, 9, 3 };
+Console.WriteLine(sortedSet.Min);  // 1
+Console.WriteLine(sortedSet.Max);  // 9
+var subset = sortedSet.GetViewBetween(3, 7);  // [3, 5]
+```
+
+<ExerciseBlock>
+1. Benchmark `List<int>` with pre-allocated capacity vs without, adding 100,000 elements. Measure using `Stopwatch` and compare. Add a third comparison: using an `int[]` of fixed size.
+2. Implement a word frequency counter for a large text file. Compare three approaches: (a) `Dictionary<string, int>` with `TryGetValue`, (b) `Dictionary<string, int>` with `CollectionsMarshal.GetValueRefOrAddDefault`, (c) LINQ `GroupBy`. Which is fastest?
+3. Use C# 12 collection expressions and spread operator to merge three sorted `int[]` arrays into one sorted array, without calling `.Sort()` after merging (merge them correctly during the spread).
+</ExerciseBlock>

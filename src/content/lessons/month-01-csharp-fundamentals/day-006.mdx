@@ -1,0 +1,232 @@
+---
+title: "Nullable Reference Types: C#'s Null Safety vs Dart's"
+day: 6
+week: 2
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "Dart sound null safety, ?, !, late keyword"
+csharpConcept: "Nullable reference types (NRT), ??, ??=, ?., ! null-forgiving"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart has **sound** null safety — the compiler guarantees at compile time that non-nullable variables can never hold null. C# has **nullable reference types (NRT)** — a compiler warning system, not a hard guarantee. This is the most important conceptual difference to understand before writing real C# code.
+
+## The Key Difference
+
+<ConceptCallout type="gotcha" title="NRT is a Warning System, Not a Guarantee">
+In Dart, `String name` **cannot** be null — the compiler enforces this at compile time with no escape hatch (besides `!`). In C#, `string name` *should* not be null — the compiler warns you, but null can still slip through at runtime (especially from legacy code, reflection, or JSON deserialization). Always validate at system boundaries.
+</ConceptCallout>
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: sound null safety
+  String name = "Adam";     // non-nullable, guaranteed
+  name = null;              // COMPILE ERROR
+
+  String? nullable = null;  // nullable type, explicit opt-in
+  print(nullable?.length);  // safe navigation — prints null
+
+  // late: deferred initialization
+  late String computed;
+  computed = expensiveCalc(); // must assign before use
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: nullable reference types (NRT)
+  string name = "Adam";     // non-nullable (warning if null assigned)
+  name = null;              // WARNING, not error (NRT is advisory)
+
+  string? nullable = null;  // explicitly nullable — no warning
+  Console.WriteLine(nullable?.Length); // safe navigation — prints nothing
+
+  // No 'late' equivalent — just use nullable and assign later
+  string? computed = null;
+  computed = ExpensiveCalc();
+  ```
+  </div>
+</CodeComparison>
+
+## Enabling NRT
+
+NRT is controlled by the `<Nullable>enable</Nullable>` setting in your `.csproj` (enabled by default in new projects with `dotnet new`). You can also use `#nullable enable` / `#nullable disable` per file.
+
+```xml
+<!-- .csproj — this is the default in new projects -->
+<PropertyGroup>
+  <Nullable>enable</Nullable>
+</PropertyGroup>
+```
+
+With NRT enabled, the compiler tracks null flow:
+
+```csharp
+string? GetName() => DateTime.Now.Second > 30 ? "Adam" : null;
+
+string? name = GetName();
+
+// Without null check — warning: "name may be null"
+Console.WriteLine(name.Length);
+
+// With null check — warning gone, compiler knows name is not null here
+if (name != null)
+{
+    Console.WriteLine(name.Length); // safe
+}
+
+// Pattern matching null check (idiomatic C#)
+if (name is not null)
+{
+    Console.WriteLine(name.Length);
+}
+```
+
+## Value Types Are Always Non-Nullable
+
+<ConceptCallout type="new" title="Value Types vs Reference Types and Null">
+In Dart, all types can be nullable with `?`. In C#, **value types** (`int`, `bool`, `double`, `struct`) are **never null by default** — you need `int?` to make them nullable. This is different from Dart where `int?` is the same concept as `String?`.
+</ConceptCallout>
+
+```csharp
+int count = 0;       // can never be null
+int? maybe = null;   // Nullable<int> — boxed optional
+
+bool? tristate = null; // true, false, or null — useful for "unknown"
+
+// Checking nullable value types
+if (maybe.HasValue)
+    Console.WriteLine(maybe.Value);
+
+// Or just use null checks — same thing
+if (maybe != null)
+    Console.WriteLine(maybe);  // implicitly uses .Value
+```
+
+## The Null Operators
+
+C# has a full set of null-handling operators, all of which should feel familiar from Dart:
+
+```csharp
+string? name = GetNameOrNull();
+
+// ?. — null-conditional (same as Dart)
+int? len = name?.Length;           // null if name is null
+string? upper = name?.ToUpper();
+
+// Chaining (same as Dart)
+string? city = user?.Address?.City;
+int? zip = user?.Address?.Zip?.ToString()?.Length;
+
+// ?? — null-coalescing (same as Dart)
+string display = name ?? "Anonymous";   // "Anonymous" if name is null
+
+// ??= — null-coalescing assignment (same as Dart)
+name ??= "Default";   // assigns only if name is null
+
+// ! — null-forgiving operator (like Dart's !)
+// USE SPARINGLY — suppresses the null warning, can cause NullReferenceException
+string definitelyNotNull = name!;
+```
+
+<ConceptCallout type="same" title="?., ??, ??= Are Identical to Dart">
+The null-conditional `?.`, null-coalescing `??`, and null-coalescing assignment `??=` operators work exactly the same as in Dart. If you've been doing null-safe Dart, these are free.
+</ConceptCallout>
+
+## Null Checks in Practice
+
+```csharp
+// Pattern matching is the idiomatic C# way
+if (name is null) { /* ... */ }
+if (name is not null) { /* ... */ }
+
+// Switch expression
+var result = name switch
+{
+    null => "no name",
+    "" => "empty name",
+    var n when n.Length > 50 => "name too long",
+    _ => name
+};
+
+// Guard clause pattern (very common in .NET code)
+public void ProcessOrder(Order? order)
+{
+    ArgumentNullException.ThrowIfNull(order); // throws if null
+    // order is non-null from here down
+
+    if (order.Items is null or { Count: 0 })
+        throw new InvalidOperationException("Order has no items");
+
+    // ... proceed with processing
+}
+```
+
+## Annotations for NRT Hints
+
+For cases where the compiler can't infer nullability, use attributes:
+
+```csharp
+using System.Diagnostics.CodeAnalysis;
+
+// [NotNull] — output param is never null if method returns
+public bool TryGetUser(int id, [NotNullWhen(true)] out User? user)
+{
+    user = _db.Find(id);
+    return user != null;
+}
+
+// Usage — compiler knows user is non-null after TryGetUser returns true
+if (TryGetUser(42, out var user))
+{
+    Console.WriteLine(user.Name); // no warning
+}
+
+// [MemberNotNull] — tells compiler a field is initialized after this method runs
+[MemberNotNull(nameof(_connection))]
+private void Initialize()
+{
+    _connection = CreateConnection();
+}
+```
+
+## Real-World Example: Deserializing JSON
+
+The most common place nulls slip in is JSON deserialization from external APIs:
+
+```csharp
+public class ApiResponse
+{
+    // Marked required — must be present in JSON
+    public required string Status { get; init; }
+
+    // Nullable — may or may not be in the JSON
+    public string? ErrorMessage { get; init; }
+
+    // Non-nullable with default — safe even if JSON omits it
+    public List<string> Tags { get; init; } = [];
+}
+
+// When you get this from an API:
+var response = JsonSerializer.Deserialize<ApiResponse>(json)!;
+// The ! is needed because Deserialize can return null
+
+// Now check before use:
+if (response.ErrorMessage is not null)
+{
+    Console.WriteLine($"Error: {response.ErrorMessage}");
+}
+```
+
+<ExerciseBlock>
+1. Write a method `string FormatUserDisplay(string? firstName, string? lastName)` that handles all null combinations and returns a sensible display name.
+2. Refactor this null-unsafe code to use null operators: `var len = 0; if (s != null) { len = s.Length; }` — do it in one line using `??`.
+3. Write a `TryParsePositiveInt` method using the `out` + `[NotNullWhen]` pattern that parses a string and only sets the out param if it's both parseable and positive.
+</ExerciseBlock>

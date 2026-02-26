@@ -1,0 +1,186 @@
+---
+title: "HttpClient and Resilience with Polly"
+day: 81
+week: 17
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "Dart http package, dio, retry logic"
+csharpConcept: "IHttpClientFactory, typed clients, Polly, retry, circuit breaker, timeout"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Making HTTP calls to external services requires more than just `await client.GetAsync(url)`. This lesson covers `IHttpClientFactory` (the right way to use `HttpClient` in .NET), typed HTTP clients, and Polly for resilience — retry, circuit breaker, and timeout patterns.
+
+## Why IHttpClientFactory?
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: create once, reuse
+  final client = http.Client();  // create once, reuse across requests
+  // OR use dio with interceptors:
+  final dio = Dio(BaseOptions(
+    baseUrl: 'https://api.example.com',
+    connectTimeout: Duration(seconds: 5),
+  ));
+  dio.interceptors.add(RetryInterceptor(dio));
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // WRONG: new HttpClient() every request — socket exhaustion!
+  public async Task<Product> GetProductAsync(int id)
+  {
+      using var client = new HttpClient();  // ← DON'T DO THIS
+      return await client.GetFromJsonAsync<Product>($"https://api.example.com/products/{id}");
+  }
+
+  // WRONG: static HttpClient — ignores DNS changes
+  private static readonly HttpClient _client = new HttpClient();
+
+  // RIGHT: use IHttpClientFactory — manages connection pooling, DNS refresh
+  public class ProductService(IHttpClientFactory httpClientFactory)
+  {
+      public async Task<Product> GetProductAsync(int id)
+      {
+          using var client = httpClientFactory.CreateClient("ProductsApi");
+          return await client.GetFromJsonAsync<Product>($"products/{id}") ?? throw new Exception("Not found");
+      }
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="gotcha" title="The HttpClient Socket Exhaustion Problem">
+Creating `new HttpClient()` per request is the classic .NET mistake. It opens a new TCP connection pool that isn't returned until the GC finalizes the `HttpClient` — leading to thousands of sockets in `TIME_WAIT` state. `IHttpClientFactory` reuses connection pools correctly while also refreshing DNS after 2 minutes.
+</ConceptCallout>
+
+## Typed HTTP Clients — The Clean Way
+
+```csharp
+// Define a typed client — like a service wrapper around HttpClient
+public class WeatherApiClient(HttpClient http)
+{
+    public async Task<Forecast?> GetForecastAsync(string city, CancellationToken ct = default)
+    {
+        var response = await http.GetAsync($"forecasts/{city}", ct);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<Forecast>(cancellationToken: ct);
+    }
+
+    public async Task<IReadOnlyList<Alert>> GetAlertsAsync(string city, CancellationToken ct = default)
+    {
+        return await http.GetFromJsonAsync<List<Alert>>($"alerts/{city}", ct) ?? [];
+    }
+}
+
+// Register in Program.cs
+builder.Services.AddHttpClient<WeatherApiClient>(client =>
+{
+    client.BaseAddress = new Uri("https://api.weather.example.com/v1/");
+    client.DefaultRequestHeaders.Add("User-Agent", "MyApp/1.0");
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+
+// Inject and use
+public class WeatherService(WeatherApiClient weatherApi)
+{
+    public async Task<WeatherReport> GetReportAsync(string city)
+    {
+        var forecast = await weatherApi.GetForecastAsync(city);
+        var alerts = await weatherApi.GetAlertsAsync(city);
+        return new WeatherReport(forecast, alerts);
+    }
+}
+```
+
+## Polly Resilience — Retry, Circuit Breaker, Timeout
+
+```bash
+dotnet add package Microsoft.Extensions.Http.Resilience
+# .NET 8+: built-in resilience (wraps Polly under the hood)
+```
+
+```csharp
+using Microsoft.Extensions.Http.Resilience;
+
+// Standard resilience pipeline (recommended starting point):
+builder.Services.AddHttpClient<WeatherApiClient>(client =>
+{
+    client.BaseAddress = new Uri("https://api.weather.example.com/");
+})
+.AddStandardResilienceHandler();
+// Includes: retry (3x, exponential backoff), circuit breaker, timeout
+
+// Custom pipeline:
+.AddResilienceHandler("custom", pipeline =>
+{
+    pipeline
+        // Retry: 3 attempts, exponential backoff
+        .AddRetry(new HttpRetryStrategyOptions
+        {
+            MaxRetryAttempts = 3,
+            Delay = TimeSpan.FromSeconds(1),
+            BackoffType = DelayBackoffType.Exponential,
+            UseJitter = true,
+            ShouldHandle = args => args.Outcome switch
+            {
+                { Exception: HttpRequestException } => PredicateResult.True(),
+                { Result.StatusCode: HttpStatusCode.ServiceUnavailable } => PredicateResult.True(),
+                { Result.StatusCode: HttpStatusCode.TooManyRequests } => PredicateResult.True(),
+                _ => PredicateResult.False()
+            }
+        })
+        // Timeout: per-attempt
+        .AddTimeout(TimeSpan.FromSeconds(5))
+        // Circuit breaker: open after 5 failures in 10s
+        .AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            HandlingResultConditions = { /* 5xx responses */ },
+            FailureRatio = 0.5,       // break at 50% failure rate
+            SamplingDuration = TimeSpan.FromSeconds(10),
+            MinimumThroughput = 5,    // need at least 5 requests to make decision
+            BreakDuration = TimeSpan.FromSeconds(30)
+        });
+});
+```
+
+## HttpClient Patterns for APIs
+
+```csharp
+// GET with JSON deserialization
+var product = await client.GetFromJsonAsync<Product>("/products/42");
+
+// POST with JSON body
+var response = await client.PostAsJsonAsync("/products", new CreateProductRequest
+{
+    Name = "Widget",
+    Price = 9.99m
+});
+response.EnsureSuccessStatusCode();
+var created = await response.Content.ReadFromJsonAsync<Product>();
+
+// Custom headers
+var request = new HttpRequestMessage(HttpMethod.Get, "/secure-data");
+request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+var result = await client.SendAsync(request);
+
+// Streaming large responses
+await using var stream = await client.GetStreamAsync("/large-export");
+await using var file = File.Create("export.bin");
+await stream.CopyToAsync(file);
+```
+
+<ExerciseBlock>
+1. Create a `GitHubApiClient` typed client that wraps the GitHub public API. Implement `GetUserAsync(string username)`, `GetRepositoriesAsync(string username)`, and `GetReadmeAsync(string owner, string repo)`. Add proper error handling for 404 and rate limit (403) responses.
+2. Add a Polly retry policy to your GitHub client: retry up to 3 times with exponential backoff on transient errors (5xx, timeout), but NOT on 404 or 403. Log each retry attempt.
+3. Implement a `RateLimitedHttpClient` decorator that enforces a maximum of N requests per second using `SemaphoreSlim`. Wrap your GitHub client and verify it throttles correctly.
+</ExerciseBlock>

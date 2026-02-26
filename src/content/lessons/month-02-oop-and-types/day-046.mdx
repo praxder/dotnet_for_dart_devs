@@ -1,0 +1,157 @@
+---
+title: "LINQ Performance: IQueryable vs IEnumerable"
+day: 46
+week: 10
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "No Dart equivalent — Dart doesn't have database-integrated queries"
+csharpConcept: "IQueryable<T>, expression trees, LINQ-to-SQL vs LINQ-to-Objects, N+1 problem"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Understanding the difference between `IQueryable<T>` and `IEnumerable<T>` is one of the most important practical skills in .NET. Get it wrong and you'll accidentally load entire database tables into memory.
+
+## The Core Difference
+
+<ConceptCallout type="new" title="IQueryable — LINQ That Runs Elsewhere">
+`IEnumerable<T>` runs the filter/sort/project logic **in your application** (C# code). `IQueryable<T>` translates the LINQ expressions into **SQL** (or another query language) and runs them **on the database server**. The database returns only the filtered results.
+</ConceptCallout>
+
+```csharp
+// IEnumerable — loads ALL users from DB, then filters in memory
+IEnumerable<User> users = dbContext.Users;  // ← already a DbSet/IQueryable
+var admins = users.Where(u => u.IsAdmin);   // ← filter runs in C#!
+// SQL: SELECT * FROM Users  ← ALL rows loaded!
+
+// IQueryable — translates Where to SQL, only loads matching rows
+IQueryable<User> query = dbContext.Users;   // IQueryable
+var admins2 = query.Where(u => u.IsAdmin); // ← builds SQL WHERE clause
+// SQL: SELECT * FROM Users WHERE IsAdmin = 1  ← only matching rows!
+```
+
+## Why This Matters in Entity Framework
+
+```csharp
+// WRONG — N+1 query problem
+var orders = await dbContext.Orders.ToListAsync();  // loads ALL orders
+foreach (var order in orders)
+{
+    // This makes a separate DB query for EACH order! (N queries)
+    var customer = await dbContext.Customers
+        .FirstAsync(c => c.Id == order.CustomerId);
+    Console.WriteLine($"{customer.Name}: {order.Total}");
+}
+// If you have 1000 orders → 1001 database queries!
+
+// RIGHT — single query with join
+var orderDetails = await dbContext.Orders
+    .Include(o => o.Customer)  // Entity Framework join
+    .Select(o => new { o.Customer.Name, o.Total })
+    .ToListAsync();  // ONE database query
+```
+
+## AsEnumerable() and AsQueryable()
+
+```csharp
+// AsEnumerable() — switch from IQueryable to IEnumerable
+// Everything AFTER AsEnumerable() runs in C#
+var results = dbContext.Products
+    .Where(p => p.Price > 10)         // runs in SQL ✓
+    .AsEnumerable()                   // switch to in-memory
+    .Where(p => SomeComplexCSharpLogic(p))  // can't translate to SQL → run in C#
+    .ToList();
+
+// Common pattern: filter in DB, then apply untranslatable logic in memory
+var enriched = dbContext.Orders
+    .Where(o => o.Status == OrderStatus.Pending)  // SQL
+    .AsEnumerable()
+    .Select(o => new EnrichedOrder(o, _localService.Enrich(o)))  // C#
+    .ToList();
+
+// AsQueryable() — wrap IEnumerable as IQueryable for building dynamic queries
+List<int> list = new() { 1, 2, 3 };
+IQueryable<int> q = list.AsQueryable();
+```
+
+## Deferred Execution with IQueryable
+
+```csharp
+// Query builds up without executing
+IQueryable<Product> query = dbContext.Products;
+
+if (!string.IsNullOrEmpty(searchTerm))
+    query = query.Where(p => p.Name.Contains(searchTerm));
+
+if (category != null)
+    query = query.Where(p => p.CategoryId == category.Id);
+
+if (maxPrice.HasValue)
+    query = query.Where(p => p.Price <= maxPrice.Value);
+
+query = query.OrderBy(p => p.Name);
+
+// Execution happens HERE — one optimized SQL query
+var results = await query.ToListAsync();
+// SQL: SELECT * FROM Products WHERE Name LIKE '%term%'
+//      AND CategoryId = 5 AND Price <= 50 ORDER BY Name
+```
+
+<ConceptCallout type="gotcha" title="The AsEnumerable Escape Hatch">
+Once you call `AsEnumerable()`, you've left the query provider — all subsequent operations run in C#. This is intentional for operations that can't be translated to SQL (custom C# methods, complex logic). But be careful: `AsEnumerable()` fetches all rows up to that point from the database. Always filter in SQL (before `AsEnumerable`) as much as possible.
+</ConceptCallout>
+
+## Expression Trees vs Delegates
+
+The technical reason for the difference:
+
+```csharp
+// IEnumerable<T>.Where takes a DELEGATE — compiled C# code
+Func<Product, bool> filter = p => p.Price > 10;  // Compiled to IL
+
+// IQueryable<T>.Where takes an EXPRESSION TREE — data representing code
+Expression<Func<Product, bool>> expr = p => p.Price > 10;
+// The lambda is NOT compiled — it's stored as an AST
+// EF reads this AST and generates: WHERE Price > 10
+
+// You can inspect expression trees:
+var body = expr.Body as BinaryExpression;
+Console.WriteLine(body?.NodeType);  // GreaterThan
+```
+
+## Practical Performance Rules
+
+```csharp
+// Rule 1: Always filter, sort, and project before materializing
+var result = dbContext.Orders
+    .Where(o => o.Date > cutoff)     // SQL WHERE
+    .OrderBy(o => o.Date)            // SQL ORDER BY
+    .Select(o => new OrderDto        // SQL SELECT (only needed columns)
+    {
+        o.Id, o.Total, o.Date,
+        CustomerName = o.Customer.Name
+    })
+    .Take(100)                       // SQL TOP 100
+    .ToListAsync();                  // Execute once
+
+// Rule 2: Count() on IQueryable uses SQL COUNT
+int count = await dbContext.Orders.CountAsync(o => o.Status == "Pending");
+// SQL: SELECT COUNT(*) FROM Orders WHERE Status = 'Pending'
+// NOT: load all orders, count in C#
+
+// Rule 3: Any() on IQueryable uses SQL EXISTS
+bool exists = await dbContext.Products.AnyAsync(p => p.Sku == sku);
+// SQL: SELECT CASE WHEN EXISTS (SELECT ...) THEN 1 ELSE 0 END
+```
+
+<ExerciseBlock>
+1. Given an in-memory `List<Product>`, write a search method using `IQueryable` (via `.AsQueryable()`) that builds up a filter chain based on optional parameters: `name` (contains), `minPrice`, `maxPrice`, `category`. Execute it once at the end.
+2. Demonstrate the N+1 problem: create two lists (Orders and Customers) and write a loop that produces N+1 "queries" (using `First()` inside a loop). Then rewrite using a `Join` to produce the same result in 1 operation.
+3. Write a benchmark comparing: (a) `list.Where(predicate).Count()` vs (b) `list.Count(predicate)`. Which is faster and why? (Hint: check whether both enumerate once or twice.)
+</ExerciseBlock>

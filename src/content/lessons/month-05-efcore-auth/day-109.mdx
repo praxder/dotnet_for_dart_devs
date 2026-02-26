@@ -1,0 +1,260 @@
+---
+title: "Authorization: Policies, Resources, and Requirements"
+day: 109
+week: 22
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "role-based guards in Flutter, route protection"
+csharpConcept: "IAuthorizationRequirement, AuthorizationHandler<T>, resource-based auth, IAuthorizationService"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Day 79 introduced authorization basics. This lesson goes deep: custom requirements, resource-based authorization (can THIS user edit THIS document?), and hierarchical permission systems — the patterns needed for real multi-user applications.
+
+## Policy-Based Authorization Review
+
+```csharp
+// Simple policies from roles/claims
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Admin", p => p.RequireRole("Admin"));
+    options.AddPolicy("ActiveUser", p =>
+        p.RequireAuthenticatedUser()
+         .RequireClaim("account_status", "active"));
+    options.AddPolicy("AgeVerified", p =>
+        p.RequireAssertion(ctx =>
+            ctx.User.HasClaim(c => c.Type == "age_verified" && c.Value == "true")));
+});
+
+// Applied to endpoint
+app.MapDelete("/api/users/{id}", handler)
+    .RequireAuthorization("Admin");
+```
+
+## Custom Requirements and Handlers
+
+```csharp
+// Requirement: minimum subscription tier
+public class MinSubscriptionRequirement(SubscriptionTier minimumTier)
+    : IAuthorizationRequirement
+{
+    public SubscriptionTier MinimumTier { get; } = minimumTier;
+}
+
+public enum SubscriptionTier { Free = 0, Basic = 1, Pro = 2, Enterprise = 3 }
+
+// Handler: determines if the requirement is met
+public class SubscriptionHandler : AuthorizationHandler<MinSubscriptionRequirement>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        MinSubscriptionRequirement requirement)
+    {
+        var tierClaim = context.User.FindFirstValue("subscription_tier");
+
+        if (Enum.TryParse<SubscriptionTier>(tierClaim, out var userTier)
+            && userTier >= requirement.MinimumTier)
+        {
+            context.Succeed(requirement);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+// Register and use:
+builder.Services.AddSingleton<IAuthorizationHandler, SubscriptionHandler>();
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("ProFeature",
+        p => p.AddRequirements(new MinSubscriptionRequirement(SubscriptionTier.Pro)));
+    options.AddPolicy("EnterpriseFeature",
+        p => p.AddRequirements(new MinSubscriptionRequirement(SubscriptionTier.Enterprise)));
+});
+
+app.MapGet("/api/analytics/advanced", handler)
+    .RequireAuthorization("ProFeature");
+```
+
+## Resource-Based Authorization — "Can THIS user edit THIS post?"
+
+```csharp
+// Standard attribute auth can't check ownership — it doesn't know the resource
+// Resource-based auth: pass the resource to the authorization service
+
+// Requirement: user must be the resource owner (or admin)
+public class OwnershipRequirement : IAuthorizationRequirement { }
+
+// Handler receives both the user AND the specific resource
+public class PostOwnershipHandler : AuthorizationHandler<OwnershipRequirement, Post>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        OwnershipRequirement requirement,
+        Post resource)  // ← the specific post being accessed
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        // Admin can do anything
+        if (context.User.IsInRole("Admin"))
+        {
+            context.Succeed(requirement);
+            return Task.CompletedTask;
+        }
+
+        // Owner can edit their own post
+        if (resource.AuthorId.ToString() == userId)
+        {
+            context.Succeed(requirement);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+// Register:
+builder.Services.AddSingleton<IAuthorizationHandler, PostOwnershipHandler>();
+builder.Services.AddAuthorization(options =>
+    options.AddPolicy("PostOwner", p => p.AddRequirements(new OwnershipRequirement())));
+
+// Use in endpoint — inject IAuthorizationService:
+app.MapPut("/api/posts/{id}", async (
+    int id,
+    UpdatePostRequest body,
+    AppDbContext db,
+    IAuthorizationService authService,
+    ClaimsPrincipal user) =>
+{
+    var post = await db.Posts.FindAsync(id);
+    if (post is null) return Results.NotFound();
+
+    // Check authorization against the specific post
+    var result = await authService.AuthorizeAsync(user, post, "PostOwner");
+    if (!result.Succeeded) return Results.Forbid();
+
+    // Proceed with update
+    post.Title = body.Title;
+    post.Body = body.Body;
+    await db.SaveChangesAsync();
+    return Results.Ok(post);
+});
+```
+
+## Multi-Requirement Policies
+
+```csharp
+// A handler can handle MULTIPLE requirements for a resource
+public class DocumentAuthorizationHandler
+    : AuthorizationHandler<OperationAuthorizationRequirement, Document>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        OperationAuthorizationRequirement requirement,
+        Document document)
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (requirement.Name == Operations.Read)
+        {
+            // Public documents readable by anyone authenticated
+            if (document.IsPublic || document.OwnerId == userId || context.User.IsInRole("Admin"))
+                context.Succeed(requirement);
+        }
+        else if (requirement.Name == Operations.Update)
+        {
+            // Only owner or admin can edit
+            if (document.OwnerId == userId || context.User.IsInRole("Admin"))
+                context.Succeed(requirement);
+        }
+        else if (requirement.Name == Operations.Delete)
+        {
+            // Only admin can delete
+            if (context.User.IsInRole("Admin"))
+                context.Succeed(requirement);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+// Operations are named requirements:
+public static class Operations
+{
+    public static OperationAuthorizationRequirement Read
+        = new() { Name = nameof(Read) };
+    public static OperationAuthorizationRequirement Update
+        = new() { Name = nameof(Update) };
+    public static OperationAuthorizationRequirement Delete
+        = new() { Name = nameof(Delete) };
+}
+
+// Usage:
+var canRead = await authService.AuthorizeAsync(user, document, Operations.Read);
+var canDelete = await authService.AuthorizeAsync(user, document, Operations.Delete);
+```
+
+## Imperative Authorization with IAuthorizationService
+
+```csharp
+// Use IAuthorizationService directly in services, not just endpoints
+public class CommentService(
+    AppDbContext db,
+    IAuthorizationService authService,
+    IHttpContextAccessor httpContext)
+{
+    private ClaimsPrincipal User => httpContext.HttpContext!.User;
+
+    public async Task<bool> DeleteCommentAsync(int commentId)
+    {
+        var comment = await db.Comments.FindAsync(commentId);
+        if (comment is null) return false;
+
+        // Check authorization before deleting
+        var result = await authService.AuthorizeAsync(User, comment, Operations.Delete);
+        if (!result.Succeeded)
+            throw new UnauthorizedAccessException("Cannot delete this comment");
+
+        db.Comments.Remove(comment);
+        await db.SaveChangesAsync();
+        return true;
+    }
+}
+```
+
+## Authorization Middleware for All Endpoints
+
+```csharp
+// Fallback policy — require auth on ALL endpoints by default
+builder.Services.AddAuthorization(options =>
+{
+    // All endpoints require authentication unless decorated with [AllowAnonymous]
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
+
+// Opt out for public endpoints:
+app.MapGet("/api/blog/posts", handler)
+    .AllowAnonymous();  // explicitly public
+
+app.MapGet("/.well-known/health", () => "OK")
+    .AllowAnonymous();
+```
+
+<ConceptCallout type="tip" title="Authorization in Services vs Endpoints">
+Don't put authorization logic only in endpoints — put it in services too. An endpoint can be called from multiple places (HTTP, SignalR, background jobs, tests). Using `IAuthorizationService` directly in your service layer ensures authorization is enforced regardless of how the code is invoked. This is especially important for resource-based checks.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Build a document sharing system: `Document` has an `OwnerId` and a list of `SharedWith` user IDs. Implement resource-based authorization for `Read`, `Update`, `Share`, and `Delete` operations. Rules: owner can do all, shared users can only read, admins can do all.
+2. Create a rate-limiting requirement: `DailyApiCallLimitRequirement(int maxCalls)`. The handler checks a cache key `{userId}:api_calls:{date}` and succeeds only if the count is below the limit. Apply it as a policy to a "premium feature" endpoint.
+3. Implement a permission system without hard-coded roles: create a `Permission` entity with verb + resource (e.g., "posts:publish", "users:delete"). Load user permissions as claims on login. Write an `IAuthorizationRequirement` + handler that checks for a specific permission string.
+</ExerciseBlock>

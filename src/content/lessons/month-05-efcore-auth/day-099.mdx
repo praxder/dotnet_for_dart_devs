@@ -1,0 +1,237 @@
+---
+title: "EF Core: Owned Entities, Value Objects, and DDD"
+day: 99
+week: 20
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "embedded objects in Dart classes, value equality"
+csharpConcept: "owned entities, value objects, table splitting, JSON columns, DDD tactical patterns"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Domain-Driven Design (DDD) distinguishes between Entities (have identity) and Value Objects (defined by their values). EF Core has first-class support for mapping Value Objects as Owned Entities — embedded in the parent's table or in separate tables.
+
+## Value Objects — Immutable, Equality by Value
+
+```csharp
+// A Value Object: no identity, equal if all properties match
+// Perfect for: Money, Address, DateRange, Coordinate, EmailAddress
+
+public record Money(decimal Amount, string Currency)
+{
+    public Money Add(Money other)
+    {
+        if (Currency != other.Currency)
+            throw new InvalidOperationException("Currency mismatch");
+        return new Money(Amount + other.Amount, Currency);
+    }
+
+    public static Money Zero(string currency) => new(0, currency);
+
+    public override string ToString() => $"{Amount:F2} {Currency}";
+}
+
+public record Address(
+    string Street,
+    string City,
+    string State,
+    string PostalCode,
+    string Country);
+
+// These are records — value equality built in:
+var a = new Money(10m, "USD");
+var b = new Money(10m, "USD");
+Console.WriteLine(a == b);  // true — value equality, not reference equality
+```
+
+## Owned Entities — Storing Value Objects in EF Core
+
+```csharp
+// Entity that contains value objects
+public class Order
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public Money Total { get; set; } = Money.Zero("USD");
+    public Address ShippingAddress { get; set; } = null!;
+    public Address? BillingAddress { get; set; }
+}
+
+// Configuration — OwnsOne maps to columns in the same table
+modelBuilder.Entity<Order>(entity =>
+{
+    // Money → columns: Total_Amount, Total_Currency
+    entity.OwnsOne(o => o.Total, money =>
+    {
+        money.Property(m => m.Amount).HasColumnName("total_amount").HasPrecision(18, 2);
+        money.Property(m => m.Currency).HasColumnName("total_currency").HasMaxLength(3);
+    });
+
+    // Address → columns: shipping_street, shipping_city, etc.
+    entity.OwnsOne(o => o.ShippingAddress, addr =>
+    {
+        addr.Property(a => a.Street).HasColumnName("shipping_street").HasMaxLength(200);
+        addr.Property(a => a.City).HasColumnName("shipping_city").HasMaxLength(100);
+        addr.Property(a => a.State).HasColumnName("shipping_state").HasMaxLength(100);
+        addr.Property(a => a.PostalCode).HasColumnName("shipping_postal").HasMaxLength(20);
+        addr.Property(a => a.Country).HasColumnName("shipping_country").HasMaxLength(3);
+    });
+
+    // Optional billing address — same pattern
+    entity.OwnsOne(o => o.BillingAddress);
+});
+```
+
+## OwnsMany — Collections of Value Objects
+
+```csharp
+// Order with line items as owned entities
+public class Order
+{
+    public int Id { get; set; }
+    public List<OrderLine> Lines { get; set; } = [];
+}
+
+public class OrderLine  // value object (no navigation back to Order)
+{
+    public int ProductId { get; set; }
+    public string ProductName { get; set; } = "";  // denormalized
+    public int Quantity { get; set; }
+    public Money UnitPrice { get; set; } = null!;
+}
+
+// OwnsMany → stored in a separate table, but owned by Order
+modelBuilder.Entity<Order>()
+    .OwnsMany(o => o.Lines, line =>
+    {
+        line.WithOwner().HasForeignKey("OrderId");
+        line.Property<int>("Id");  // shadow key
+        line.HasKey("Id");
+
+        line.OwnsOne(l => l.UnitPrice, p =>
+        {
+            p.Property(m => m.Amount).HasColumnName("unit_price");
+            p.Property(m => m.Currency).HasColumnName("currency");
+        });
+    });
+```
+
+## JSON Columns — EF Core 7+
+
+```csharp
+// Store complex objects as JSON in a single column
+// Perfect for configuration, metadata, or rarely-queried nested data
+
+public class Product
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public ProductAttributes Attributes { get; set; } = new();
+}
+
+public class ProductAttributes  // NOT an entity — stored as JSON
+{
+    public Dictionary<string, string> Tags { get; set; } = [];
+    public List<string> Colors { get; set; } = [];
+    public Dimensions? Dimensions { get; set; }
+    public string? Brand { get; set; }
+}
+
+public record Dimensions(double Width, double Height, double Depth, string Unit);
+
+// Configuration — single JSON column
+modelBuilder.Entity<Product>()
+    .OwnsOne(p => p.Attributes, attr =>
+    {
+        attr.ToJson();  // stored as JSON in the column "attributes"
+    });
+
+// EF Core can query into JSON with LINQ (SQL Server 2022+ / PostgreSQL):
+var products = await db.Products
+    .Where(p => p.Attributes.Brand == "Acme")
+    .ToListAsync();
+// SQL: WHERE JSON_VALUE(attributes, '$.Brand') = 'Acme'
+
+var colorful = await db.Products
+    .Where(p => p.Attributes.Colors.Contains("Red"))
+    .ToListAsync();
+```
+
+## Table Splitting — Multiple Entities, One Table
+
+```csharp
+// Share one table between a "header" entity and a "detail" entity
+// Useful when you often query header without detail (avoid loading large blobs)
+
+public class Article
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = "";
+    public string Summary { get; set; } = "";
+    public DateTime PublishedAt { get; set; }
+    public ArticleContent Content { get; set; } = null!;  // large — loaded separately
+}
+
+public class ArticleContent
+{
+    public int Id { get; set; }
+    public string Body { get; set; } = "";  // potentially megabytes
+    public string HtmlRendered { get; set; } = "";
+}
+
+// Both entities map to the SAME table
+modelBuilder.Entity<Article>().ToTable("articles");
+modelBuilder.Entity<ArticleContent>().ToTable("articles");  // same table!
+modelBuilder.Entity<Article>()
+    .HasOne(a => a.Content)
+    .WithOne()
+    .HasForeignKey<ArticleContent>(c => c.Id);
+
+// Query without body:
+var headers = await db.Articles.AsNoTracking().ToListAsync();  // no ArticleContent loaded
+
+// Query with body:
+var full = await db.Articles.Include(a => a.Content).FirstOrDefaultAsync(a => a.Id == id);
+```
+
+## Complex Types — EF Core 8
+
+```csharp
+// EF Core 8 introduces ComplexType — like OwnsOne but simpler
+// No table splitting, no key, just embedded columns
+
+[ComplexType]
+public class Money
+{
+    public decimal Amount { get; set; }
+    public string Currency { get; set; } = "USD";
+}
+
+public class Invoice
+{
+    public int Id { get; set; }
+    public Money Subtotal { get; set; } = new();  // columns: Subtotal_Amount, Subtotal_Currency
+    public Money Tax { get; set; } = new();
+    public Money Total { get; set; } = new();
+}
+
+// No configuration needed with [ComplexType] attribute
+// Automatically mapped to columns with underscore naming
+```
+
+<ConceptCallout type="tip" title="DDD with EF Core">
+Use **Owned Entities** (`OwnsOne`/`OwnsMany`) to map Value Objects without a separate identity. Use **JSON columns** (`ToJson()`) for nested structures you rarely query against. Use **Complex Types** (EF 8) for the simplest embedding with no overhead. Keep Aggregates in sync through the Aggregate Root — don't let external code modify owned entities directly.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Model an e-commerce `Customer` aggregate with `Address` (shipping), `PaymentMethod` (card type, last 4 digits), and `Preferences` (notification settings as JSON column). Configure all as owned types.
+2. Implement a `Money` value object with `Amount` and `Currency`. Add `Add`, `Multiply`, and `Convert(decimal rate, string toCurrency)` methods. Map it as an owned entity in `Order`, `Invoice`, and `Product.Price`. Verify EF generates the right column names.
+3. Use table splitting to separate `Article` header (title, slug, published date, category) from `Article` body (markdown content, HTML, word count). Write queries showing that listing articles doesn't load the body, but fetching a single article does.
+</ExerciseBlock>

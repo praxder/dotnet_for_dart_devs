@@ -1,0 +1,259 @@
+---
+title: "EF Core: Transactions and Concurrency"
+day: 94
+week: 19
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "sqflite transactions, optimistic locking"
+csharpConcept: "DbTransaction, TransactionScope, RowVersion, ConcurrencyToken, DbUpdateConcurrencyException"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Transactions and concurrency control are critical for data integrity in any production system. EF Core provides both explicit transaction management and optimistic concurrency — protecting against lost updates when multiple users modify the same data.
+
+## Transactions in EF Core
+
+```csharp
+// By default, SaveChangesAsync() wraps all changes in a single transaction
+// For multi-step operations spanning multiple SaveChanges calls:
+
+public class OrderService(AppDbContext db)
+{
+    public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request)
+    {
+        // Explicit transaction
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        try
+        {
+            // Step 1: Deduct inventory
+            foreach (var item in request.Items)
+            {
+                var product = await db.Products.FindAsync(item.ProductId)
+                    ?? throw new InvalidOperationException($"Product {item.ProductId} not found");
+
+                if (product.StockQuantity < item.Quantity)
+                    throw new InvalidOperationException($"Insufficient stock for {product.Name}");
+
+                product.StockQuantity -= item.Quantity;
+            }
+            await db.SaveChangesAsync();  // save inventory changes
+
+            // Step 2: Create order
+            var order = new Order
+            {
+                CustomerId = request.CustomerId,
+                Lines = request.Items.Select(i => new OrderLine
+                {
+                    ProductId = i.ProductId,
+                    Quantity = i.Quantity,
+                    UnitPrice = i.UnitPrice
+                }).ToList(),
+                Total = request.Items.Sum(i => i.Quantity * i.UnitPrice),
+                Status = OrderStatus.Pending
+            };
+            db.Orders.Add(order);
+            await db.SaveChangesAsync();  // save order
+
+            // Step 3: Commit both operations atomically
+            await transaction.CommitAsync();
+            return order;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();  // undo both SaveChanges
+            throw;
+        }
+    }
+}
+```
+
+## Savepoints — Partial Rollback
+
+```csharp
+// SQL Server and PostgreSQL support savepoints within a transaction
+await using var transaction = await db.Database.BeginTransactionAsync();
+
+db.Orders.Add(order);
+await db.SaveChangesAsync();
+
+await transaction.CreateSavepointAsync("AfterOrder");
+
+try
+{
+    await ProcessPaymentAsync(order);
+    await db.SaveChangesAsync();
+    await transaction.CommitAsync();
+}
+catch (PaymentException)
+{
+    // Roll back only to the savepoint — keeps the order record
+    await transaction.RollbackToSavepointAsync("AfterOrder");
+    order.Status = OrderStatus.PaymentFailed;
+    await db.SaveChangesAsync();
+    await transaction.CommitAsync();
+}
+```
+
+## Optimistic Concurrency — RowVersion
+
+Optimistic concurrency assumes conflicts are rare. Instead of locking rows, EF Core checks if data was changed since you read it.
+
+```csharp
+public class Product
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public decimal Price { get; set; }
+    public int StockQuantity { get; set; }
+
+    // SQL Server: rowversion/timestamp — auto-updated by DB on every write
+    [Timestamp]
+    public byte[] RowVersion { get; set; } = [];
+}
+
+// Or with Fluent API (PostgreSQL uses xmin):
+modelBuilder.Entity<Product>()
+    .Property(p => p.RowVersion)
+    .IsRowVersion();
+
+// When two users edit the same product:
+// User A reads: RowVersion = 0x0001
+// User B reads: RowVersion = 0x0001
+// User A saves: RowVersion → 0x0002 ✓
+// User B saves: EF checks RowVersion = 0x0001, DB has 0x0002 → CONFLICT!
+```
+
+## Handling Concurrency Conflicts
+
+```csharp
+public async Task UpdateProductPriceAsync(int id, decimal newPrice)
+{
+    const int maxRetries = 3;
+    for (int attempt = 0; attempt < maxRetries; attempt++)
+    {
+        try
+        {
+            var product = await db.Products.FindAsync(id)
+                ?? throw new KeyNotFoundException();
+            product.Price = newPrice;
+            await db.SaveChangesAsync();
+            return;  // success
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            if (attempt == maxRetries - 1) throw;  // give up after 3 attempts
+
+            // Get the current DB values
+            var entry = ex.Entries.Single();
+            var dbValues = await entry.GetDatabaseValuesAsync();
+
+            if (dbValues is null)
+                throw new InvalidOperationException("Record was deleted by another user");
+
+            // Strategy 1: Client wins — overwrite with our values
+            // entry.OriginalValues.SetValues(dbValues);
+
+            // Strategy 2: Store wins — discard our changes
+            // entry.CurrentValues.SetValues(dbValues);
+
+            // Strategy 3: Merge — use DB price, keep other client changes
+            entry.OriginalValues.SetValues(dbValues);
+            // (keep our newPrice since we specifically want to update it)
+        }
+    }
+}
+```
+
+## ConcurrencyToken — Field-Level Concurrency
+
+```csharp
+// When you don't want a rowversion, mark specific fields as concurrency tokens
+public class BankAccount
+{
+    public int Id { get; set; }
+    public decimal Balance { get; set; }
+
+    // Any update must include the current balance value
+    [ConcurrencyCheck]
+    public decimal BalanceSnapshot { get; set; }
+}
+
+// Fluent API:
+modelBuilder.Entity<BankAccount>()
+    .Property(a => a.Balance)
+    .IsConcurrencyToken();
+
+// EF Core generates: UPDATE ... WHERE Id=@id AND Balance=@originalBalance
+// If balance changed since we read it, 0 rows updated → throws DbUpdateConcurrencyException
+```
+
+## Pessimistic Concurrency — Database Locking
+
+```csharp
+// When you MUST prevent concurrent modifications (financial operations):
+// Use raw SQL to lock rows during read
+
+public async Task TransferFundsAsync(int fromId, int toId, decimal amount)
+{
+    await using var tx = await db.Database.BeginTransactionAsync(
+        System.Data.IsolationLevel.Serializable);  // strongest isolation
+
+    // Lock the rows during read (SQL Server)
+    var from = await db.Accounts
+        .FromSql($"SELECT * FROM accounts WITH (UPDLOCK, ROWLOCK) WHERE Id = {fromId}")
+        .FirstAsync();
+
+    var to = await db.Accounts
+        .FromSql($"SELECT * FROM accounts WITH (UPDLOCK, ROWLOCK) WHERE Id = {toId}")
+        .FirstAsync();
+
+    if (from.Balance < amount)
+        throw new InsufficientFundsException();
+
+    from.Balance -= amount;
+    to.Balance += amount;
+
+    await db.SaveChangesAsync();
+    await tx.CommitAsync();
+}
+```
+
+<ConceptCallout type="tip" title="Choose the Right Concurrency Strategy">
+- **Optimistic** (RowVersion): Best for most cases. Low overhead, handles conflicts after the fact. Use when conflicts are rare.
+- **Pessimistic** (database locks): Use only for critical financial operations. High overhead, can cause deadlocks.
+- **No concurrency**: Acceptable for admin-only writes or append-only data.
+</ConceptCallout>
+
+## TransactionScope — Spanning Multiple DbContexts
+
+```csharp
+// When you need to coordinate across multiple services/DbContexts
+// Requires Microsoft.Data.SqlClient (DTC must be enabled on server)
+using var scope = new TransactionScope(
+    TransactionScopeOption.Required,
+    new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted },
+    TransactionScopeAsyncFlowOption.Enabled);  // REQUIRED for async!
+
+await orderDb.SaveChangesAsync();   // participates in same transaction
+await inventoryDb.SaveChangesAsync();
+
+scope.Complete();  // commit all
+// If Complete() is never called, all changes are rolled back on Dispose
+```
+
+<ConceptCallout type="gotcha" title="TransactionScope and Async">
+Always use `TransactionScopeAsyncFlowOption.Enabled` when using `TransactionScope` with async code. Without it, the transaction context is lost when you await across threads. Also, `TransactionScope` uses MSDTC (Distributed Transaction Coordinator) which may not be available in cloud/container environments — prefer explicit `DbTransaction` for simple cases.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Build a seat-reservation system: `Seat` has a `RowVersion`. Simulate two concurrent attempts to book the same seat (use two DbContext instances). The first succeeds; the second catches `DbUpdateConcurrencyException` and returns a "seat taken" error.
+2. Implement a bank transfer with optimistic concurrency on the `Balance` field. If a concurrent transfer causes a conflict, implement a retry loop that re-reads the balance and retries.
+3. Write a test that demonstrates the N+1 scenario at the transaction level: open a transaction, insert 5 products in a loop with individual `SaveChangesAsync()` calls, and compare performance against a single `SaveChangesAsync()` with all 5 products batched. Use SQL logging to count queries.
+</ExerciseBlock>

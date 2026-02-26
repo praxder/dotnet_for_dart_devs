@@ -1,0 +1,309 @@
+---
+title: "Advanced Testing: Integration and End-to-End"
+day: 114
+week: 23
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "Flutter integration tests, mock servers"
+csharpConcept: "WebApplicationFactory, TestContainers, test fixtures, Respawn, contract testing"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Integration tests run your entire API stack — routes, middleware, auth, database — without mocking. They catch bugs that unit tests miss. This lesson builds a production-grade integration test infrastructure with real databases, authentication helpers, and fast test isolation.
+
+## WebApplicationFactory — Spin Up the Whole App
+
+```csharp
+// Create a custom factory that configures test infrastructure
+public class BlogApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
+{
+    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
+        .WithImage("postgres:16-alpine")
+        .WithDatabase("testdb")
+        .WithUsername("test")
+        .WithPassword("test")
+        .Build();
+
+    // Replace production services with test versions
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureTestServices(services =>
+        {
+            // Replace real DB with TestContainers DB
+            services.RemoveAll<DbContextOptions<AppDbContext>>();
+            services.RemoveAll<AppDbContext>();
+            services.AddDbContext<AppDbContext>(options =>
+                options.UseNpgsql(_postgres.GetConnectionString()));
+
+            // Replace email service with fake
+            services.RemoveAll<IEmailService>();
+            services.AddSingleton<IEmailService, FakeEmailService>();
+
+            // Replace external payment service
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(new MockPaymentGateway(succeed: true));
+        });
+    }
+
+    // Start TestContainers before any tests run
+    public async Task InitializeAsync()
+    {
+        await _postgres.StartAsync();
+
+        // Run migrations
+        using var scope = Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.MigrateAsync();
+    }
+
+    public new async Task DisposeAsync()
+    {
+        await _postgres.StopAsync();
+        await base.DisposeAsync();
+    }
+}
+```
+
+## Test Base Class — Shared Infrastructure
+
+```csharp
+// Base class all integration tests inherit from
+public abstract class IntegrationTestBase(BlogApiFactory factory)
+    : IClassFixture<BlogApiFactory>, IAsyncLifetime
+{
+    protected readonly HttpClient Client = factory.CreateClient();
+    protected AppDbContext Db = null!;
+
+    public async Task InitializeAsync()
+    {
+        var scope = factory.Services.CreateScope();
+        Db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await CleanDatabaseAsync();
+        await SeedTestDataAsync();
+    }
+
+    // Reset DB between tests — much faster than recreating the DB
+    private async Task CleanDatabaseAsync()
+    {
+        // Respawn — fast database cleanup
+        // dotnet add package Respawn
+        var respawner = await Respawner.CreateAsync(
+            Db.Database.GetDbConnection(),
+            new RespawnerOptions
+            {
+                SchemasToInclude = ["public"],
+                DbAdapter = DbAdapter.Postgres
+            });
+        await respawner.ResetAsync(Db.Database.GetDbConnection());
+    }
+
+    protected virtual Task SeedTestDataAsync() => Task.CompletedTask;
+
+    // Authentication helpers
+    protected async Task<string> LoginAsAsync(string email, string password = "Password123!")
+    {
+        var response = await Client.PostAsJsonAsync("/api/auth/login",
+            new { Email = email, Password = password });
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<TokenResponse>();
+        return result!.AccessToken;
+    }
+
+    protected void AuthorizeAs(string token)
+        => Client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", token);
+
+    protected async Task<string> LoginAsAdminAsync()
+    {
+        // Admin user is always seeded
+        return await LoginAsAsync("admin@test.com");
+    }
+
+    protected async Task<AppUser> CreateUserAsync(
+        string email = "user@test.com",
+        string role = "User")
+    {
+        var userManager = factory.Services.GetRequiredService<UserManager<AppUser>>();
+        var user = new AppUser { UserName = email, Email = email, DisplayName = "Test User" };
+        await userManager.CreateAsync(user, "Password123!");
+        await userManager.AddToRoleAsync(user, role);
+        return user;
+    }
+
+    public Task DisposeAsync() => Task.CompletedTask;
+}
+```
+
+## Writing Integration Tests
+
+```csharp
+public class PostEndpointTests(BlogApiFactory factory)
+    : IntegrationTestBase(factory)
+{
+    private Author _author = null!;
+
+    protected override async Task SeedTestDataAsync()
+    {
+        _author = new Author
+        {
+            Name = "Test Author",
+            Email = "author@test.com",
+            User = await CreateUserAsync("author@test.com", "Author")
+        };
+        Db.Authors.Add(_author);
+        await Db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task CreatePost_ValidData_Returns201()
+    {
+        // Arrange
+        var token = await LoginAsAsync("author@test.com");
+        AuthorizeAs(token);
+
+        var command = new
+        {
+            Title = "My First Post",
+            Body = "This is the body of my first post with more than 100 characters so validation passes.",
+            Summary = "A brief summary",
+            Tags = new[] { "testing", "dotnet" }
+        };
+
+        // Act
+        var response = await Client.PostAsJsonAsync("/api/posts", command);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var created = await response.Content.ReadFromJsonAsync<PostDto>();
+        Assert.NotNull(created);
+        Assert.Equal("My First Post", created.Title);
+        Assert.Equal("my-first-post", created.Slug);  // auto-generated
+        Assert.Equal(PostStatus.Draft.ToString(), created.Status);
+    }
+
+    [Fact]
+    public async Task PublishPost_AsOwner_Returns200()
+    {
+        // Arrange: create a draft post
+        var token = await LoginAsAsync("author@test.com");
+        AuthorizeAs(token);
+        var createResponse = await Client.PostAsJsonAsync("/api/posts", CreatePostRequest());
+        var post = await createResponse.Content.ReadFromJsonAsync<PostDto>();
+
+        // Act: publish it
+        var publishResponse = await Client.PostAsync($"/api/posts/{post!.Id}/publish", null);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, publishResponse.StatusCode);
+
+        // Verify in database
+        var dbPost = await Db.Posts.FindAsync(post.Id);
+        Assert.Equal(PostStatus.Published, dbPost!.Status);
+        Assert.NotNull(dbPost.PublishedAt);
+    }
+
+    [Fact]
+    public async Task GetPost_Published_IncrementsViewCount()
+    {
+        // Arrange: create and publish a post
+        var post = await CreateAndPublishPostAsync();
+
+        // Act: view it 3 times
+        for (int i = 0; i < 3; i++)
+            await Client.GetAsync($"/api/blog/posts/{post.Slug}");
+
+        // Assert
+        await Db.Entry(post).ReloadAsync();
+        Assert.Equal(3, post.ViewCount);
+    }
+
+    [Fact]
+    public async Task DeletePost_OtherUsersPost_Returns404()
+    {
+        // Arrange: post belongs to author, delete as different user
+        var post = await CreateAndPublishPostAsync();
+
+        var otherUser = await CreateUserAsync("other@test.com");
+        var otherToken = await LoginAsAsync("other@test.com");
+        AuthorizeAs(otherToken);
+
+        // Act
+        var response = await Client.DeleteAsync($"/api/posts/{post.Id}");
+
+        // Assert: 404 (not 403) — don't reveal resource exists
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+}
+```
+
+## Contract Testing — API Consumer Expectations
+
+```csharp
+// Verify your API matches what clients expect
+// dotnet add package PactNet
+
+[Collection("Pact")]
+public class PostApiContractTests
+{
+    private readonly IPactBuilderV4 _pactBuilder;
+
+    public PostApiContractTests()
+    {
+        _pactBuilder = Pact.V4("flutter-app", "blog-api", new PactConfig
+        {
+            PactDir = "./pacts",
+            LogLevel = PactLogLevel.Information
+        }).WithHttpInteractions();
+    }
+
+    [Fact]
+    public async Task GetPublishedPost_ReturnsExpectedShape()
+    {
+        _pactBuilder
+            .UponReceiving("a request for a published post")
+            .Given("a published post with slug 'test-post' exists")
+            .WithRequest(HttpMethod.Get, "/api/blog/posts/test-post")
+            .WillRespond()
+            .WithStatus(200)
+            .WithHeader("Content-Type", "application/json; charset=utf-8")
+            .WithJsonBody(new
+            {
+                id = Match.Integer(),
+                title = Match.Type("Test Post"),
+                slug = "test-post",
+                body = Match.Type("..."),
+                authorName = Match.Type("Jane Doe"),
+                publishedAt = Match.Type("2024-01-01T00:00:00Z")
+            });
+
+        await _pactBuilder.VerifyAsync(async ctx =>
+        {
+            var client = new HttpClient { BaseAddress = ctx.MockServerUri };
+            var response = await client.GetAsync("/api/blog/posts/test-post");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        });
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Integration Test Strategy">
+- **Unit tests**: test business logic in isolation (fast, no I/O)
+- **Integration tests**: test HTTP layer + database together (slower, catches more bugs)
+- **Contract tests**: test that API responses match client expectations (catch breaking changes early)
+- **E2E tests**: test full user journeys (slowest, highest value for critical paths)
+
+Aim for the testing pyramid: many unit tests, some integration tests, few E2E tests.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Set up a `WebApplicationFactory` with TestContainers (PostgreSQL or SQLite). Write tests for your blog API's complete post lifecycle: create → draft → publish → archive → soft delete. Use Respawn to reset the database between each test.
+2. Write a test that verifies your API returns consistent pagination responses: calling `GET /api/posts?page=1&pageSize=5` and `GET /api/posts?page=2&pageSize=5` together should return 10 unique posts, and the total should match a direct database count.
+3. Add a performance assertion to your integration tests: use `Stopwatch` to measure response time and assert that all endpoint responses complete in under 200ms. This catches N+1 queries and missing indexes before they reach production.
+</ExerciseBlock>

@@ -1,0 +1,207 @@
+---
+title: "Parallel Programming: PLINQ and Task Parallel Library"
+day: 63
+week: 13
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Isolates for CPU-bound work, compute-intensive tasks"
+csharpConcept: "PLINQ, Parallel.ForEach, Parallel.For, Parallel.ForEachAsync, thread safety"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Async/await handles I/O-bound concurrency. For CPU-bound work across multiple cores — image processing, data crunching, parallel computations — .NET offers PLINQ and the Task Parallel Library (TPL). Dart isolates map conceptually to TPL tasks, but .NET provides richer primitives.
+
+## PLINQ — Parallel LINQ
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: use Isolate.run for CPU-bound work
+  Future<List<int>> processInParallel(List<int> data) async {
+    return await Isolate.run(() {
+      return data.map((n) => expensiveCalc(n)).toList();
+    });
+  }
+  // Note: data must be copied to the isolate
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // PLINQ: just add .AsParallel()
+  var results = data
+      .AsParallel()                     // enable parallelism
+      .WithDegreeOfParallelism(4)       // use at most 4 cores (optional)
+      .WithExecutionMode(ParallelExecutionMode.ForceParallelism)  // optional
+      .Where(n => IsValidInput(n))
+      .Select(n => ExpensiveCalc(n))    // runs on multiple threads
+      .OrderBy(n => n)                  // preserves logical order
+      .ToList();
+
+  // For order-preserving (preserves input order — slower):
+  var ordered = data
+      .AsParallel()
+      .AsOrdered()                      // same order as sequential LINQ
+      .Select(n => ExpensiveCalc(n))
+      .ToList();
+  ```
+  </div>
+</CodeComparison>
+
+```csharp
+// When PLINQ helps vs hurts:
+// ✓ Large data sets (thousands+ items)
+// ✓ CPU-bound operations (image processing, math, parsing)
+// ✓ Independent operations (no shared state)
+// ✗ Small collections (parallelism overhead exceeds benefit)
+// ✗ I/O bound work (use async/await instead)
+// ✗ Operations with side effects (shared mutable state → race conditions)
+
+// Benchmark to verify improvement:
+var sw = Stopwatch.StartNew();
+var sequential = data.Select(ExpensiveCalc).ToList();
+Console.WriteLine($"Sequential: {sw.ElapsedMilliseconds}ms");
+
+sw.Restart();
+var parallel = data.AsParallel().Select(ExpensiveCalc).ToList();
+Console.WriteLine($"Parallel: {sw.ElapsedMilliseconds}ms");
+```
+
+## Parallel.For and Parallel.ForEach
+
+```csharp
+// Parallel.For — parallel for loop
+var results = new int[1_000_000];
+Parallel.For(0, results.Length, i =>
+{
+    results[i] = ExpensiveCalc(i);
+});
+
+// Parallel.ForEach — parallel foreach
+var files = Directory.GetFiles(".", "*.csv");
+var allData = new ConcurrentBag<ParsedData>();
+
+Parallel.ForEach(files,
+    new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+    file =>
+    {
+        var data = ParseFile(file);
+        allData.Add(data);  // ConcurrentBag is thread-safe
+    });
+
+// Parallel.ForEach with local state (accumulator per thread)
+long totalSum = 0;
+Parallel.ForEach(
+    source: numbers,
+    localInit: () => 0L,                          // each thread starts with 0
+    body: (n, state, localSum) => localSum + n,   // local accumulation
+    localFinally: localSum =>
+        Interlocked.Add(ref totalSum, localSum)   // combine thread-local sums
+);
+```
+
+## Parallel.ForEachAsync — Async + Parallel
+
+```csharp
+// .NET 6+: parallel async operations with concurrency limit
+var urls = GetUrls();  // IEnumerable<string>
+
+await Parallel.ForEachAsync(
+    urls,
+    new ParallelOptions { MaxDegreeOfParallelism = 10 },  // max 10 concurrent
+    async (url, cancellationToken) =>
+    {
+        var response = await httpClient.GetStringAsync(url, cancellationToken);
+        await ProcessResponseAsync(response);
+    });
+```
+
+## Thread Safety — Concurrent Collections
+
+```csharp
+// WRONG: List<T> is not thread-safe
+var results = new List<int>();
+Parallel.For(0, 1000, i =>
+{
+    results.Add(i * i);  // DATA RACE — undefined behavior
+});
+
+// RIGHT: use thread-safe collections
+var safeResults = new ConcurrentBag<int>();
+Parallel.For(0, 1000, i =>
+    safeResults.Add(i * i));  // ConcurrentBag is thread-safe
+
+// ConcurrentDictionary — thread-safe dictionary
+var wordCounts = new ConcurrentDictionary<string, int>(
+    StringComparer.OrdinalIgnoreCase);
+
+Parallel.ForEach(words, word =>
+    wordCounts.AddOrUpdate(word, 1, (_, count) => count + 1));
+
+// Interlocked — atomic operations on primitives
+int totalProcessed = 0;
+Parallel.ForEach(items, item =>
+{
+    Process(item);
+    Interlocked.Increment(ref totalProcessed);  // atomic increment
+});
+```
+
+<ConceptCallout type="gotcha" title="Shared Mutable State Is the Root of All Parallel Evil">
+The hardest bug to find is a data race — two threads writing the same memory location simultaneously. Symptoms: intermittent crashes, wrong results that only appear under load. Prevent races by: (1) using immutable data, (2) using `Concurrent*` collections, (3) using `Interlocked` for counters, (4) using `lock` for complex state.
+</ConceptCallout>
+
+## The lock Statement
+
+```csharp
+// lock — mutual exclusion for shared state
+public class ThreadSafeCounter
+{
+    private int _count;
+    private readonly object _lock = new();
+
+    public void Increment()
+    {
+        lock (_lock)
+        {
+            _count++;  // safe — only one thread at a time
+        }
+    }
+
+    public int Value
+    {
+        get { lock (_lock) { return _count; } }
+    }
+}
+
+// Prefer lock to avoid deadlocks:
+// ✓ One lock per object/resource
+// ✓ Always acquire locks in the same order
+// ✗ Don't call external code inside a lock (can deadlock)
+// ✗ Don't lock on `this` or `typeof(T)` (public — others might lock too)
+
+// SemaphoreSlim — async-compatible lock
+var semaphore = new SemaphoreSlim(1, 1);  // initialCount=1, maxCount=1 → mutex
+
+await semaphore.WaitAsync();
+try
+{
+    await DoExclusiveWorkAsync();
+}
+finally
+{
+    semaphore.Release();
+}
+```
+
+<ExerciseBlock>
+1. Implement a parallel image processing pipeline using `Parallel.ForEach`: read 100 PNG files (you can mock them as `byte[]` arrays), apply a "grayscale" transformation (average of RGB channels), and write results back. Use `ConcurrentDictionary<string, byte[]>` to store results.
+2. Demonstrate a data race: create two threads that both increment a shared `int` counter 1,000,000 times. Show the final value is less than 2,000,000. Fix it three ways: with `lock`, with `Interlocked.Increment`, and with `ConcurrentCounter` using `Interlocked`.
+3. Write a parallel MapReduce: (1) Map stage — `Parallel.For` to process chunks, accumulate results in `ConcurrentBag`; (2) Reduce stage — LINQ `GroupBy` + `Aggregate` to combine. Use it to count word frequencies in a large text corpus.
+</ExerciseBlock>

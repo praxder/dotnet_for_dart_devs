@@ -1,0 +1,248 @@
+---
+title: "Performance Tuning and Load Testing"
+day: 124
+week: 25
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "Flutter performance profiling, DevTools"
+csharpConcept: "BenchmarkDotNet, k6, bombardier, response caching, output caching, compression"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Performance optimization without measurement is guesswork. This lesson covers profiling .NET APIs with real tools, load testing to find breaking points, and the most impactful ASP.NET Core performance techniques.
+
+## Load Testing with k6
+
+```javascript
+// k6 — modern load testing tool (JavaScript scripting)
+// Install: brew install k6
+
+// scripts/load-test.js
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Rate } from 'k6/metrics';
+
+const errorRate = new Rate('errors');
+
+export const options = {
+    stages: [
+        { duration: '30s', target: 10 },   // ramp up to 10 users
+        { duration: '1m', target: 50 },    // stay at 50 users
+        { duration: '30s', target: 100 },  // spike to 100
+        { duration: '1m', target: 100 },   // hold
+        { duration: '30s', target: 0 },    // ramp down
+    ],
+    thresholds: {
+        'http_req_duration': ['p(95)<200'],  // 95% of requests < 200ms
+        'http_req_failed': ['rate<0.01'],    // error rate < 1%
+        'errors': ['rate<0.05'],
+    },
+};
+
+export default function () {
+    // Test the most common endpoint
+    const res = http.get('http://localhost:5000/api/blog/posts');
+
+    check(res, {
+        'status is 200': (r) => r.status === 200,
+        'response time < 100ms': (r) => r.timings.duration < 100,
+        'has posts': (r) => JSON.parse(r.body).items.length > 0,
+    });
+
+    errorRate.add(res.status !== 200);
+    sleep(1);
+}
+
+// Run: k6 run scripts/load-test.js
+// Output shows: RPS, P50/P95/P99 latency, error rate, throughput
+```
+
+## Identifying Hot Paths with PerfView / dotnet-trace
+
+```bash
+# Collect a CPU trace during load test
+dotnet-trace collect --process-id $(pidof dotnet) --duration 30s
+
+# Analyze with:
+# - Visual Studio Performance Profiler
+# - JetBrains dotMemory / dotTrace
+# - PerfView (Microsoft)
+
+# Quick diagnosis with dotnet-counters:
+dotnet-counters monitor --process-id $(pidof dotnet) \
+    --counters System.Runtime,Microsoft.AspNetCore.Hosting
+
+# Shows live:
+# [System.Runtime]
+#   CPU Usage (%)                             75.2
+#   GC Heap Size (MB)                        148.3
+#   Gen 0 GC Count / 1 sec                    12
+#   ThreadPool Queue Length                    45  ← too high = thread starvation
+# [Microsoft.AspNetCore.Hosting]
+#   Request Rate / 1 sec                      850
+#   Failed Requests / 1 sec                     3
+```
+
+## Response Caching and Output Caching
+
+```csharp
+// Output Caching — cache entire HTTP responses
+builder.Services.AddOutputCache(options =>
+{
+    options.AddPolicy("PostList", builder =>
+        builder
+            .Expire(TimeSpan.FromMinutes(2))
+            .Tag("posts")          // invalidate with tag
+            .VaryByQuery("page", "pageSize", "tag", "authorId"));
+
+    options.AddPolicy("SinglePost", builder =>
+        builder
+            .Expire(TimeSpan.FromMinutes(10))
+            .Tag("post")
+            .VaryByRouteValue("slug"));
+});
+
+app.UseOutputCache();  // must be after UseRouting, before UseAuthorization
+
+// Apply to endpoints
+app.MapGet("/api/blog/posts", handler)
+    .CacheOutput("PostList")
+    .AllowAnonymous();
+
+app.MapGet("/api/blog/posts/{slug}", handler)
+    .CacheOutput("SinglePost")
+    .AllowAnonymous();
+
+// Invalidate cache when content changes
+public class PostPublishedHandler(IOutputCacheStore cache) : ...
+{
+    public async Task Handle(PostPublishedNotification n, CancellationToken ct)
+    {
+        // Invalidate all cached post lists
+        await cache.EvictByTagAsync("posts", ct);
+    }
+}
+```
+
+## Response Compression
+
+```csharp
+// Gzip/Brotli compress responses — dramatically reduces payload size
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;  // compress HTTPS responses
+    options.Providers.Add<BrotliCompressionProvider>();  // better than gzip
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(
+        ["application/json", "text/json"]);
+});
+
+builder.Services.Configure<BrotliCompressionProviderOptions>(options =>
+    options.Level = CompressionLevel.Fastest);  // balance speed vs ratio
+
+app.UseResponseCompression();  // must be before other response-writing middleware
+
+// Impact: typical JSON response 50KB → 8KB (84% reduction)
+// Worth it for any response > 1KB
+```
+
+## Memory and GC Optimization
+
+```csharp
+// Profile allocations to find GC pressure
+
+// Avoid LINQ allocation in hot paths:
+// BAD: allocates a new list on every request
+app.MapGet("/api/status", () =>
+    new { status = "ok", timestamp = DateTime.UtcNow.ToString() });
+
+// BETTER: use typed records (stack allocated for small types)
+app.MapGet("/api/status", () =>
+    Results.Ok(new StatusResponse("ok", DateTime.UtcNow)));
+
+public record StatusResponse(string Status, DateTime Timestamp);
+
+// Object pooling for expensive objects:
+public class ReportService(ObjectPool<StringBuilder> pool)
+{
+    public string GenerateCsv(IEnumerable<Order> orders)
+    {
+        var sb = pool.Get();
+        try
+        {
+            sb.AppendLine("OrderId,Customer,Total");
+            foreach (var order in orders)
+                sb.AppendLine($"{order.Id},{order.CustomerName},{order.Total}");
+            return sb.ToString();
+        }
+        finally
+        {
+            pool.Return(sb);  // return for reuse — no GC pressure
+        }
+    }
+}
+
+// Register ObjectPool:
+builder.Services.AddSingleton(
+    ObjectPool.Create(new StringBuilderPooledObjectPolicy()));
+
+// ArrayPool for temporary buffers:
+var buffer = ArrayPool<byte>.Shared.Rent(4096);
+try { /* use buffer */ }
+finally { ArrayPool<byte>.Shared.Return(buffer); }
+```
+
+## Async Best Practices
+
+```csharp
+// ConfigureAwait(false) — skip synchronization context resumption
+// Meaningful performance gain in library code / background services
+// (in ASP.NET Core, it's less critical since there's no SyncContext, but still good practice)
+var data = await db.Products.ToListAsync().ConfigureAwait(false);
+
+// Avoid async void — always return Task
+// BAD:
+public async void ProcessAsync() { /* exceptions are swallowed! */ }
+
+// GOOD:
+public async Task ProcessAsync() { /* exceptions propagate */ }
+
+// Don't block on async — deadlocks!
+// BAD:
+var result = GetDataAsync().Result;  // can deadlock in some contexts
+
+// GOOD:
+var result = await GetDataAsync();
+
+// ValueTask for high-frequency, usually-synchronous operations
+public ValueTask<string> GetCachedValueAsync(string key)
+{
+    if (_cache.TryGetValue(key, out var cached))
+        return ValueTask.FromResult(cached);  // no heap allocation!
+
+    return new ValueTask<string>(FetchFromDatabaseAsync(key));
+}
+```
+
+<ConceptCallout type="tip" title="Performance Priority Order">
+1. **Measure first** — profile, then optimize the actual bottleneck
+2. **Database queries** — N+1, missing indexes (biggest wins)
+3. **Caching** — output cache, IMemoryCache, IDistributedCache
+4. **Compression** — easy 80% payload reduction
+5. **Async all the way** — no blocking calls
+6. **Object pooling** — only for proven hot paths with allocations
+7. **Native AOT** — last resort; significant complexity for marginal gains in most APIs
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Run a k6 load test against your blog API at 50 concurrent users for 1 minute. Capture baseline P50/P95 latency and error rate. Then add output caching to the three most-called endpoints and re-run. Report the improvement.
+2. Use `dotnet-counters` to monitor your API during the load test. Identify: (a) CPU usage, (b) GC heap size and Gen 0 collection rate, (c) thread pool queue length. If any exceed thresholds (>80% CPU, >50 GC/s, queue >100), investigate and fix.
+3. Profile memory allocations: run `BenchmarkDotNet` with `[MemoryDiagnoser]` on your most-called query handler. Find the biggest allocation (likely LINQ intermediate objects or large result sets). Optimize using `AsNoTracking` + projection and re-benchmark.
+</ExerciseBlock>

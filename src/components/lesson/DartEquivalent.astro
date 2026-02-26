@@ -1,0 +1,16 @@
+---
+interface Props {
+  concept?: string;
+}
+const { concept } = Astro.props;
+---
+
+<div class="my-5 rounded-xl border border-teal-800/50 bg-teal-950/30 p-4">
+  <p class="flex items-center gap-2 text-sm font-semibold text-teal-300 mb-2">
+    <span>🎯</span>
+    <span>Coming from Dart{concept ? `: ${concept}` : ''}</span>
+  </p>
+  <div class="text-sm text-slate-300 [&>p]:m-0 [&>p]:leading-relaxed">
+    <slot />
+  </div>
+</div>

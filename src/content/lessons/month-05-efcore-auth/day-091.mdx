@@ -1,0 +1,238 @@
+---
+title: "Entity Framework Core: Getting Started"
+day: 91
+week: 19
+module: 8
+moduleName: "Entity Framework Core"
+phase: "dotnet"
+dartConcept: "drift, isar, sembast — Dart ORMs"
+csharpConcept: "DbContext, DbSet<T>, EF Core migrations, code-first, connection strings"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Entity Framework Core (EF Core) is .NET's built-in ORM — it maps C# objects to database tables, generates SQL, and manages migrations. If you've used Dart's `drift` package, EF Core is similar in concept but far more powerful and deeply integrated with the .NET ecosystem.
+
+## EF Core vs Dart ORMs
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // drift: table definition
+  class Products extends Table {
+    IntColumn get id => integer().autoIncrement()();
+    TextColumn get name => text().withLength(min: 1, max: 200)();
+    RealColumn get price => real()();
+  }
+
+  // Query
+  final products = await select(products)
+    .where((p) => p.price.isSmallerThanValue(50))
+    .get();
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // EF Core: plain C# class (POCO)
+  public class Product
+  {
+      public int Id { get; set; }  // convention: Id → primary key
+      public required string Name { get; set; }
+      public decimal Price { get; set; }
+      public int CategoryId { get; set; }
+      public Category? Category { get; set; }  // navigation property
+  }
+
+  // DbContext — the entry point to EF Core
+  public class AppDbContext : DbContext
+  {
+      public DbSet<Product> Products { get; set; }  // table accessor
+
+      protected override void OnModelCreating(ModelBuilder modelBuilder)
+      {
+          modelBuilder.Entity<Product>()
+              .Property(p => p.Price)
+              .HasPrecision(18, 2);
+      }
+  }
+
+  // Query
+  var products = await db.Products
+      .Where(p => p.Price < 50)
+      .ToListAsync();
+  ```
+  </div>
+</CodeComparison>
+
+## Setup and Configuration
+
+```bash
+# Add packages
+dotnet add package Microsoft.EntityFrameworkCore.Sqlite      # SQLite
+dotnet add package Microsoft.EntityFrameworkCore.SqlServer   # SQL Server
+dotnet add package Microsoft.EntityFrameworkCore.Design      # migrations tool
+dotnet add package Microsoft.EntityFrameworkCore.Tools       # CLI commands
+
+# Install EF migrations tool
+dotnet tool install --global dotnet-ef
+```
+
+```csharp
+// Program.cs — register DbContext
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite(builder.Configuration.GetConnectionString("Default"))
+);
+// Or SQL Server:
+// options.UseSqlServer(builder.Configuration.GetConnectionString("Default"))
+
+// Enable detailed logging in development
+if (builder.Environment.IsDevelopment())
+{
+    options.EnableSensitiveDataLogging();  // logs parameter values
+    options.LogTo(Console.WriteLine, LogLevel.Information);
+}
+```
+
+```json
+// appsettings.json
+{
+  "ConnectionStrings": {
+    "Default": "Data Source=myapp.db"
+  }
+}
+```
+
+## Creating the Data Model
+
+```csharp
+// Entities — plain C# classes (no base class required)
+public class Customer
+{
+    public int Id { get; set; }
+    public required string Name { get; set; }
+    public required string Email { get; set; }
+    public string? Phone { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public bool IsActive { get; set; } = true;
+
+    // Navigation properties
+    public List<Order> Orders { get; set; } = [];
+}
+
+public class Order
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }
+    public decimal Total { get; set; }
+    public DateTime OrderedAt { get; set; }
+    public OrderStatus Status { get; set; }
+
+    public List<OrderLine> Lines { get; set; } = [];
+}
+
+public enum OrderStatus { Pending, Processing, Shipped, Delivered, Cancelled }
+
+public class OrderLine
+{
+    public int Id { get; set; }
+    public int OrderId { get; set; }
+    public Order? Order { get; set; }
+    public int ProductId { get; set; }
+    public Product? Product { get; set; }
+    public int Quantity { get; set; }
+    public decimal UnitPrice { get; set; }
+}
+
+// DbContext
+public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
+{
+    public DbSet<Customer> Customers { get; set; }
+    public DbSet<Order> Orders { get; set; }
+    public DbSet<OrderLine> OrderLines { get; set; }
+    public DbSet<Product> Products { get; set; }
+}
+```
+
+## Creating and Applying Migrations
+
+```bash
+# Create first migration (scaffolds SQL from your C# model)
+dotnet ef migrations add InitialCreate
+
+# Review the generated migration file in Migrations/ folder!
+# Then apply to database:
+dotnet ef database update
+
+# Other migration commands:
+dotnet ef migrations list                    # list all migrations
+dotnet ef migrations remove                  # undo last migration (if not applied)
+dotnet ef database update 20240101_Initial  # rollback to specific migration
+dotnet ef dbcontext info                     # show context info
+dotnet ef dbcontext list                     # list DbContexts in the project
+```
+
+## Auto-Migrate on Startup (Development Only)
+
+```csharp
+// Apply pending migrations automatically — useful in development
+// NEVER use in production — run migrations as part of deployment pipeline
+if (app.Environment.IsDevelopment())
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await db.Database.MigrateAsync();  // applies pending migrations
+}
+```
+
+## Basic CRUD
+
+```csharp
+public class CustomerRepository(AppDbContext db)
+{
+    // Create
+    public async Task<Customer> AddAsync(Customer customer)
+    {
+        db.Customers.Add(customer);
+        await db.SaveChangesAsync();
+        return customer;  // Id is now populated
+    }
+
+    // Read by ID
+    public async Task<Customer?> GetByIdAsync(int id)
+        => await db.Customers.FindAsync(id);
+
+    // Read with filter
+    public async Task<List<Customer>> GetActiveAsync()
+        => await db.Customers.Where(c => c.IsActive).ToListAsync();
+
+    // Update
+    public async Task UpdateAsync(Customer customer)
+    {
+        db.Customers.Update(customer);
+        await db.SaveChangesAsync();
+    }
+
+    // Delete
+    public async Task DeleteAsync(int id)
+    {
+        var customer = await db.Customers.FindAsync(id);
+        if (customer is not null)
+        {
+            db.Customers.Remove(customer);
+            await db.SaveChangesAsync();
+        }
+    }
+}
+```
+
+<ExerciseBlock>
+1. Create a `ShopContext` with `Product`, `Category`, and `Review` entities. Generate and apply the initial migration. Seed 3 categories and 5 products via `HasData` in `OnModelCreating`.
+2. Write a `ProductRepository` with: `AddAsync`, `GetByIdAsync`, `GetByCategoryAsync(int categoryId)`, `UpdatePriceAsync(int id, decimal newPrice)`, `DeleteAsync(int id)`. Test each method.
+3. Add a second migration that adds a `IsDiscounted` column (bool, default false) and a `DiscountPercent` column (decimal, nullable) to the `Product` table. Apply it and verify the schema change with a SQLite viewer.
+</ExerciseBlock>

@@ -1,0 +1,258 @@
+---
+title: "Capstone Project: Flutter + .NET API (Part 2 — Ship It)"
+day: 130
+week: 26
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "shipping a complete Flutter + backend app, production readiness"
+csharpConcept: "everything — completing the full-stack capstone project"
+estimatedMinutes: 60
+isProject: true
+projectType: "capstone"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Day 130. You've completed 26 weeks of C# and .NET. Today you ship the capstone: a production-ready, real-time collaborative task board with a Flutter frontend. This lesson is your implementation guide and completion checklist.
+
+## What You're Building
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    Flutter App                                     │
+│  Login/Register  │  Kanban Board  │  Task Detail  │  Settings     │
+│       │                 │                │                         │
+│  ┌────▼────────────────▼────────────────▼─────────────────────┐  │
+│  │           Dio HTTP Client + Riverpod State Management       │  │
+│  │           Token refresh interceptor | SignalR client        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└────────────────────────────┬─────────────────────────────────────┘
+                              │ HTTPS + WSS
+┌─────────────────────────────▼────────────────────────────────────┐
+│                    .NET Backend (Azure Container Apps)            │
+│                                                                    │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────┐  ┌────────────┐  │
+│  │ REST API │  │ SignalR   │  │ Hangfire     │  │ Health     │  │
+│  │ Minimal  │  │ BoardHub  │  │ Background   │  │ Checks     │  │
+│  │ APIs     │  │ /hubs/    │  │ Jobs         │  │ /health/*  │  │
+│  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  └────────────┘  │
+│       │              │                │                            │
+│  ┌────▼──────────────▼────────────────▼──────────────────────┐   │
+│  │           MediatR Pipeline (Validation + Logging)          │   │
+│  └────────────────────────────────────────────────────────────┘   │
+│                              │                                     │
+│  ┌───────────────────────────▼──────────────────────────────┐    │
+│  │         EF Core → PostgreSQL | Redis (cache + SignalR)    │    │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Complete Implementation Checklist
+
+### Backend — Core Features
+```
+□ ASP.NET Core Identity with JWT + refresh tokens
+□ Google OAuth via ID token verification
+□ Board aggregate with task management invariants
+□ EF Core with proper indexes and relationships
+□ CQRS with MediatR + FluentValidation pipeline behavior
+□ SignalR BoardHub with Redis backplane
+□ MediatR notifications → SignalR push (task events)
+□ Resource-based authorization (board member check)
+□ Soft delete + audit logging interceptors
+□ Output caching for read-heavy endpoints
+□ Rate limiting (auth: 5/15min, API: 100/min per user)
+□ OpenAPI docs with Scalar UI
+□ Health checks (liveness + readiness)
+```
+
+### Backend — Production
+```
+□ Docker multi-stage build (chiseled image)
+□ docker-compose for local dev (API + PostgreSQL + Redis)
+□ GitHub Actions CI (build, test, push image)
+□ Azure Container Apps deployment
+□ Azure Key Vault for secrets (Managed Identity)
+□ Serilog → Application Insights
+□ Prometheus metrics + custom counters
+□ Graceful shutdown
+```
+
+### Tests
+```
+□ Unit tests: domain aggregates and business rules
+□ Integration tests: all CRUD endpoints
+□ Auth tests: JWT, resource-based authorization
+□ Real-time tests: SignalR hub (in-memory)
+□ Performance: k6 load test, <100ms P95
+□ Security: BOLA tests, rate limit tests
+```
+
+## Critical Implementation: MoveTask
+
+```csharp
+// The core real-time operation: drag-and-drop task movement
+// Must handle: concurrent moves, position gaps, column changes
+
+public record MoveTaskCommand(
+    int TaskId,
+    int BoardId,
+    string ToColumnId,
+    int NewPosition,  // 0-based, within the target column
+    string RequestingUserId) : IRequest<MoveTaskResult>;
+
+public class MoveTaskHandler(
+    AppDbContext db,
+    IAuthorizationService authService,
+    IHubContext<BoardHub, IBoardHubClient> hub,
+    ClaimsPrincipal user)
+    : IRequestHandler<MoveTaskCommand, MoveTaskResult>
+{
+    public async Task<MoveTaskResult> Handle(MoveTaskCommand request, CancellationToken ct)
+    {
+        // Load board with all tasks (need to reorder)
+        var board = await db.Boards
+            .Include(b => b.Tasks)
+            .Include(b => b.Members)
+            .FirstOrDefaultAsync(b => b.Id == request.BoardId, ct)
+            ?? throw new NotFoundException("Board not found");
+
+        // Authorization: must be a board member
+        var authResult = await authService.AuthorizeAsync(user, board, "BoardMember");
+        if (!authResult.Succeeded) throw new ForbiddenException();
+
+        // Apply domain logic
+        var task = board.MoveTask(
+            request.TaskId,
+            request.ToColumnId,
+            request.NewPosition);
+
+        await db.SaveChangesAsync(ct);
+
+        // Push real-time update to all watchers
+        await hub.Clients
+            .Group($"board:{request.BoardId}")
+            .TaskMoved(new TaskMovedEvent(
+                task.Id,
+                task.ColumnId,
+                task.Position,
+                request.RequestingUserId,
+                DateTime.UtcNow));
+
+        return new MoveTaskResult(task.Id, task.ColumnId, task.Position);
+    }
+}
+
+// Board.MoveTask — the domain logic
+public TaskItem MoveTask(int taskId, string toColumnId, int requestedPosition)
+{
+    var task = _tasks.FirstOrDefault(t => t.Id == taskId)
+        ?? throw new DomainException($"Task {taskId} not found in board");
+
+    if (!_columns.Contains(toColumnId))
+        throw new DomainException($"Column {toColumnId} not found");
+
+    var fromColumn = task.ColumnId;
+    var tasksInTarget = _tasks
+        .Where(t => t.ColumnId == toColumnId && t.Id != taskId)
+        .OrderBy(t => t.Position)
+        .ToList();
+
+    // Normalize position
+    var normalizedPosition = Math.Clamp(requestedPosition, 0, tasksInTarget.Count);
+
+    // Remove from old position and insert at new position
+    if (fromColumn == toColumnId)
+    {
+        // Same column: shift other tasks
+        foreach (var t in tasksInTarget)
+        {
+            if (t.Position >= normalizedPosition)
+                t.Position++;
+        }
+    }
+    else
+    {
+        // Different column: shift tasks in source column down
+        foreach (var t in _tasks.Where(t => t.ColumnId == fromColumn && t.Position > task.Position))
+            t.Position--;
+
+        // Shift tasks in target column up
+        foreach (var t in tasksInTarget.Where(t => t.Position >= normalizedPosition))
+            t.Position++;
+    }
+
+    task.ColumnId = toColumnId;
+    task.Position = normalizedPosition;
+
+    return task;
+}
+```
+
+## Flutter: Optimistic Drag-and-Drop
+
+```dart
+// Flutter Kanban board with DraggableScrollableSheet
+// Uses optimistic updates — the UI moves instantly, server confirms
+
+class KanbanBoard extends ConsumerWidget {
+  const KanbanBoard({required this.boardId});
+  final int boardId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final boardAsync = ref.watch(boardNotifierProvider(boardId));
+
+    return boardAsync.when(
+      data: (board) => Row(
+        children: board.columns.map((col) => Expanded(
+          child: KanbanColumn(
+            column: col,
+            tasks: board.tasksIn(col.id),
+            onTaskDropped: (taskId, newPosition) {
+              ref.read(boardNotifierProvider(boardId).notifier)
+                .moveTaskAsync(taskId, col.id, newPosition);
+            },
+          ),
+        )).toList(),
+      ),
+      loading: () => const CircularProgressIndicator(),
+      error: (e, s) => Text('Error: $e'),
+    );
+  }
+}
+```
+
+## What You've Learned
+
+After 130 days, you have working knowledge of the entire .NET ecosystem:
+
+**C# Language** (Month 1-3): Types and type system, OOP patterns in C#, generics and constraints, LINQ (functional data pipelines), async/await and the state machine, delegates, events, closures, pattern matching, records and immutability, unsafe code and memory management.
+
+**The .NET Platform** (Month 4): Configuration and options pattern, dependency injection deeply, structured logging, background services, the generic host, NuGet and project structure, diagnostics and observability.
+
+**ASP.NET Core** (Month 4): Middleware pipeline, Minimal APIs and MVC controllers, JWT and cookie authentication, policy and resource-based authorization, rate limiting, gRPC, SignalR real-time, health checks.
+
+**Entity Framework Core** (Month 5): Code-first modeling, migrations, relationships, advanced querying (projections, compiled queries, split queries), transactions and concurrency, raw SQL and views, repository pattern, CQRS with MediatR, performance optimization, owned entities and value objects, interceptors, soft delete, audit logging, multi-tenancy, temporal tables, bulk operations.
+
+**Auth and Security** (Month 5): ASP.NET Core Identity, JWT deep dive with refresh tokens, OAuth and OpenID Connect, 2FA with TOTP, data protection API, secrets management, OWASP API security, security testing.
+
+**Production** (Month 6): Docker and containers, CI/CD with GitHub Actions, Azure deployment, APM with OpenTelemetry, background jobs with Hangfire, SignalR at scale with Redis, message queues with MassTransit, API versioning and OpenAPI, load testing, microservices patterns, DDD tactical and strategic patterns, resilience with Polly, mutation and property-based testing.
+
+<ConceptCallout type="tip" title="What's Next">
+You're now a proficient C#/.NET developer. Where to go from here:
+
+1. **Deep dives**: Pick one area and go expert-level. EF Core internals, Roslyn/source generators, Native AOT, Aspire for cloud-native development.
+2. **Architecture**: Study Clean Architecture, Vertical Slice Architecture, and event sourcing in depth.
+3. **Community**: Attend .NET Conf, contribute to open-source .NET projects, follow the .NET team on GitHub.
+4. **Certifications**: Microsoft Azure Developer Associate (AZ-204) if you use Azure.
+5. **Full-stack**: You can now build the complete Flutter + .NET stack. Build that app you've been thinking about.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. **Complete the capstone**: Implement every item on the backend checklist above. This is your portfolio project — make it production-quality. Aim for: all integration tests passing, <100ms P95 under 50 concurrent users, Dockerized, CI/CD working, deployed to a cloud environment.
+2. **Flutter integration**: Connect your existing Flutter skills to the .NET backend. Implement the Kanban board UI with real-time updates via SignalR. Every task card should update across all connected clients when moved, edited, or deleted.
+3. **Portfolio presentation**: Write a `README.md` that explains: (a) what the app does, (b) the technology stack and why each piece was chosen, (c) architecture decisions (e.g., why CQRS, why event-driven for real-time), (d) how to run it locally with `docker compose up`, (e) performance characteristics and test coverage. This is the artifact you show when demonstrating your .NET expertise.
+</ExerciseBlock>

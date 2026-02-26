@@ -1,0 +1,208 @@
+---
+title: "LINQ Query Syntax and Advanced Operators"
+day: 45
+week: 9
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "No Dart equivalent — Dart uses method chaining only"
+csharpConcept: "from/where/select/join/group by query syntax, Distinct, Skip, Take, Concat, Except"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+LINQ has two syntaxes: the method syntax you've seen so far, and a SQL-like **query syntax** that compiles to the exact same method calls. You'll see both in real codebases. This lesson also covers the remaining LINQ operators you need to know.
+
+## Query Syntax vs Method Syntax
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart — method chain only
+  final result = products
+    .where((p) => p.price < 20)
+    .map((p) => p.name)
+    .toList();
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Method syntax (familiar from previous lessons)
+  var result = products
+      .Where(p => p.Price < 20)
+      .Select(p => p.Name)
+      .ToList();
+
+  // Query syntax — identical result, SQL-like
+  var result2 = (from p in products
+                 where p.Price < 20
+                 select p.Name).ToList();
+
+  // Both compile to EXACTLY the same IL code
+  ```
+  </div>
+</CodeComparison>
+
+## Query Syntax Deep Dive
+
+```csharp
+var orders = GetOrders();
+var customers = GetCustomers();
+
+// Basic query
+var cheapProducts =
+    from p in products
+    where p.Price < 20 && p.InStock
+    orderby p.Price ascending
+    select p.Name;
+
+// Join in query syntax
+var customerOrders =
+    from o in orders
+    join c in customers on o.CustomerId equals c.Id
+    select new { c.Name, o.Total, o.Date };
+
+// Group by
+var byCategory =
+    from p in products
+    group p by p.Category into g
+    select new { Category = g.Key, Count = g.Count(), Total = g.Sum(p => p.Price) };
+
+// Multiple from — cross join / SelectMany
+var pairs =
+    from a in new[] { 1, 2, 3 }
+    from b in new[] { "x", "y" }
+    select $"{a}{b}";
+// 1x, 1y, 2x, 2y, 3x, 3y
+
+// let — intermediate variables in query syntax
+var formattedPrices =
+    from p in products
+    let discounted = p.Price * 0.9m
+    let formatted = $"{p.Name}: ${discounted:F2}"
+    where discounted < 20
+    select formatted;
+```
+
+<ConceptCallout type="tip" title="When to Use Query vs Method Syntax">
+Use **method syntax** for most operations — it's more concise and all C# developers know it well. Use **query syntax** when you have complex joins or grouping with `let` — the SQL-like syntax reads more naturally for those cases. Never mix within a single query unless you wrap one in parentheses.
+</ConceptCallout>
+
+## Set Operations
+
+```csharp
+var setA = new[] { 1, 2, 3, 4, 5 };
+var setB = new[] { 3, 4, 5, 6, 7 };
+
+// Union — all unique elements from both (like SQL UNION)
+var union = setA.Union(setB);           // [1,2,3,4,5,6,7]
+
+// Intersect — elements in BOTH (like SQL INTERSECT)
+var intersect = setA.Intersect(setB);  // [3,4,5]
+
+// Except — elements in A but NOT B (like SQL EXCEPT)
+var except = setA.Except(setB);        // [1,2]
+
+// Distinct — remove duplicates
+var nums = new[] { 1, 2, 2, 3, 3, 3, 4 };
+var unique = nums.Distinct();           // [1,2,3,4]
+
+// Distinct by property (.NET 6+)
+var uniqueByCategory = products.DistinctBy(p => p.Category);
+
+// UnionBy, IntersectBy, ExceptBy — .NET 6+
+var latestByName = oldProducts.UnionBy(newProducts, p => p.Name);
+```
+
+## Pagination: Skip and Take
+
+```csharp
+// Skip — skip first N elements
+// Take — take first N elements
+// Standard pagination pattern:
+int pageNumber = 2;
+int pageSize = 10;
+
+var page = products
+    .OrderBy(p => p.Name)
+    .Skip((pageNumber - 1) * pageSize)
+    .Take(pageSize)
+    .ToList();
+
+// SkipWhile / TakeWhile — condition-based
+var afterFirst = numbers.SkipWhile(n => n < 5);   // skip until n >= 5
+var beforeFive = numbers.TakeWhile(n => n < 5);   // take until n >= 5
+
+// TakeLast / SkipLast — .NET 6+
+var lastThree = numbers.TakeLast(3);
+var withoutLast = numbers.SkipLast(1);
+```
+
+## Concat, Append, Prepend
+
+```csharp
+var list1 = new[] { 1, 2, 3 };
+var list2 = new[] { 4, 5, 6 };
+
+// Concat — join two sequences
+var combined = list1.Concat(list2);  // [1,2,3,4,5,6]
+
+// Append / Prepend — add one element (lazy, non-allocating)
+var withZero = list1.Prepend(0);    // [0,1,2,3]
+var withFour = list1.Append(4);     // [1,2,3,4]
+
+// Use Concat for multiple sequences
+var allItems = first.Concat(second).Concat(third);
+```
+
+## Quantifiers and Element Access
+
+```csharp
+var nums = new[] { 2, 4, 6, 8, 10 };
+
+// Existence checks
+bool any = nums.Any();                    // true (has elements)
+bool anyOdd = nums.Any(n => n % 2 != 0); // false
+bool allEven = nums.All(n => n % 2 == 0); // true
+bool contains = nums.Contains(6);         // true
+
+// Element access
+int first = nums.First();                 // 2
+int last = nums.Last();                   // 10
+int third = nums.ElementAt(2);           // 6
+
+int? firstOdd = nums.FirstOrDefault(n => n % 2 != 0);   // null (no odd)
+int? thirdOrNull = nums.ElementAtOrDefault(100);          // 0 (default int)
+
+// Single element (throws if 0 or > 1 match)
+int onlyFour = nums.Single(n => n == 4);
+```
+
+## Enumerable Static Methods
+
+```csharp
+// Range — generate a sequence
+var oneTo100 = Enumerable.Range(1, 100);     // 1..100
+var indices = Enumerable.Range(0, list.Count);
+
+// Repeat — repeat a value
+var fiveZeros = Enumerable.Repeat(0, 5);     // [0,0,0,0,0]
+var grids = Enumerable.Repeat(new int[5], 5); // 5 rows
+
+// Empty — empty sequence (useful as a default/fallback)
+IEnumerable<string> empty = Enumerable.Empty<string>();
+
+// Combining with existing sequences
+var allIds = userIds.Concat(Enumerable.Range(1000, 10));
+```
+
+<ExerciseBlock>
+1. Rewrite the following method chain using query syntax: `products.Where(p => p.InStock).OrderBy(p => p.Category).ThenBy(p => p.Name).Select(p => new { p.Name, p.Category, Formatted = $"${p.Price:N2}" })`.
+2. Given two lists of `Employee` (current staff and former staff), use set operations to find: (a) employees who worked in both periods, (b) current employees who were never former employees, (c) everyone who ever worked there.
+3. Implement a generic `Paginate<T>(IEnumerable<T> source, int page, int pageSize)` method that returns `(IReadOnlyList<T> Items, int TotalPages, bool HasNext, bool HasPrevious)` using `Skip`, `Take`, and `Count`.
+</ExerciseBlock>

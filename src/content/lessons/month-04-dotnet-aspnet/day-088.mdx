@@ -1,0 +1,219 @@
+---
+title: "Minimal API: Filters, TypedResults, and OpenAPI"
+day: 88
+week: 18
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "Middleware, interceptors, OpenAPI generation"
+csharpConcept: "IEndpointFilter, TypedResults, Produces, WithOpenApi, API versioning"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Minimal APIs are simple to start with, but they have a full set of production-grade features for cross-cutting concerns. This lesson covers filters (shared logic before/after handlers), TypedResults for OpenAPI accuracy, and API versioning.
+
+## Endpoint Filters — Shared Logic
+
+```csharp
+// IEndpointFilter — equivalent to action filters in controllers
+public class ValidationFilter<T> : IEndpointFilter
+{
+    public async ValueTask<object?> InvokeAsync(
+        EndpointFilterInvocationContext context,
+        EndpointFilterDelegate next)
+    {
+        // Find the T argument in the endpoint parameters
+        var model = context.Arguments.OfType<T>().FirstOrDefault();
+        if (model is null) return await next(context);
+
+        var validator = context.HttpContext.RequestServices
+            .GetRequiredService<IValidator<T>>();
+
+        var result = await validator.ValidateAsync(model);
+        if (!result.IsValid)
+            return Results.ValidationProblem(result.ToDictionary());
+
+        return await next(context);
+    }
+}
+
+// Apply to specific endpoints
+app.MapPost("/api/orders", CreateOrder)
+    .AddEndpointFilter<ValidationFilter<CreateOrderRequest>>();
+
+// Or as a generic extension method:
+public static RouteHandlerBuilder WithValidation<T>(this RouteHandlerBuilder builder)
+    => builder.AddEndpointFilter<ValidationFilter<T>>();
+
+app.MapPost("/api/products", CreateProduct)
+    .WithValidation<CreateProductRequest>();
+
+// Inline filter (simpler, without a class)
+app.MapGet("/api/slow-resource", GetResource)
+    .AddEndpointFilter(async (context, next) =>
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var result = await next(context);
+        stopwatch.Stop();
+        Console.WriteLine($"Endpoint took {stopwatch.ElapsedMilliseconds}ms");
+        return result;
+    });
+```
+
+## Filter Pipeline — Multiple Filters
+
+```csharp
+// Filters execute like middleware — in registration order for before, reverse for after
+app.MapPost("/api/orders", CreateOrder)
+    .AddEndpointFilter(async (ctx, next) =>
+    {
+        Console.WriteLine("Filter 1: Before");
+        var result = await next(ctx);
+        Console.WriteLine("Filter 1: After");
+        return result;
+    })
+    .AddEndpointFilter(async (ctx, next) =>
+    {
+        Console.WriteLine("Filter 2: Before");
+        var result = await next(ctx);
+        Console.WriteLine("Filter 2: After");
+        return result;
+    });
+// Output:
+// Filter 1: Before
+// Filter 2: Before
+// [handler runs]
+// Filter 2: After
+// Filter 1: After
+```
+
+## TypedResults — Accurate OpenAPI
+
+```csharp
+// Results.Ok() — OpenAPI doesn't know the return type
+// TypedResults.Ok<T>() — OpenAPI knows it returns T
+
+// Without TypedResults — less accurate OpenAPI
+app.MapGet("/users/{id}", async (int id) =>
+{
+    var user = await GetUserAsync(id);
+    return user is not null ? Results.Ok(user) : Results.NotFound();
+});
+
+// With TypedResults — OpenAPI documents both 200 and 404 correctly
+app.MapGet("/users/{id}", async (int id)
+    : Task<Results<Ok<UserDto>, NotFound>> =>
+{
+    var user = await GetUserAsync(id);
+    return user is not null
+        ? TypedResults.Ok(UserDto.From(user))
+        : TypedResults.NotFound();
+});
+
+// Multiple return types documented:
+// Results<Ok<UserDto>, NotFound, BadRequest<string>>
+// Results<Created<ProductDto>, BadRequest<ValidationProblemDetails>, Conflict>
+```
+
+## OpenAPI Documentation
+
+```csharp
+app.MapPost("/api/orders", CreateOrder)
+    .WithName("CreateOrder")                // operation ID
+    .WithSummary("Place a new order")       // short description
+    .WithDescription("Places an order with line items and schedules fulfillment")
+    .WithTags("Orders")
+    .Produces<OrderDto>(201, "application/json")
+    .ProducesValidationProblem()            // 422
+    .ProducesProblem(409)                   // conflict
+    .ProducesProblem(500)                   // server error
+    .WithOpenApi(operation =>
+    {
+        operation.RequestBody.Required = true;
+        operation.RequestBody.Description = "Order creation request";
+        return operation;
+    });
+```
+
+## API Versioning
+
+```bash
+dotnet add package Asp.Versioning.Http
+dotnet add package Asp.Versioning.Http.Client  # optional client helpers
+```
+
+```csharp
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;  // add headers: api-supported-versions, api-deprecated-versions
+    options.ApiVersionReader = ApiVersionReader.Combine(
+        new QueryStringApiVersionReader("version"),       // ?version=2.0
+        new HeaderApiVersionReader("X-Api-Version"),      // header
+        new UrlSegmentApiVersionReader());                 // /api/v2/products
+});
+
+// Versioned route groups
+var v1 = app.NewVersionedApi().MapGroup("/api/v{version:apiVersion}/products");
+v1.MapGet("", GetProductsV1).HasApiVersion(1, 0);
+v1.MapGet("{id}", GetProductByIdV1).HasApiVersion(1, 0);
+
+var v2 = app.NewVersionedApi().MapGroup("/api/v{version:apiVersion}/products");
+v2.MapGet("", GetProductsV2).HasApiVersion(2, 0);           // new: includes filters
+v2.MapGet("{id}", GetProductByIdV2).HasApiVersion(2, 0);    // new: includes related products
+v2.MapGet("search", SearchProducts).HasApiVersion(2, 0);    // v2 only
+```
+
+## Problem Details — Standardized Errors
+
+```csharp
+// RFC 7807 Problem Details — standardized error format
+// Always return structured errors, never plain text
+
+builder.Services.AddProblemDetails(options =>
+{
+    options.CustomizeProblemDetails = ctx =>
+    {
+        ctx.ProblemDetails.Instance = $"{ctx.HttpContext.Request.Method} {ctx.HttpContext.Request.Path}";
+        ctx.ProblemDetails.Extensions["traceId"] = Activity.Current?.Id ?? ctx.HttpContext.TraceIdentifier;
+        ctx.ProblemDetails.Extensions["timestamp"] = DateTime.UtcNow;
+    };
+});
+
+// In exception handling middleware:
+app.UseExceptionHandler(exceptionApp =>
+{
+    exceptionApp.Run(async ctx =>
+    {
+        var feature = ctx.Features.GetRequiredFeature<IExceptionHandlerFeature>();
+        var exception = feature.Error;
+
+        var (status, title) = exception switch
+        {
+            ValidationException => (422, "Validation Failed"),
+            NotFoundException => (404, "Resource Not Found"),
+            ConflictException => (409, "Conflict"),
+            _ => (500, "An unexpected error occurred")
+        };
+
+        ctx.Response.StatusCode = status;
+        await ctx.Response.WriteAsJsonAsync(new ProblemDetails
+        {
+            Title = title,
+            Status = status,
+            Detail = app.Environment.IsDevelopment() ? exception.Message : null,
+        });
+    });
+});
+```
+
+<ExerciseBlock>
+1. Build a `RequestLoggingFilter` that logs: request method/path, handler arguments (sanitized — skip passwords), response status, and duration. Apply it to all endpoints in an API group.
+2. Refactor the Blog API (Day 80) to use TypedResults everywhere. Verify Swagger shows specific response types (200 with `PostDto`, 404 without body, 403 without body) rather than generic `object`.
+3. Add API versioning to the Blog API: v1 has the current endpoints, v2 adds markdown rendering support to `GetPost` (returns `{ post, renderedHtml }`) and a new `GET /api/v2/posts/trending` endpoint.
+</ExerciseBlock>

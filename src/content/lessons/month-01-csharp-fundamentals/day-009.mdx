@@ -1,0 +1,252 @@
+---
+title: "Enums: Numeric Enums and Extension Methods"
+day: 9
+week: 2
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "Dart enhanced enums with members, methods, and fields"
+csharpConcept: "C# enums (numeric only), Flags attribute, extension methods for behavior"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# enums are a step backward from Dart 3's enhanced enums. Where Dart lets enum values carry fields, constructors, and methods, C# enums are just named integers. The workaround — extension methods — is idiomatic and works well, but it's worth understanding the limitation upfront.
+
+## Basic Enums
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart enhanced enum — full class-like behavior
+  enum Status {
+    pending,
+    active,
+    suspended;
+
+    // Fields and methods on enum values!
+    bool get isActionable => this != suspended;
+
+    String get displayName => switch (this) {
+      Status.pending => 'Pending Review',
+      Status.active => 'Active',
+      Status.suspended => 'Suspended',
+    };
+  }
+
+  // Usage
+  var s = Status.active;
+  print(s.isActionable);   // true
+  print(s.displayName);    // Active
+  print(s.name);           // active
+  print(s.index);          // 1
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# enum — just named integers
+  public enum Status
+  {
+      Pending,    // = 0
+      Active,     // = 1
+      Suspended,  // = 2
+  }
+
+  // Extension methods add the behavior Dart puts in the enum
+  public static class StatusExtensions
+  {
+      public static bool IsActionable(this Status status)
+          => status != Status.Suspended;
+
+      public static string DisplayName(this Status status) => status switch
+      {
+          Status.Pending => "Pending Review",
+          Status.Active => "Active",
+          Status.Suspended => "Suspended",
+          _ => status.ToString(),
+      };
+  }
+
+  // Usage
+  var s = Status.Active;
+  Console.WriteLine(s.IsActionable());  // True
+  Console.WriteLine(s.DisplayName());   // Active
+  Console.WriteLine(s.ToString());      // Active (auto-name)
+  Console.WriteLine((int)s);            // 1
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="C# Enums Are Just Named Integers">
+C# enums are named `int` values (or another numeric type you specify). They have no methods, no fields, no constructors. All behavior must be added via extension methods. This is a real limitation compared to Dart 3 enhanced enums, but the extension method pattern is idiomatic and well-understood in the C# community.
+</ConceptCallout>
+
+## Explicit Integer Values
+
+```csharp
+public enum HttpMethod
+{
+    Get = 0,
+    Post = 1,
+    Put = 2,
+    Patch = 3,
+    Delete = 4,
+}
+
+// You can also use non-sequential values
+public enum ErrorCode
+{
+    None = 0,
+    NotFound = 404,
+    Unauthorized = 401,
+    Forbidden = 403,
+    ServerError = 500,
+}
+
+// Custom underlying type (default is int)
+public enum Direction : byte
+{
+    North = 0,
+    South = 1,
+    East = 2,
+    West = 3,
+}
+```
+
+## Parsing and Converting Enums
+
+```csharp
+// int → enum
+var s = (Status)1;                   // Status.Active
+var status = (Status)Enum.ToObject(typeof(Status), 1); // same thing
+
+// string → enum
+var parsed = Enum.Parse<Status>("Active");          // Status.Active, throws if invalid
+var safe = Enum.TryParse<Status>("Active", out var result); // safe version
+
+// Case-insensitive
+Enum.TryParse<Status>("active", ignoreCase: true, out var ci); // works
+
+// enum → int
+int value = (int)Status.Active;     // 1
+
+// enum → string
+string name = Status.Active.ToString();  // "Active"
+string lower = Status.Active.ToString().ToLower(); // "active"
+
+// Get all values
+foreach (Status s in Enum.GetValues<Status>())
+{
+    Console.WriteLine($"{s} = {(int)s}");
+}
+
+// Check if a value is defined
+bool isDefined = Enum.IsDefined(Status.Active);       // true
+bool isBad = Enum.IsDefined((Status)99);              // false
+```
+
+## `[Flags]` — Bitfield Enums
+
+The `[Flags]` attribute enables combining enum values with bitwise OR:
+
+```csharp
+[Flags]
+public enum Permissions
+{
+    None    = 0,
+    Read    = 1 << 0,   // 1
+    Write   = 1 << 1,   // 2
+    Execute = 1 << 2,   // 4
+    Delete  = 1 << 3,   // 8
+
+    // Combinations
+    ReadWrite = Read | Write,       // 3
+    All = Read | Write | Execute | Delete,  // 15
+}
+
+// Combining with |
+var userPerms = Permissions.Read | Permissions.Write;
+
+// Checking with HasFlag()
+bool canRead = userPerms.HasFlag(Permissions.Read);   // true
+bool canExec = userPerms.HasFlag(Permissions.Execute); // false
+
+// Removing a flag with &~
+var restricted = userPerms & ~Permissions.Write;       // just Read
+
+// Adding a flag
+userPerms |= Permissions.Execute;
+
+Console.WriteLine(userPerms);  // "Read, Write" (Flags formats nicely)
+```
+
+<ConceptCallout type="new" title="[Flags] Has No Dart Equivalent">
+Dart has no built-in bitfield enum support. C#'s `[Flags]` attribute enables efficient permission/option bitmasks that are very common in system-level APIs and configuration flags. You'll see them throughout the .NET BCL.
+</ConceptCallout>
+
+## Extension Methods Pattern — Full Example
+
+```csharp
+public enum OrderStatus
+{
+    Draft,
+    Submitted,
+    Processing,
+    Shipped,
+    Delivered,
+    Cancelled,
+    Refunded,
+}
+
+public static class OrderStatusExtensions
+{
+    public static bool CanCancel(this OrderStatus status) =>
+        status is OrderStatus.Draft
+            or OrderStatus.Submitted
+            or OrderStatus.Processing;
+
+    public static bool IsTerminal(this OrderStatus status) =>
+        status is OrderStatus.Delivered
+            or OrderStatus.Cancelled
+            or OrderStatus.Refunded;
+
+    public static string ToDisplayString(this OrderStatus status) => status switch
+    {
+        OrderStatus.Draft => "Draft",
+        OrderStatus.Submitted => "Order Submitted",
+        OrderStatus.Processing => "Being Processed",
+        OrderStatus.Shipped => "Shipped",
+        OrderStatus.Delivered => "Delivered",
+        OrderStatus.Cancelled => "Cancelled",
+        OrderStatus.Refunded => "Refunded",
+        _ => status.ToString(),
+    };
+
+    public static string ToCssClass(this OrderStatus status) => status switch
+    {
+        OrderStatus.Draft => "badge-gray",
+        OrderStatus.Submitted or OrderStatus.Processing => "badge-blue",
+        OrderStatus.Shipped => "badge-yellow",
+        OrderStatus.Delivered => "badge-green",
+        OrderStatus.Cancelled or OrderStatus.Refunded => "badge-red",
+        _ => "badge-gray",
+    };
+}
+
+// Usage
+var order = new Order { Status = OrderStatus.Submitted };
+Console.WriteLine(order.Status.CanCancel());        // True
+Console.WriteLine(order.Status.ToDisplayString());  // "Order Submitted"
+Console.WriteLine(order.Status.ToCssClass());       // "badge-blue"
+```
+
+<ExerciseBlock>
+1. Create a `DayOfWeek` enum (if you want to practice, though one exists in `System`) and add extension methods `IsWeekend()`, `IsWeekday()`, and `NextBusinessDay()`.
+2. Create a `[Flags]` enum `FileAccess` with `Read`, `Write`, `Execute`, `Share` flags. Write a method that takes a `FileAccess` value and prints all the individual permissions it includes using `HasFlag`.
+3. Write `Enum.TryParse` code that safely converts user input strings to your `OrderStatus` enum, ignoring case, and falls back to `OrderStatus.Draft` if parsing fails.
+</ExerciseBlock>

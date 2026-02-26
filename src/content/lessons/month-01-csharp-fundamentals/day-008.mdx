@@ -1,0 +1,222 @@
+---
+title: "Constants: const, readonly, and static readonly"
+day: 8
+week: 2
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "Dart const (compile-time), final (runtime immutable)"
+csharpConcept: "C# const (primitives only), readonly (field), static readonly (shared immutable)"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# and Dart use `const` and `final`/`readonly` keywords that look similar but have important behavioral differences. The biggest gotcha: C# `const` works only on primitive types and strings — you cannot have a `const` object instance the way Dart allows it.
+
+## The Core Comparison
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // compile-time constant — ANY type
+  const pi = 3.14159;
+  const greeting = "Hello";
+  const point = Point(1, 2);   // objects allowed!
+  const colors = [1, 2, 3];   // lists allowed!
+
+  // runtime immutable — ANY type
+  final name = "Adam";
+  final user = User.fromJson(json);  // computed at runtime
+  final items = [1, 2, 3];           // list reference is final
+
+  // Local variables (no field modifier needed)
+  void foo() {
+    final x = compute();  // x can't be reassigned
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // compile-time constant — PRIMITIVE TYPES AND STRING ONLY
+  const double Pi = 3.14159;
+  const string Greeting = "Hello";
+  const int MaxRetries = 3;
+  // const Point Origin = new Point(1, 2); // ERROR — objects not allowed!
+
+  // runtime immutable field (class/struct field only)
+  readonly string _name;
+  readonly User _user;
+
+  // Shared immutable instance — the pattern for const objects
+  static readonly Point Origin = new Point(0, 0);
+  static readonly IReadOnlyList<string> Defaults = ["a", "b", "c"];
+
+  // Local variables: just use var (no readonly for locals)
+  void Foo() {
+    var x = Compute();  // x CAN be reassigned — no local readonly
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="gotcha" title="No readonly Local Variables">
+In Dart, `final x = value` prevents reassigning a local variable. C# has **no equivalent for local variables** — you just use `var` and rely on discipline. The `readonly` keyword only applies to **fields** on classes and structs. This is a genuine limitation of C#.
+</ConceptCallout>
+
+## `const` — Compile-Time Constants
+
+```csharp
+public class Config
+{
+    public const int MaxConnections = 100;
+    public const string AppName = "MyApp";
+    public const double Tolerance = 0.001;
+
+    // const can compute from other consts
+    public const int MaxConnectionsDoubled = MaxConnections * 2;
+    public const string FullName = AppName + " v2";
+}
+
+// Access without an instance (like a static field)
+Console.WriteLine(Config.MaxConnections);  // 100
+Console.WriteLine(Config.AppName);         // MyApp
+```
+
+**What `const` values can be:**
+- Numeric types: `int`, `long`, `double`, `float`, `decimal`, `byte`, etc.
+- `bool`, `char`
+- `string`
+- Enum values
+- `null`
+- Expressions of the above (arithmetic, string concat)
+
+**What `const` values CANNOT be:** class instances, structs (except some built-in), arrays, collections.
+
+<ConceptCallout type="tip" title="const Is Inlined at Compile Time">
+A `const` value is baked directly into the compiled IL at every usage site — it's not a memory reference. This means if you change a `const` in a library and don't recompile dependent assemblies, they still use the old value. For public APIs, prefer `static readonly` over `const` to avoid this version fragility.
+</ConceptCallout>
+
+## `readonly` — Immutable Fields
+
+`readonly` fields can only be assigned in the field declaration or in the constructor. After construction, they're immutable.
+
+```csharp
+public class OrderProcessor
+{
+    // Can assign in declaration
+    private readonly string _environment = "production";
+
+    // Can assign in constructor — but nowhere else
+    private readonly IOrderRepository _repository;
+    private readonly ILogger<OrderProcessor> _logger;
+    private readonly DateTime _createdAt;
+
+    public OrderProcessor(IOrderRepository repository, ILogger<OrderProcessor> logger)
+    {
+        _repository = repository;   // fine — this is the constructor
+        _logger = logger;
+        _createdAt = DateTime.UtcNow;
+    }
+
+    public void Process(Order order)
+    {
+        // _repository = null; // ERROR — can't reassign readonly
+        _repository.Save(order); // calling methods on readonly is fine
+    }
+}
+```
+
+### `readonly` with Value Types
+
+For value type fields, `readonly` prevents both reassignment AND mutation:
+
+```csharp
+public struct Point
+{
+    public readonly int X;
+    public readonly int Y;
+
+    public Point(int x, int y) { X = x; Y = y; }
+}
+
+// readonly struct — all fields implicitly readonly
+public readonly struct Coordinate
+{
+    public double Lat { get; init; }
+    public double Lon { get; init; }
+}
+```
+
+## `static readonly` — The Pattern for Const Objects
+
+When Dart developers reach for `const` objects, C# developers use `static readonly`:
+
+```csharp
+public class AppConfig
+{
+    // Dart: static const defaultTimeout = Duration(seconds: 30);
+    public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
+
+    // Dart: static const origin = Offset(0, 0);
+    public static readonly Point Origin = new Point(0, 0);
+
+    // Dart: static const defaultHeaders = {'Content-Type': 'application/json'};
+    public static readonly IReadOnlyDictionary<string, string> DefaultHeaders =
+        new Dictionary<string, string>
+        {
+            ["Content-Type"] = "application/json",
+            ["Accept"] = "application/json",
+        };
+
+    // Lazy initialization (thread-safe)
+    public static readonly Lazy<ExpensiveResource> Resource =
+        new Lazy<ExpensiveResource>(() => new ExpensiveResource());
+}
+
+// Usage
+var timeout = AppConfig.DefaultTimeout;
+var origin = AppConfig.Origin;
+```
+
+## `init` — The Modern Constructor-Time Setter
+
+C# 9 introduced `init` accessors for properties — they can only be set during object construction or in an object initializer:
+
+```csharp
+public class Product
+{
+    public required string Name { get; init; }    // must set, can only set once
+    public decimal Price { get; init; }
+    public string Category { get; init; } = "General"; // default value
+
+    // readonly property — computed, never set externally
+    public string DisplayName => $"{Category}: {Name}";
+}
+
+// Must set required properties
+var p = new Product { Name = "Widget", Price = 9.99m };
+// p.Name = "Other"; // ERROR — init-only after construction
+
+// with expression creates a modified copy (for immutable objects)
+var p2 = p with { Price = 12.99m };
+```
+
+## Quick Reference
+
+| Keyword | Applies To | Set When | Use For |
+|---|---|---|---|
+| `const` | Fields, locals | Compile time | Primitive constants |
+| `readonly` | Fields only | Constructor or declaration | Instance immutable fields |
+| `static readonly` | Static fields | Static constructor or declaration | Shared immutable objects |
+| `init` | Properties | Object initializer or constructor | Immutable DTOs/records |
+
+<ExerciseBlock>
+1. Create a `MathConstants` static class with `const` values for `Pi`, `E`, `GoldenRatio`, and `SpeedOfLight`. Add a `static readonly` `IReadOnlyList<double>` of the first 5 Fibonacci numbers.
+2. Build an `ApiClient` class with `readonly` fields for `_baseUrl` (string), `_apiKey` (string), and `_timeout` (TimeSpan). Inject them through the constructor. Try to add a method that attempts to reassign `_baseUrl` — observe the compiler error.
+3. Create a `Point3D` record-like class with `init` properties `X`, `Y`, `Z`. Make it so `Point3D p2 = p1 with { Z = 10.0 }` works using the `with` expression.
+</ExerciseBlock>

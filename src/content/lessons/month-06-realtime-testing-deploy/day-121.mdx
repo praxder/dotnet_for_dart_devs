@@ -1,0 +1,260 @@
+---
+title: "Real-Time with SignalR: Advanced Patterns"
+day: 121
+week: 25
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "WebSocket streams in Flutter, Dart streams"
+csharpConcept: "SignalR Hub, typed hubs, streaming, groups, horizontal scaling with Redis backplane"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+SignalR was introduced on day 84. This lesson goes deeper: typed hubs, server streaming, connection management at scale, horizontal scaling with Redis, and integrating SignalR with your Flutter app using WebSockets.
+
+## Typed Hub — Compile-Time Safety
+
+```csharp
+// Define the client interface — methods the server calls on clients
+public interface IBlogHubClient
+{
+    Task PostPublished(PostPublishedEvent notification);
+    Task CommentAdded(CommentAddedEvent notification);
+    Task PostViewCountUpdated(int postId, int newCount);
+    Task UserJoinedRoom(string roomId, string userName);
+}
+
+// Typed hub — no more magic string method names
+public class BlogHub(ILogger<BlogHub> logger) : Hub<IBlogHubClient>
+{
+    // Connection events
+    public override async Task OnConnectedAsync()
+    {
+        var userId = Context.UserIdentifier;
+        logger.LogInformation("Client connected: {ConnectionId}, User: {UserId}",
+            Context.ConnectionId, userId ?? "anonymous");
+        await base.OnConnectedAsync();
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        logger.LogInformation("Client disconnected: {ConnectionId}", Context.ConnectionId);
+        await base.OnDisconnectedAsync(exception);
+    }
+
+    // Client calls this to subscribe to a post's comments
+    public async Task WatchPost(int postId)
+    {
+        var groupName = $"post:{postId}";
+        await Groups.AddToGroupAsync(Context.ConnectionId, groupName);
+        logger.LogDebug("Connection {Id} watching post {PostId}", Context.ConnectionId, postId);
+    }
+
+    public async Task UnwatchPost(int postId)
+        => await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"post:{postId}");
+
+    // Subscribe to all posts by an author
+    public async Task WatchAuthor(int authorId)
+        => await Groups.AddToGroupAsync(Context.ConnectionId, $"author:{authorId}");
+}
+
+// Register typed hub:
+app.MapHub<BlogHub>("/hubs/blog");
+```
+
+## Server-to-Client Notifications via IHubContext
+
+```csharp
+// Push updates from anywhere — not just inside the Hub
+// MediatR notification handler that pushes to SignalR clients
+
+public class PostPublishedHandler(IHubContext<BlogHub, IBlogHubClient> hubContext)
+    : INotificationHandler<PostPublishedNotification>
+{
+    public async Task Handle(PostPublishedNotification notification, CancellationToken ct)
+    {
+        // Notify everyone watching this author
+        await hubContext.Clients
+            .Group($"author:{notification.AuthorId}")
+            .PostPublished(new PostPublishedEvent(
+                notification.PostId,
+                notification.Title,
+                notification.Slug,
+                notification.AuthorName));
+
+        // Notify everyone watching the "all posts" feed
+        await hubContext.Clients
+            .All
+            .PostPublished(new PostPublishedEvent(/* ... */));
+    }
+}
+
+public class CommentApprovedHandler(IHubContext<BlogHub, IBlogHubClient> hubContext)
+    : INotificationHandler<CommentApprovedNotification>
+{
+    public async Task Handle(CommentApprovedNotification notification, CancellationToken ct)
+    {
+        // Only notify clients watching the specific post
+        await hubContext.Clients
+            .Group($"post:{notification.PostId}")
+            .CommentAdded(new CommentAddedEvent(
+                notification.CommentId,
+                notification.AuthorName,
+                notification.Body,
+                notification.CreatedAt));
+    }
+}
+```
+
+## Server Streaming — Channel-Based
+
+```csharp
+// Stream live data to clients — one connection, many values
+public class LiveStatsHub : Hub
+{
+    // Stream live view counts to clients watching a post
+    public async IAsyncEnumerable<ViewCountUpdate> StreamPostStats(
+        int postId,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            // Yield current stats every second
+            yield return new ViewCountUpdate(
+                postId,
+                ViewCountCache.Get(postId),
+                DateTime.UtcNow);
+
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+        }
+    }
+
+    // Stream search results as they come in
+    public async IAsyncEnumerable<PostSummaryDto> StreamSearchResults(
+        string query,
+        AppDbContext db,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var post in db.Posts
+            .Where(p => p.Title.Contains(query))
+            .AsAsyncEnumerable()
+            .WithCancellation(ct))
+        {
+            yield return new PostSummaryDto(post.Id, post.Title, post.Slug, post.Summary);
+            await Task.Delay(50, ct);  // simulate real-time delivery
+        }
+    }
+}
+```
+
+## Horizontal Scaling with Redis Backplane
+
+```csharp
+// Problem: Multiple API instances → each has its own SignalR connections
+// Client A connected to Instance 1 can't receive messages sent on Instance 2
+
+// Solution: Redis backplane — all instances communicate through Redis
+// dotnet add package Microsoft.AspNetCore.SignalR.StackExchangeRedis
+
+builder.Services.AddSignalR()
+    .AddStackExchangeRedis(
+        builder.Configuration.GetConnectionString("Redis")!,
+        options =>
+        {
+            options.Configuration.ChannelPrefix = RedisChannel.Literal("BlogApp");
+            options.Configuration.ConnectRetry = 5;
+        });
+
+// docker-compose.yml adds Redis:
+// redis:
+//   image: redis:7-alpine
+//   ports:
+//     - "6379:6379"
+
+// With Redis backplane, any instance can push to any client:
+// Instance 1: hubContext.Clients.User("user-123").PostPublished(...)
+// → message goes through Redis
+// → Instance 2 (where user-123 is connected) delivers it
+```
+
+## Flutter Client — Connecting to SignalR
+
+```dart
+// Flutter: use signalr_netcore package
+// flutter pub add signalr_netcore
+
+class BlogHubService {
+  HubConnection? _connection;
+  final _postPublished = StreamController<PostPublishedEvent>.broadcast();
+  final _commentAdded = StreamController<CommentAddedEvent>.broadcast();
+
+  Stream<PostPublishedEvent> get postPublished => _postPublished.stream;
+  Stream<CommentAddedEvent> get commentAdded => _commentAdded.stream;
+
+  Future<void> connect(String token) async {
+    _connection = HubConnectionBuilder()
+      .withUrl(
+        'https://api.myapp.com/hubs/blog',
+        options: HttpConnectionOptions(
+          accessTokenFactory: () async => token,
+          // Falls back to LongPolling if WebSockets unavailable
+          transport: HttpTransportType.WebSockets,
+        ),
+      )
+      .withAutomaticReconnect()
+      .configureLogging(logging: Logger(Level.DEBUG))
+      .build();
+
+    // Register client methods (what server can call)
+    _connection!.on('PostPublished', (args) {
+      final event = PostPublishedEvent.fromJson(args![0]);
+      _postPublished.add(event);
+    });
+
+    _connection!.on('CommentAdded', (args) {
+      final event = CommentAddedEvent.fromJson(args![0]);
+      _commentAdded.add(event);
+    });
+
+    _connection!.onreconnected((_) => print('Reconnected'));
+    _connection!.onclose((error) => print('Connection closed: $error'));
+
+    await _connection!.start();
+    print('Connected to SignalR hub');
+  }
+
+  Future<void> watchPost(int postId) async {
+    await _connection?.invoke('WatchPost', args: [postId]);
+  }
+
+  Future<void> disconnect() async {
+    await _connection?.stop();
+    _postPublished.close();
+    _commentAdded.close();
+  }
+}
+
+// In a Flutter widget:
+// blogHub.postPublished.listen((event) {
+//   setState(() => posts.insert(0, event));
+// });
+```
+
+<ConceptCallout type="tip" title="SignalR vs WebSockets vs SSE">
+- **SignalR**: Best for Flutter ↔ .NET. Handles reconnection, fallback transport (polling), and scales with Redis. The abstraction pays off.
+- **Plain WebSockets**: Lower overhead, but you manage reconnection/protocol yourself. Good when clients aren't .NET-based.
+- **Server-Sent Events (SSE)**: One-way server→client, simpler than WebSockets. Good for notifications where clients never send data.
+- **For Flutter + .NET**: Use SignalR — the `signalr_netcore` package handles all the complexity.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Build a live comment feed: when a comment is approved via `POST /api/admin/comments/{id}/approve`, push a `CommentAdded` event to all clients watching that post via SignalR. Write a simple HTML test page (or Flutter widget) that subscribes and shows comments appearing in real time.
+2. Implement a "typing indicator": add a `UserTyping(int postId, string userName)` hub method. When a user starts typing a comment, the client calls this; the server broadcasts to other watchers. Add a 3-second timeout to clear the indicator if no new typing events arrive.
+3. Configure the Redis backplane with docker-compose. Run two instances of your API on different ports. Connect a client to instance 1, send a SignalR push from instance 2 via the API, and verify the client receives it (proving the Redis backplane works).
+</ExerciseBlock>

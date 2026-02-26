@@ -1,0 +1,218 @@
+---
+title: "Events and the Observer Pattern"
+day: 54
+week: 11
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Stream, StreamController, broadcast streams"
+csharpConcept: "event keyword, EventHandler<T>, EventArgs, publisher/subscriber"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C#'s `event` keyword is the built-in implementation of the observer pattern. If you've used Dart's `StreamController` and broadcast streams to notify multiple listeners, events are the C# equivalent — synchronous and without backpressure.
+
+## Declaring and Raising Events
+
+```csharp
+// Step 1: Define EventArgs subclass to carry data
+public class PriceChangedEventArgs : EventArgs
+{
+    public required string Symbol { get; init; }
+    public required decimal NewPrice { get; init; }
+    public required decimal OldPrice { get; init; }
+    public decimal Change => NewPrice - OldPrice;
+    public double ChangePercent => (double)(Change / OldPrice * 100);
+}
+
+// Step 2: Publisher declares the event
+public class StockTracker
+{
+    // EventHandler<T> is a delegate: void (object? sender, T args)
+    public event EventHandler<PriceChangedEventArgs>? PriceChanged;
+
+    private readonly Dictionary<string, decimal> _prices = new();
+
+    public void UpdatePrice(string symbol, decimal newPrice)
+    {
+        decimal oldPrice = _prices.GetValueOrDefault(symbol, newPrice);
+        _prices[symbol] = newPrice;
+
+        if (newPrice != oldPrice)
+        {
+            // Step 3: Raise the event — always use ?. for null-safe invocation
+            PriceChanged?.Invoke(this, new PriceChangedEventArgs
+            {
+                Symbol = symbol,
+                NewPrice = newPrice,
+                OldPrice = oldPrice
+            });
+        }
+    }
+}
+```
+
+## Subscribing and Unsubscribing
+
+```csharp
+var tracker = new StockTracker();
+
+// Subscribe with lambda
+tracker.PriceChanged += (sender, args) =>
+    Console.WriteLine($"{args.Symbol}: {args.NewPrice:C} ({args.ChangePercent:+0.##;-0.##}%)");
+
+// Subscribe with named method — required if you want to unsubscribe
+void OnPriceAlert(object? sender, PriceChangedEventArgs args)
+{
+    if (Math.Abs(args.ChangePercent) > 5)
+        Console.WriteLine($"ALERT: {args.Symbol} moved {args.ChangePercent:F1}%!");
+}
+
+tracker.PriceChanged += OnPriceAlert;
+
+tracker.UpdatePrice("AAPL", 150.00m);
+tracker.UpdatePrice("AAPL", 142.50m);  // -5% — triggers alert
+
+// Unsubscribe — only works with named method/stored delegate
+tracker.PriceChanged -= OnPriceAlert;
+```
+
+<ConceptCallout type="gotcha" title="Lambda Subscriptions Can't Be Unsubscribed">
+You cannot unsubscribe a lambda unless you store it in a variable first. `tracker.PriceChanged -= (sender, args) => ...` creates a NEW delegate object — not the same reference as the one you subscribed. Always store the delegate if you need to unsubscribe.
+</ConceptCallout>
+
+## The event Keyword — What It Actually Does
+
+The `event` keyword wraps a delegate with add/remove accessors and prevents external code from invoking it:
+
+```csharp
+// This:
+public event EventHandler<PriceChangedEventArgs>? PriceChanged;
+
+// Is shorthand for this (the compiler generates):
+private EventHandler<PriceChangedEventArgs>? _priceChanged;
+
+public event EventHandler<PriceChangedEventArgs>? PriceChanged
+{
+    add    => _priceChanged += value;
+    remove => _priceChanged -= value;
+}
+
+// Key restrictions the event keyword enforces:
+// ✓ Outside the class: can += and -= only
+// ✗ Outside: cannot = (assignment) — prevents overwriting all subscribers
+// ✗ Outside: cannot .Invoke() — only the publisher fires events
+
+// Without event keyword (raw delegate field):
+public EventHandler<PriceChangedEventArgs>? PriceChanged;
+// External code can: PriceChanged = null  (wipes all subscribers!) — BAD
+```
+
+## Pattern: INotifyPropertyChanged
+
+The most common use of events in .NET — tells UI frameworks when data changes:
+
+```csharp
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+
+public class UserViewModel : INotifyPropertyChanged
+{
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private string _name = "";
+    private int _age;
+
+    public string Name
+    {
+        get => _name;
+        set
+        {
+            if (_name != value)
+            {
+                _name = value;
+                OnPropertyChanged();  // callerMemberName = "Name"
+            }
+        }
+    }
+
+    public int Age
+    {
+        get => _age;
+        set
+        {
+            if (_age != value)
+            {
+                _age = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    protected void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+}
+
+// WPF/MAUI/Avalonia binds to PropertyChanged automatically
+var vm = new UserViewModel();
+vm.PropertyChanged += (_, args) =>
+    Console.WriteLine($"Property changed: {args.PropertyName}");
+
+vm.Name = "Alice";  // fires: "Property changed: Name"
+vm.Age = 30;        // fires: "Property changed: Age"
+```
+
+## Events vs Callbacks vs IObservable
+
+```csharp
+// Events: synchronous, push, multiple subscribers, fire-and-forget
+// Good for: UI events, simple pub/sub, state change notifications
+tracker.PriceChanged += handler;
+
+// Callbacks (Func/Action): synchronous, one handler, explicit
+// Good for: completion callbacks, single-use notifications
+void FetchData(Action<Result> onComplete, Action<Exception> onError) { ... }
+
+// IObservable<T> (Reactive Extensions): async, composable, backpressure
+// Good for: event streams, complex async pipelines
+// (covered in a later module)
+IObservable<PriceChangedEventArgs> stream = Observable.FromEvent<...>(...);
+stream.Where(e => e.ChangePercent > 5).Subscribe(handler);
+```
+
+## Thread Safety for Events
+
+```csharp
+// Thread-safe event invocation pattern
+public class SafePublisher
+{
+    // Copy the delegate to a local variable before null check
+    // Prevents race condition between null check and invocation
+    private event EventHandler? _changed;
+
+    public event EventHandler? Changed
+    {
+        add    => _changed += value;
+        remove => _changed -= value;
+    }
+
+    protected virtual void OnChanged()
+    {
+        // Copy reference — safe even if another thread removes handlers
+        var handler = _changed;
+        handler?.Invoke(this, EventArgs.Empty);
+    }
+}
+```
+
+<ExerciseBlock>
+1. Build a `TypedEventBus` class with `Subscribe<TEvent>(Action<TEvent> handler)`, `Publish<TEvent>(TEvent e)`, and `Unsubscribe<TEvent>(Action<TEvent> handler)`. The bus should support multiple event types simultaneously.
+2. Implement `INotifyPropertyChanged` for a `ShoppingCart` class with `Items` (an `ObservableCollection<CartItem>`), `Subtotal`, `Tax`, and `Total` computed properties. Raise `PropertyChanged` for the computed properties when `Items` changes.
+3. Create a `WeakEventHandler<TArgs>` wrapper that holds a weak reference to the subscriber object, automatically removing dead subscribers when they've been garbage collected. Demonstrate that it prevents memory leaks.
+</ExerciseBlock>

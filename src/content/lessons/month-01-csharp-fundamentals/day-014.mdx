@@ -1,0 +1,293 @@
+---
+title: "Named and Optional Parameters"
+day: 14
+week: 3
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart named params {required String name}, optional positional [int x = 0]"
+csharpConcept: "C# named args, optional params with defaults, params keyword"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Named and optional parameters are something Dart developers use constantly — they're central to Flutter's widget API. C# has similar capabilities, but with a fundamentally different model. In Dart, you explicitly separate named parameters from positional ones using `{}`. In C#, **all parameters are positional by default**, and naming them is a call-site choice.
+
+## Dart's Mental Model vs C#'s Mental Model
+
+Before diving into syntax, internalize this conceptual difference:
+
+<ConceptCallout type="different">
+**Dart**: The method signature declares whether a parameter IS named or positional. A parameter in `{}` is always named. A parameter in `[]` is always optional positional. Callers follow those rules.
+
+**C#**: All parameters are positional. Optional parameters get a default value. The caller can OPTIONALLY use the name at the call site — but names are not required and callers can always use positional syntax.
+</ConceptCallout>
+
+## Optional Parameters with Default Values
+
+In C#, a parameter becomes optional by assigning it a default value in the signature:
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: named optional parameters
+  void createUser({
+    required String name,
+    int age = 18,
+    String role = 'user',
+  }) {
+    print('$name, $age, $role');
+  }
+
+  // Call — names required for named params
+  createUser(name: 'Alice');
+  createUser(name: 'Bob', age: 25, role: 'admin');
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: optional parameters with defaults
+  void CreateUser(string name, int age = 18, string role = "user")
+  {
+      Console.WriteLine($"{name}, {age}, {role}");
+  }
+
+  // Call — positional (names optional)
+  CreateUser("Alice");
+  CreateUser("Bob", 25, "admin");
+  // Call with named arguments (caller's choice)
+  CreateUser("Charlie", role: "moderator");
+  ```
+  </div>
+</CodeComparison>
+
+Notice the C# call `CreateUser("Charlie", role: "moderator")` — we skipped `age` using its default, but we had to name `role` to skip a positional parameter. This leads to an important rule:
+
+<ConceptCallout type="gotcha">
+To skip an optional parameter in the middle, you **must** use named argument syntax for everything after the skipped parameter. You cannot write `CreateUser("Alice", , "admin")` — that's a syntax error. Named args let you jump over defaults cleanly.
+</ConceptCallout>
+
+## Default Value Restrictions
+
+C# default values must be **compile-time constants**. This is more restrictive than Dart:
+
+```csharp
+// Valid default values
+void Method1(int x = 0) { }
+void Method2(string s = "hello") { }
+void Method3(bool b = true) { }
+void Method4(double d = 3.14) { }
+void Method5(MyEnum e = MyEnum.Default) { }
+void Method6(object o = null) { }  // null is valid
+
+// INVALID — not compile-time constants
+void Method7(DateTime dt = DateTime.Now) { }        // error — not constant
+void Method8(List<int> list = new List<int>()) { }  // error — not constant
+void Method9(string s = GetDefaultValue()) { }      // error — not constant
+```
+
+<DartEquivalent>
+Dart allows any expression as a default value, not just compile-time constants:
+
+```dart
+void method(
+  DateTime dt = DateTime.now(),    // Valid in Dart!
+  List<int> list = const [],       // Valid with const
+  String s = defaultValue,        // Can reference top-level const
+) {}
+```
+
+In C#, when you need a non-constant default, the idiomatic pattern is to use `null` as the default and substitute the real value inside the method body:
+
+```csharp
+void Method(List<int>? list = null)
+{
+    list ??= new List<int>(); // substitute default here
+}
+```
+</DartEquivalent>
+
+## Named Arguments at the Call Site
+
+Any parameter can be called by name in C#, regardless of whether it has a default value:
+
+```csharp
+void Connect(string host, int port, bool useTls, int timeoutMs)
+{
+    // ...
+}
+
+// These are all equivalent:
+Connect("localhost", 5432, false, 3000);
+Connect(host: "localhost", port: 5432, useTls: false, timeoutMs: 3000);
+Connect("localhost", port: 5432, timeoutMs: 3000, useTls: false); // order doesn't matter for named args
+```
+
+<ConceptCallout type="tip">
+Named arguments improve readability at the call site, especially for boolean parameters. `Connect("localhost", 5432, true, 3000)` — what does `true` mean? Compare to `Connect("localhost", 5432, useTls: true, timeoutMs: 3000)`. This is a strong C# convention — name boolean arguments when it's not obvious what they control.
+</ConceptCallout>
+
+## The `params` Keyword: Variadic Methods
+
+C# has a `params` keyword that lets you pass a variable number of arguments. The parameter must be the last one and be an array type:
+
+```csharp
+// params allows variable argument count
+void LogMessages(string prefix, params string[] messages)
+{
+    foreach (var msg in messages)
+    {
+        Console.WriteLine($"[{prefix}] {msg}");
+    }
+}
+
+// Can call with any number of arguments
+LogMessages("INFO", "Server started");
+LogMessages("ERROR", "Connection failed", "Retry in 5s", "Attempt 1 of 3");
+LogMessages("DEBUG"); // zero params args is valid — messages is empty array
+
+// Can also pass an array directly
+string[] errors = { "Err1", "Err2" };
+LogMessages("ERROR", errors);
+```
+
+<DartEquivalent>
+Dart doesn't have a `params` equivalent. The Dart equivalent is an explicit `List` parameter:
+
+```dart
+void logMessages(String prefix, List<String> messages) {
+  for (final msg in messages) {
+    print('[$prefix] $msg');
+  }
+}
+
+// Must always pass a list literal
+logMessages('INFO', ['Server started']);
+logMessages('ERROR', ['Connection failed', 'Retry in 5s']);
+```
+
+The C# `params` version has nicer call-site syntax but the same underlying mechanics.
+</DartEquivalent>
+
+## The `required` Keyword on Properties (Not Parameters)
+
+Coming from Dart, you might expect `required` to work on method parameters. In C#, `required` is a **property modifier** on classes and records (C# 11+), not a parameter modifier:
+
+```csharp
+// C# required is for PROPERTIES, not method parameters
+public class User
+{
+    public required string Name { get; init; }  // Must be set in object initializer
+    public required string Email { get; init; }
+    public int Age { get; init; } = 18;  // Optional — has default
+}
+
+// Usage — compiler error if required properties are missing
+var user = new User { Name = "Alice", Email = "alice@example.com" }; // OK
+var bad  = new User { Name = "Bob" }; // Error! Email is required
+```
+
+<ConceptCallout type="different">
+In Dart, `required` applies to **named function parameters**. In C#, `required` applies to **class/record properties** and enforces that object initializers set them. There is no way to mark a method parameter as required in C# — all parameters without defaults are implicitly required.
+</ConceptCallout>
+
+## Combining All the Concepts
+
+Here's a realistic API call signature that uses all these features:
+
+```csharp
+public async Task<ApiResponse> SendRequestAsync(
+    string endpoint,                        // required (no default)
+    HttpMethod method,                      // required (no default)
+    object? body = null,                    // optional, default null
+    Dictionary<string, string>? headers = null, // optional, default null
+    int timeoutMs = 30_000,                 // optional, default 30 seconds
+    bool retryOnFailure = true,             // optional, named for clarity
+    params string[] tags)                   // variadic — must be last
+{
+    headers ??= new Dictionary<string, string>();
+    // implementation...
+}
+
+// Call with named args for clarity
+var response = await SendRequestAsync(
+    endpoint: "/api/users",
+    method: HttpMethod.Post,
+    body: newUser,
+    timeoutMs: 5_000,
+    retryOnFailure: false
+);
+```
+
+## Parameter Ordering Rules
+
+C# has strict rules about parameter order:
+
+1. Required parameters first (no defaults)
+2. Optional parameters (with defaults) — in order of likely use
+3. `params` parameter last (if any)
+
+```csharp
+// Valid
+void Good(string required, int optional = 0, params object[] rest) { }
+
+// INVALID — required after optional
+void Bad(string optional = "x", string required) { }  // Compile error
+
+// INVALID — params not last
+void AlsoBad(params int[] nums, string extra) { }  // Compile error
+```
+
+<ExerciseBlock>
+**Exercise 1: Widget-Style Builder**
+
+Simulate Flutter-style named parameters in C#. Write a method `BuildCard` that takes:
+- `string title` (required)
+- `string? subtitle = null` (optional)
+- `string backgroundColor = "#FFFFFF"` (optional)
+- `int elevation = 2` (optional)
+- `bool rounded = true` (optional)
+- `params string[] actions` (variadic, for action button labels)
+
+The method should print a description of the card. Call it in at least 4 different ways demonstrating different combinations of named and positional arguments.
+
+**Exercise 2: String Formatting Utility**
+
+Write a `Format` method with the signature:
+```csharp
+string Format(string template, params object[] args)
+```
+But add a second overload (preview of Day 16) — actually, using `params` alone, make it work for 0, 1, or many replacement values. The template uses `{0}`, `{1}` style placeholders. Add optional parameters `bool uppercase = false` and `string? prefix = null`.
+
+**Exercise 3: Connection String Builder**
+
+Write a method `BuildConnectionString` that takes:
+- `string host = "localhost"` 
+- `int port = 5432`
+- `string database` (required — no default)
+- `string? username = null`
+- `string? password = null`
+- `bool sslMode = false`
+- `int connectionTimeout = 30`
+
+Return a formatted connection string like: `"Host=localhost;Port=5432;Database=mydb;SSL=false;Timeout=30"`. 
+
+Demonstrate that you can call it as:
+- `BuildConnectionString(database: "mydb")`
+- `BuildConnectionString("prod.db.example.com", 5432, "production", username: "admin", password: "secret", sslMode: true)`
+</ExerciseBlock>
+
+## Key Takeaways
+
+- C# has no `{}` vs `[]` distinction — all parameters are positional by design
+- Optional parameters use `= defaultValue` syntax, just like Dart's optional named params
+- Named arguments at the call site are **caller's choice**, not declared in the signature
+- Default values must be **compile-time constants** — use `= null` + `??=` for mutable defaults
+- The `params` keyword enables variadic methods (no Dart equivalent — Dart uses explicit `List`)
+- C#'s `required` keyword is for **properties**, not method parameters
+- Use named arguments at call sites for boolean parameters to improve readability

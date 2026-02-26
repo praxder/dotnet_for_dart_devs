@@ -1,0 +1,374 @@
+---
+title: "Task<T> vs Future<T>: Async Fundamentals"
+day: 51
+week: 11
+module: 5
+moduleName: "Async, Delegates, Events & Advanced"
+phase: "csharp"
+dartConcept: "Dart Future<T>, async/await"
+csharpConcept: "Task<T>, Task, async/await, async void (avoid!)"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+If you've shipped any real Dart code, `async`/`await` is already in your muscle memory. C#'s async model is the **direct ancestor** of Dart's — Microsoft shipped it in C# 5 (2012), and Dart's designers drew heavily from it. The mental model transfers almost 1:1. The differences are in the details, and those details matter.
+
+## Task\<T\> Is Future\<T\>
+
+In Dart, an async operation that will eventually produce a value is a `Future<T>`. In C#, it's a `Task<T>`. They represent the same concept: a promise of a value that isn't available yet.
+
+<CodeComparison>
+```dart
+// Dart
+Future<String> fetchUserName(int id) async {
+  final response = await http.get(Uri.parse('/users/$id'));
+  final data = jsonDecode(response.body);
+  return data['name'] as String;
+}
+
+// Calling it
+void main() async {
+  final name = await fetchUserName(42);
+  print(name);
+}
+```
+
+```csharp
+// C#
+async Task<string> FetchUserName(int id)
+{
+    var response = await httpClient.GetAsync($"/users/{id}");
+    var data = await response.Content.ReadFromJsonAsync<User>();
+    return data!.Name;
+}
+
+// Calling it
+async Task Main()
+{
+    var name = await FetchUserName(42);
+    Console.WriteLine(name);
+}
+```
+</CodeComparison>
+
+The structure is identical. The `async` keyword goes on the method, `await` pauses execution at that expression until the task completes, and the return type wraps the actual value in `Task<T>`.
+
+<ConceptCallout type="same">
+`async`/`await` syntax and semantics are nearly identical between Dart and C#. If you write a `Future<T>` method in Dart, you already know how to write a `Task<T>` method in C#. The mental model is the same: the method appears to run synchronously but yields the thread while waiting.
+</ConceptCallout>
+
+## The Return Type Rules
+
+Just like in Dart, there are three return types an async method can have:
+
+| C# Return Type | Dart Equivalent | Use When |
+|---|---|---|
+| `Task<T>` | `Future<T>` | Method returns a value asynchronously |
+| `Task` | `Future<void>` | Method does async work, returns nothing |
+| `async void` | *(no equivalent)* | **Avoid — only for event handlers** |
+
+```csharp
+// Returns a value — use Task<T>
+async Task<int> GetUserCountAsync()
+{
+    await Task.Delay(100); // simulating I/O
+    return 42;
+}
+
+// Returns nothing — use Task, not void
+async Task SaveUserAsync(User user)
+{
+    await database.InsertAsync(user);
+    // no return needed — Task is implicit
+}
+
+// BAD: async void — fire and forget, exceptions are swallowed
+async void LoadData() // <-- don't do this
+{
+    await SomethingAsync(); // exceptions vanish into the void
+}
+```
+
+<ConceptCallout type="gotcha">
+`async void` is C#'s most notorious async pitfall. Exceptions thrown inside an `async void` method **cannot be caught by the caller** — they propagate to the synchronization context and typically crash the process. The only legitimate use is event handlers (covered in Day 58) where the framework requires a `void` return. In all other cases, return `Task`.
+</ConceptCallout>
+
+## Completed Tasks: The Synchronous Shortcut
+
+Sometimes you need to return a `Task<T>` from a method but the result is already available synchronously (e.g., from a cache). Both languages have a way to wrap a value in a completed future/task without any actual async work.
+
+<CodeComparison>
+```dart
+// Dart — already-completed Future
+Future<String> getCachedName() {
+  return Future.value('Alice'); // synchronously done
+}
+
+// For void:
+Future<void> doNothing() {
+  return Future.value(); // completed void Future
+}
+```
+
+```csharp
+// C# — already-completed Task
+Task<string> GetCachedName()
+{
+    return Task.FromResult("Alice"); // synchronously done
+}
+
+// For void (no return value):
+Task DoNothing()
+{
+    return Task.CompletedTask; // singleton completed Task
+}
+```
+</CodeComparison>
+
+<ConceptCallout type="tip">
+`Task.CompletedTask` is a singleton — it's the same object every time. Use it whenever you need to satisfy a `Task` return type but have nothing async to do. It's zero-allocation and very fast. `Task.FromResult(value)` is the same idea for `Task<T>`.
+</ConceptCallout>
+
+## ConfigureAwait(false): The Library Developer's Tool
+
+You'll see this constantly in C# codebases and NuGet packages:
+
+```csharp
+var result = await SomeOperationAsync().ConfigureAwait(false);
+```
+
+This is a subtle but important concept. When you `await` a task, C# by default tries to **resume on the same synchronization context** (the UI thread in desktop apps, the ASP.NET request context in web apps). `ConfigureAwait(false)` says "I don't need to resume on that context — any thread is fine."
+
+```csharp
+// Library code — use ConfigureAwait(false)
+// You don't know what app type will call you
+public async Task<string> FetchDataAsync()
+{
+    var response = await httpClient.GetAsync(url).ConfigureAwait(false);
+    // This continues on a thread pool thread, not the UI thread
+    return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+}
+
+// Application code (WPF, WinForms) — usually omit ConfigureAwait
+// You need to update UI, so you want the UI thread back
+private async void Button_Click(object sender, EventArgs e)
+{
+    var data = await FetchDataAsync(); // awaits on UI thread
+    label.Text = data; // safe: we're back on the UI thread
+}
+```
+
+<ConceptCallout type="info">
+In ASP.NET Core (which you'll use in Phase 2), there is **no synchronization context**, so `ConfigureAwait(false)` makes no functional difference in web apps. It's still sometimes used for correctness/portability habits or when code is shared with non-ASP.NET projects. Don't stress about it for now — just recognize it when you see it.
+</ConceptCallout>
+
+## Error Handling: Identical to Dart
+
+Async exceptions in C# work exactly like in Dart — you use `try`/`catch`/`finally` around `await` expressions:
+
+<CodeComparison>
+```dart
+// Dart
+Future<User> loadUser(int id) async {
+  try {
+    final user = await repository.findById(id);
+    return user;
+  } on NotFoundException catch (e) {
+    print('Not found: ${e.message}');
+    rethrow;
+  } finally {
+    print('loadUser completed');
+  }
+}
+```
+
+```csharp
+// C#
+async Task<User> LoadUser(int id)
+{
+    try
+    {
+        var user = await repository.FindByIdAsync(id);
+        return user;
+    }
+    catch (NotFoundException ex)
+    {
+        Console.WriteLine($"Not found: {ex.Message}");
+        throw; // rethrow in C# — not "throw ex" (that resets the stack trace)
+    }
+    finally
+    {
+        Console.WriteLine("LoadUser completed");
+    }
+}
+```
+</CodeComparison>
+
+<ConceptCallout type="gotcha">
+In C#, use `throw;` to rethrow an exception (preserving the original stack trace). Using `throw ex;` creates a **new** exception from the current location, losing the original stack trace. This is opposite to intuition — `throw;` without an argument is the correct form. Dart's `rethrow` is the exact equivalent.
+</ConceptCallout>
+
+## Async Methods Are Lazy in a Specific Way
+
+One subtle difference from Dart: in C#, an `async` method **starts executing immediately** when called, up to the first `await`. In Dart, a `Future` returned from an `async` method is always scheduled (even synchronous `Future.value()` delivers on the next microtask). In C#, the code before the first `await` runs synchronously on the calling thread:
+
+```csharp
+async Task<int> DoWork()
+{
+    Console.WriteLine("This runs synchronously, on the caller's thread");
+    await Task.Delay(1000); // here we yield
+    Console.WriteLine("This runs after the delay");
+    return 42;
+}
+
+// The first Console.WriteLine happens BEFORE the await
+var task = DoWork(); // prints "This runs synchronously..." immediately
+Console.WriteLine("Task started");
+var result = await task; // waits for the rest
+```
+
+<ConceptCallout type="different">
+In Dart, async method bodies are always deferred to at least the next event loop turn. In C#, the code before the first `await` executes synchronously on the calling thread. This is rarely a practical problem but can matter for thread safety and for understanding call ordering.
+</ConceptCallout>
+
+## Putting It Together: A Real Async Pattern
+
+Here's a complete, realistic example showing the patterns you'll use constantly:
+
+```csharp
+public class WeatherService
+{
+    private readonly HttpClient _client;
+    private readonly Dictionary<string, WeatherData> _cache = new();
+
+    public WeatherService(HttpClient client)
+    {
+        _client = client;
+    }
+
+    // Returns Task<T> — async with a value
+    public async Task<WeatherData> GetWeatherAsync(string city)
+    {
+        // Cache hit — return synchronously wrapped in a completed Task
+        if (_cache.TryGetValue(city, out var cached))
+        {
+            return cached; // in async method, this auto-wraps as Task.FromResult
+        }
+
+        try
+        {
+            var response = await _client
+                .GetAsync($"/weather/{city}")
+                .ConfigureAwait(false);
+
+            response.EnsureSuccessStatusCode(); // throws on 4xx/5xx
+
+            var weather = await response.Content
+                .ReadFromJsonAsync<WeatherData>()
+                .ConfigureAwait(false);
+
+            _cache[city] = weather!;
+            return weather!;
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new WeatherServiceException($"Failed to fetch weather for {city}", ex);
+        }
+    }
+
+    // Returns Task (no value) — async void-equivalent, but correct
+    public async Task RefreshAllAsync()
+    {
+        foreach (var city in _cache.Keys.ToList())
+        {
+            _cache[city] = await GetWeatherAsync(city).ConfigureAwait(false);
+        }
+    }
+}
+
+// Usage
+var service = new WeatherService(httpClient);
+var weather = await service.GetWeatherAsync("London");
+Console.WriteLine($"Temp: {weather.Temperature}°C");
+```
+
+## Naming Convention: The Async Suffix
+
+<ConceptCallout type="different">
+C# has a strong convention: **append `Async` to the name of any method that returns `Task` or `Task<T>`**. This is why you see `GetAsync`, `ReadFromJsonAsync`, `SaveChangesAsync` everywhere in .NET APIs. Dart doesn't have this convention. In C#, omitting the suffix on async methods is considered a code smell.
+</ConceptCallout>
+
+The convention exists so callers can immediately see at the call site that they're dealing with an async operation — and so they don't forget to `await` it.
+
+```csharp
+// Good — caller knows to await
+var user = await GetUserAsync(id);
+var count = await repository.CountAsync();
+
+// Bad — no suffix, caller might forget await
+var user = await GetUser(id); // is this actually async? unclear
+```
+
+<ExerciseBlock>
+**Exercise: Async Temperature Converter Service**
+
+Convert this synchronous service to be properly async:
+
+```csharp
+public class TemperatureService
+{
+    // Simulate database lookup
+    public double GetTemperatureC(string cityId)
+    {
+        Thread.Sleep(100); // blocking — bad!
+        return cityId switch
+        {
+            "london" => 15.0,
+            "sydney" => 28.0,
+            "moscow" => -5.0,
+            _ => throw new ArgumentException($"Unknown city: {cityId}")
+        };
+    }
+
+    public double CelsiusToFahrenheit(double celsius)
+    {
+        return celsius * 9.0 / 5.0 + 32.0;
+    }
+
+    public double GetTemperatureF(string cityId)
+    {
+        var celsius = GetTemperatureC(cityId);
+        return CelsiusToFahrenheit(celsius);
+    }
+}
+```
+
+Goals:
+1. Convert `GetTemperatureC` to `GetTemperatureCAsync` using `Task.Delay` instead of `Thread.Sleep`
+2. Convert `GetTemperatureF` to `GetTemperatureFAsync` that awaits the async version
+3. Add proper error handling that wraps `ArgumentException` in a domain exception
+4. Add a `GetAllTemperaturesAsync` that returns a `Dictionary<string, double>` for all known cities
+5. In `Main`, await all results and print them
+
+**Bonus:** Add a version that accepts `CancellationToken ct = default` (we'll cover this in depth on Day 53, but try it now).
+</ExerciseBlock>
+
+## Summary
+
+| Concept | Dart | C# |
+|---|---|---|
+| Async return type | `Future<T>` | `Task<T>` |
+| Async void return | `Future<void>` | `Task` |
+| Fire-and-forget (avoid!) | *(not a language feature)* | `async void` |
+| Already-done value | `Future.value(x)` | `Task.FromResult(x)` |
+| Already-done void | `Future.value()` | `Task.CompletedTask` |
+| Error handling | `try`/`catch`/`rethrow` | `try`/`catch`/`throw` |
+| Naming convention | no suffix convention | `Async` suffix |
+| Context continuation | not applicable | `ConfigureAwait(false)` |
+
+The async foundation is solid. Tomorrow we tackle parallel execution — running multiple `Task`s at the same time.

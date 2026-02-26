@@ -1,0 +1,208 @@
+---
+title: "Method Overloading"
+day: 16
+week: 4
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "(Dart has no method overloading — uses optional/named params instead)"
+csharpConcept: "Method overloading, overload resolution, when overloads beat optional params"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Method overloading is one of the most commonly used C# features — and something Dart completely lacks. Where Dart uses optional and named parameters to handle multiple calling conventions, C# lets you define entirely different method signatures with the same name.
+
+## What Overloading Is
+
+Multiple methods with the same name, differentiated by their **parameter signature** (count, types, or order). The compiler picks the right one at the call site.
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: no overloading — use optional/named params
+  void log(String message, {
+    String? prefix,
+    bool timestamp = false,
+    Object? error,
+  }) {
+    final pre = prefix != null ? '[$prefix] ' : '';
+    final ts = timestamp ? '[${DateTime.now()}] ' : '';
+    print('$ts$pre$message');
+    if (error != null) print('Error: $error');
+  }
+
+  log("Hello");
+  log("Hello", prefix: "INFO");
+  log("Failed", error: exception, timestamp: true);
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: overloads — each is a complete, separate method
+  void Log(string message)
+      => Console.WriteLine(message);
+
+  void Log(string message, string prefix)
+      => Console.WriteLine($"[{prefix}] {message}");
+
+  void Log(string message, Exception error)
+      => Console.WriteLine($"{message}\nError: {error.Message}");
+
+  void Log(string message, string prefix, Exception error)
+      => Console.WriteLine($"[{prefix}] {message}\nError: {error.Message}");
+
+  // Each is a clean, explicit call
+  Log("Hello");
+  Log("Hello", "INFO");
+  Log("Failed", ex);
+  Log("Failed", "ERROR", ex);
+  ```
+  </div>
+</CodeComparison>
+
+## Overload Resolution Rules
+
+The compiler picks the **most specific matching overload**:
+
+```csharp
+void Process(int n) => Console.WriteLine($"int: {n}");
+void Process(long n) => Console.WriteLine($"long: {n}");
+void Process(double n) => Console.WriteLine($"double: {n}");
+void Process(object o) => Console.WriteLine($"object: {o}");
+
+Process(42);       // int: 42     — exact match
+Process(42L);      // long: 42    — L suffix → long
+Process(42.0);     // double: 42  — exact match
+Process("hello");  // object: hello — only object matches string
+```
+
+<ConceptCallout type="gotcha" title="Overload Resolution Can Surprise You">
+If there are two equally good matches, the compiler picks the more derived type or the one requiring fewer conversions. If ambiguous, you get a compile error. Numeric type conversions: `int` → `long` → `double` → `decimal` (widening); the compiler picks the best fit.
+</ConceptCallout>
+
+## Common Overloading Patterns in .NET
+
+The .NET BCL is full of overloads. Understanding the patterns helps you read documentation:
+
+```csharp
+// Console.WriteLine has 18 overloads!
+Console.WriteLine();           // empty line
+Console.WriteLine("text");     // string
+Console.WriteLine(42);         // int
+Console.WriteLine(3.14);       // double
+Console.WriteLine(true);       // bool
+Console.WriteLine("{0} {1}", "Hello", "World"); // format string
+
+// string.Contains
+"hello world".Contains('o');                    // char overload
+"hello world".Contains("world");                // string overload
+"hello world".Contains("WORLD", StringComparison.OrdinalIgnoreCase); // with comparison
+
+// List<T>.Add vs AddRange
+var list = new List<int>();
+list.Add(1);                   // single item
+list.AddRange(new[] {2,3,4});  // multiple items
+```
+
+## Overloads vs Optional Parameters
+
+Use overloads when:
+- The method does something meaningfully different based on the parameter
+- You want different XML documentation for each variant
+- You're building a public API where optional parameters create versioning issues
+- Different overloads call completely different code paths
+
+Use optional parameters when:
+- It's truly the same operation with slight variations
+- You want callers to be able to name parameters
+- There are many optional parameters and overloads would explode combinatorially
+
+```csharp
+// Good use of overloads — genuinely different behavior
+HttpClient.GetAsync(string requestUri)
+HttpClient.GetAsync(Uri requestUri)
+HttpClient.GetAsync(string requestUri, CancellationToken cancellationToken)
+HttpClient.GetAsync(Uri requestUri, HttpCompletionOption completionOption)
+HttpClient.GetAsync(string requestUri, HttpCompletionOption completionOption, CancellationToken cancellationToken)
+
+// Good use of optional params — same operation, tweakable
+string Format(
+    decimal amount,
+    string currencyCode = "USD",
+    int decimalPlaces = 2,
+    bool useSymbol = true)
+```
+
+## Constructors Are Also Overloadable
+
+```csharp
+public class Connection
+{
+    private readonly string _connectionString;
+    private readonly int _timeout;
+
+    // Different constructors for different init scenarios
+    public Connection(string connectionString)
+        : this(connectionString, 30) { }
+
+    public Connection(string connectionString, int timeoutSeconds)
+    {
+        _connectionString = connectionString;
+        _timeout = timeoutSeconds;
+    }
+
+    public Connection(ConnectionOptions options)
+        : this(options.ConnectionString, options.TimeoutSeconds) { }
+}
+
+// All valid:
+new Connection("Server=localhost;");
+new Connection("Server=localhost;", 60);
+new Connection(new ConnectionOptions { ... });
+```
+
+## Overload Cannot Differ Only by Return Type
+
+This is a hard rule — C# cannot distinguish overloads by return type alone:
+
+```csharp
+// These are NOT valid overloads — identical parameter signatures
+int GetValue() { ... }
+string GetValue() { ... }  // COMPILE ERROR
+
+// Parameters must differ
+int GetValue() { ... }
+int GetValue(string key) { ... }   // OK — different params
+```
+
+## Generic Methods vs Overloads
+
+Sometimes generics are cleaner than type-specific overloads:
+
+```csharp
+// Without generics — one overload per type
+void Print(int value) => Console.WriteLine(value);
+void Print(double value) => Console.WriteLine(value);
+void Print(string value) => Console.WriteLine(value);
+
+// With generics — one method for all types
+void Print<T>(T value) => Console.WriteLine(value);
+
+// But overloads win when you need different behavior per type:
+void Serialize(int value) => WriteInt(value);
+void Serialize(string value) => WriteUtf8(value);
+void Serialize(DateTime value) => WriteIso8601(value);
+// A generic version couldn't know WHICH write method to call
+```
+
+<ExerciseBlock>
+1. Create a `Clamp` method with overloads for `int`, `double`, and `float` — each clamps a value between min and max. Notice how the compiler picks the right one.
+2. Write a `Logger` class with overloads: `Log(string)`, `Log(string, LogLevel)`, `Log(Exception)`, `Log(string, Exception)`. Have each call a private `WriteLog(string, LogLevel, Exception?)` that does the actual work.
+3. Look up `string.Format` and list 5 of its overloads. Explain why each overload exists rather than using optional parameters.
+</ExerciseBlock>

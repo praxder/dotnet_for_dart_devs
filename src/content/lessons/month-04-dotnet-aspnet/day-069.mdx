@@ -1,0 +1,221 @@
+---
+title: "Dependency Injection"
+day: 69
+week: 14
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "get_it, Provider, Riverpod — external DI packages"
+csharpConcept: "IServiceCollection, IServiceProvider, lifetimes, constructor injection"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+.NET has a built-in dependency injection container — unlike Dart, which requires third-party packages like `get_it` or `Riverpod`. The .NET DI container is composable, fast, and integrated into the entire platform (ASP.NET, Blazor, Worker Services, etc.).
+
+## The Three Service Lifetimes
+
+<ConceptCallout type="new" title="Lifetimes — The Most Important DI Concept">
+Every registered service has a lifetime that controls when it's created and destroyed. Getting this wrong causes subtle bugs like shared state in web requests (Scoped used as Singleton) or unnecessary objects kept alive (Transient used for expensive services).
+</ConceptCallout>
+
+```csharp
+builder.Services.AddTransient<IEmailSender, SmtpEmailSender>();
+// New instance every time it's requested
+// Use for: stateless services, cheap to create
+
+builder.Services.AddScoped<IOrderRepository, SqlOrderRepository>();
+// One instance per HTTP request (or per scope)
+// Use for: database contexts, unit-of-work patterns
+
+builder.Services.AddSingleton<ICache, MemoryCache>();
+// One instance for the entire app lifetime
+// Use for: caches, configuration, connection pools, thread-safe shared services
+```
+
+## Basic Registration and Resolution
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart with get_it
+  final sl = GetIt.instance;
+
+  void setupDI() {
+    sl.registerLazySingleton<IUserRepository>(() => SqlUserRepository());
+    sl.registerFactory<IEmailService>(() => SmtpEmailService(sl()));
+  }
+
+  // Resolve
+  final repo = sl<IUserRepository>();
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Program.cs or Startup.cs
+  var builder = WebApplication.CreateBuilder(args);
+
+  // Register services
+  builder.Services.AddSingleton<ICache, MemoryCache>();
+  builder.Services.AddScoped<IUserRepository, SqlUserRepository>();
+  builder.Services.AddTransient<IEmailSender, SmtpEmailSender>();
+
+  // Build the app — container is finalized
+  var app = builder.Build();
+
+  // Constructor injection — the preferred way (no manual resolution)
+  public class UserService(IUserRepository repo, IEmailSender emailSender)
+  {
+      public async Task<User> RegisterAsync(CreateUserRequest request)
+      {
+          var user = new User(request.Name, request.Email);
+          await repo.AddAsync(user);
+          await emailSender.SendWelcomeAsync(user.Email);
+          return user;
+      }
+  }
+  ```
+  </div>
+</CodeComparison>
+
+## Registration Patterns
+
+```csharp
+// 1. Interface + implementation (most common)
+services.AddScoped<IUserRepository, SqlUserRepository>();
+
+// 2. Concrete type only (no interface)
+services.AddScoped<OrderProcessor>();
+
+// 3. Factory registration — complex construction
+services.AddSingleton<ICache>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<CacheSettings>>().Value;
+    return new RedisCache(options.ConnectionString);
+});
+
+// 4. Register multiple implementations of the same interface
+services.AddScoped<IValidator<Order>, OrderAmountValidator>();
+services.AddScoped<IValidator<Order>, OrderInventoryValidator>();
+services.AddScoped<IValidator<Order>, CustomerCreditValidator>();
+// Inject IEnumerable<IValidator<Order>> to get all three
+
+// 5. Register instance directly
+var settings = new AppSettings { MaxRetries = 3 };
+services.AddSingleton(settings);
+
+// 6. Keyed services (.NET 8+)
+services.AddKeyedScoped<IPaymentGateway, StripeGateway>("stripe");
+services.AddKeyedScoped<IPaymentGateway, PayPalGateway>("paypal");
+// Inject: [FromKeyedServices("stripe")] IPaymentGateway gateway
+```
+
+## Constructor Injection — The Preferred Pattern
+
+```csharp
+// .NET DI uses constructor injection by default
+// The container resolves all constructor parameters automatically
+public class OrderService
+{
+    private readonly IOrderRepository _orders;
+    private readonly IEmailSender _email;
+    private readonly ILogger<OrderService> _logger;
+    private readonly IOptions<OrderSettings> _settings;
+
+    // Constructor injection — .NET 8 primary constructor syntax
+    public OrderService(
+        IOrderRepository orders,
+        IEmailSender email,
+        ILogger<OrderService> logger,
+        IOptions<OrderSettings> settings)
+    {
+        _orders = orders;
+        _email = email;
+        _logger = logger;
+        _settings = settings;
+    }
+
+    // C# 12 primary constructor (shorter):
+}
+
+// Even shorter with C# 12 primary constructors:
+public class OrderService(
+    IOrderRepository orders,
+    IEmailSender email,
+    ILogger<OrderService> logger,
+    IOptions<OrderSettings> settings)
+{
+    public async Task PlaceOrderAsync(Order order)
+    {
+        logger.LogInformation("Placing order {OrderId}", order.Id);
+        await orders.AddAsync(order);
+        await email.SendConfirmationAsync(order.CustomerEmail);
+    }
+}
+```
+
+## Multiple Implementations — Choosing at Runtime
+
+```csharp
+// Register all validators
+services.AddScoped<IValidator<Order>, OrderAmountValidator>();
+services.AddScoped<IValidator<Order>, OrderInventoryValidator>();
+
+// Inject IEnumerable to get all implementations
+public class OrderValidationService(IEnumerable<IValidator<Order>> validators)
+{
+    public async Task<ValidationResult> ValidateAsync(Order order)
+    {
+        var results = await Task.WhenAll(
+            validators.Select(v => v.ValidateAsync(order)));
+
+        return results.All(r => r.IsValid)
+            ? ValidationResult.Success
+            : ValidationResult.Failure(results.SelectMany(r => r.Errors));
+    }
+}
+```
+
+## Avoiding Common Mistakes
+
+```csharp
+// ❌ WRONG: Captive dependency — Singleton capturing a Scoped service
+services.AddSingleton<IOrderProcessor, OrderProcessor>();
+services.AddScoped<IOrderRepository, SqlOrderRepository>();
+// OrderProcessor holds a singleton reference to repository — WRONG
+// Repository is scoped (per-request), but singleton lives forever
+
+// ✓ FIX: Use IServiceScopeFactory to create scopes explicitly
+public class OrderProcessor(IServiceScopeFactory scopeFactory) : IOrderProcessor
+{
+    public async Task ProcessAsync(Guid orderId)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var repo = scope.ServiceProvider.GetRequiredService<IOrderRepository>();
+        var order = await repo.GetByIdAsync(orderId);
+        // ...
+    }
+}
+
+// ❌ WRONG: Service Locator (anti-pattern)
+public class BadService(IServiceProvider sp)
+{
+    public void DoWork()
+    {
+        var repo = sp.GetRequiredService<IOrderRepository>();  // anti-pattern
+    }
+}
+
+// ✓ ALWAYS prefer: inject what you need directly in the constructor
+```
+
+<ExerciseBlock>
+1. Build a console app with DI: register a `IWeatherService` (interface) with a `FakeWeatherService` implementation (returns mock data). Use `IServiceCollection`, build the provider, resolve the service, and call it.
+2. Demonstrate the captive dependency bug: register a `Singleton` that depends on a `Scoped` service. Use `ValidateScopes = true` in development to make the container detect and throw on this error.
+3. Register three implementations of `INotificationSender` (Email, SMS, Push). Inject `IEnumerable<INotificationSender>` and send a notification via all registered channels simultaneously using `Task.WhenAll`.
+</ExerciseBlock>

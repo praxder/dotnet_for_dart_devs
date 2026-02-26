@@ -1,0 +1,214 @@
+---
+title: "dotnet CLI and Project Structure"
+day: 74
+week: 15
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "flutter/dart CLI, pubspec.yaml, build_runner"
+csharpConcept: ".csproj, .sln, MSBuild, dotnet CLI, multi-project solutions"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+The `dotnet` CLI is your primary tool for creating, building, testing, and publishing .NET apps — analogous to the `flutter` and `dart` CLIs. This lesson covers the essential commands and the multi-project solution structure you'll encounter in real .NET codebases.
+
+## dotnet CLI Essentials
+
+<CodeComparison>
+  <div slot="dart">
+  ```bash
+  # Dart/Flutter CLI
+  dart create my_app
+  flutter create my_flutter_app
+  dart pub get              # install deps
+  dart pub upgrade          # update deps
+  dart run                  # run app
+  dart test                 # run tests
+  dart analyze              # static analysis
+  dart format .             # format code
+  flutter build apk         # build release
+  ```
+  </div>
+  <div slot="csharp">
+  ```bash
+  # .NET CLI
+  dotnet new console -n MyApp    # create console app
+  dotnet new webapi -n MyApi     # create Web API
+  dotnet new classlib -n MyLib   # create class library
+  dotnet new xunit -n MyTests    # create test project
+
+  dotnet restore                  # install packages (usually automatic)
+  dotnet build                    # compile
+  dotnet run                      # build and run
+  dotnet test                     # run all tests
+  dotnet format                   # format code
+  dotnet publish -c Release       # publish (deployable output)
+  dotnet publish -c Release -r linux-x64 --self-contained  # standalone binary
+  ```
+  </div>
+</CodeComparison>
+
+## Project Templates
+
+```bash
+# List all available templates
+dotnet new list
+
+# Common templates
+dotnet new console           # Console app
+dotnet new web               # Empty ASP.NET Core
+dotnet new webapi            # REST API (minimal API)
+dotnet new mvc               # MVC with views
+dotnet new razorpages        # Razor Pages
+dotnet new blazor            # Blazor WebAssembly
+dotnet new blazorserver      # Blazor Server
+dotnet new worker            # Background Worker Service
+dotnet new classlib          # Class library
+dotnet new xunit             # xUnit test project
+dotnet new nunit             # NUnit test project
+
+# Create in specific directory
+dotnet new webapi -n MyApi --output src/MyApi
+```
+
+## The .csproj File
+
+```xml
+<!-- Modern SDK-style .csproj (used since .NET Core) -->
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- Target framework -->
+    <TargetFramework>net9.0</TargetFramework>
+
+    <!-- Nullable reference types — ALWAYS enable this -->
+    <Nullable>enable</Nullable>
+
+    <!-- Latest C# language version -->
+    <LangVersion>latest</LangVersion>
+
+    <!-- Implicit usings — auto-adds System, LINQ, etc. -->
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Treat warnings as errors (for production code) -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Publish settings -->
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- NuGet packages -->
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Project references (multi-project solution) -->
+    <ProjectReference Include="../MyApp.Domain/MyApp.Domain.csproj" />
+    <ProjectReference Include="../MyApp.Infrastructure/MyApp.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>
+```
+
+## Multi-Project Solutions
+
+Real .NET apps use multiple projects — here's a typical Clean Architecture layout:
+
+```
+MyApp/
+├── MyApp.sln                     ← solution file (groups projects)
+├── src/
+│   ├── MyApp.Domain/             ← Domain models, interfaces, business rules
+│   │   └── MyApp.Domain.csproj  ← classlib
+│   ├── MyApp.Application/        ← Use cases, DTOs, service interfaces
+│   │   └── MyApp.Application.csproj
+│   ├── MyApp.Infrastructure/     ← EF Core, external services, repositories
+│   │   └── MyApp.Infrastructure.csproj
+│   └── MyApp.WebApi/             ← ASP.NET Core entry point
+│       └── MyApp.WebApi.csproj
+└── tests/
+    ├── MyApp.Domain.Tests/
+    └── MyApp.Integration.Tests/
+```
+
+```bash
+# Create solution and projects
+dotnet new sln -n MyApp
+
+dotnet new classlib -n MyApp.Domain -o src/MyApp.Domain
+dotnet new classlib -n MyApp.Application -o src/MyApp.Application
+dotnet new classlib -n MyApp.Infrastructure -o src/MyApp.Infrastructure
+dotnet new webapi -n MyApp.WebApi -o src/MyApp.WebApi
+
+dotnet new xunit -n MyApp.Tests -o tests/MyApp.Tests
+
+# Add all projects to the solution
+dotnet sln MyApp.sln add src/**/*.csproj tests/**/*.csproj
+
+# Add project references
+dotnet add src/MyApp.Application/MyApp.Application.csproj \
+    reference src/MyApp.Domain/MyApp.Domain.csproj
+
+dotnet add src/MyApp.Infrastructure/MyApp.Infrastructure.csproj \
+    reference src/MyApp.Application/MyApp.Application.csproj
+
+dotnet add src/MyApp.WebApi/MyApp.WebApi.csproj \
+    reference src/MyApp.Infrastructure/MyApp.Infrastructure.csproj
+
+dotnet add tests/MyApp.Tests/MyApp.Tests.csproj \
+    reference src/MyApp.Domain/MyApp.Domain.csproj
+```
+
+## Directory.Build.props — Shared Settings
+
+```xml
+<!-- Directory.Build.props in solution root — applies to ALL projects -->
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisMode>Recommended</AnalysisMode>
+  </PropertyGroup>
+</Project>
+```
+
+## Building and Publishing
+
+```bash
+# Debug build (fast, includes debug symbols)
+dotnet build
+
+# Release build (optimized)
+dotnet build -c Release
+
+# Run in release mode
+dotnet run -c Release
+
+# Publish for deployment
+dotnet publish -c Release -o ./publish
+
+# Self-contained single-file executable
+dotnet publish -c Release \
+    -r linux-x64 \
+    --self-contained \
+    -p:PublishSingleFile=true \
+    -p:PublishTrimmed=true \
+    -o ./publish/linux
+```
+
+<ExerciseBlock>
+1. Create a 3-project solution: `TodoApp.Domain` (classlib with `Todo` record and `ITodoRepository`), `TodoApp.Infrastructure` (classlib with `InMemoryTodoRepository`), and `TodoApp.Api` (webapi with Minimal API endpoints). Wire them together with project references.
+2. Add `Directory.Build.props` to the solution root enabling nullable, implicit usings, and warnings-as-errors. Verify all three projects inherit these settings.
+3. Publish `TodoApp.Api` as a self-contained single-file executable for your current OS. Measure the binary size. Then publish with trimming enabled (`PublishTrimmed=true`) and compare sizes.
+</ExerciseBlock>

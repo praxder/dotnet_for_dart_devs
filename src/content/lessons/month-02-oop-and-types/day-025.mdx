@@ -1,0 +1,211 @@
+---
+title: "Object Initializers, required, and init-only Properties"
+day: 25
+week: 5
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart named constructor params, required keyword, copyWith pattern"
+csharpConcept: "Object initializer syntax { }, required modifier, init accessor"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Object initializers are everywhere in C# code and will look foreign if you're coming from Dart. They're the primary pattern for constructing objects with many optional properties — you'll see them constantly in ASP.NET, EF Core, and JSON deserialization.
+
+## Object Initializer Syntax
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: named constructor parameters
+  class Product {
+    final String name;
+    final double price;
+    final String? category;
+    final int stock;
+
+    const Product({
+      required this.name,
+      required this.price,
+      this.category,
+      this.stock = 0,
+    });
+  }
+
+  // Creating instances
+  final p = Product(
+    name: 'Widget',
+    price: 9.99,
+    category: 'Tools',
+    stock: 100,
+  );
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: class with properties + object initializer
+  public class Product
+  {
+      public required string Name { get; set; }
+      public required double Price { get; set; }
+      public string? Category { get; set; }
+      public int Stock { get; set; } = 0;
+  }
+
+  // Creating instances with object initializer syntax
+  var p = new Product
+  {
+      Name = "Widget",     // required — must set
+      Price = 9.99,        // required — must set
+      Category = "Tools",  // optional
+      Stock = 100,         // optional
+  };
+
+  // Minimal — only required properties
+  var minimal = new Product { Name = "Gadget", Price = 19.99 };
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="new" title="Object Initializer Has No Dart Equivalent">
+The `new Type { Prop = val, ... }` syntax is pure C# — Dart has no equivalent. It lets you set any public property after construction without needing constructor parameters for each one. This is extremely common in C# codebases, especially with ORMs and configuration objects.
+</ConceptCallout>
+
+## The `required` Modifier (C# 11)
+
+`required` on a property means it must be set in the object initializer or constructor. The compiler enforces this:
+
+```csharp
+public class Address
+{
+    public required string Street { get; set; }
+    public required string City { get; set; }
+    public required string PostalCode { get; set; }
+    public string Country { get; set; } = "US";  // optional with default
+}
+
+// OK — all required properties set
+var addr = new Address
+{
+    Street = "123 Main St",
+    City = "Springfield",
+    PostalCode = "12345",
+};
+
+// COMPILE ERROR — Street and City missing
+var bad = new Address { PostalCode = "12345" };
+```
+
+## `init` — Set Once, Then Immutable
+
+`init` creates a property that can only be set during construction/initialization but is immutable afterward:
+
+```csharp
+public class Order
+{
+    // init: can set in object initializer, frozen after
+    public required Guid Id { get; init; } = Guid.NewGuid();
+    public required string CustomerId { get; init; }
+    public required DateTime PlacedAt { get; init; } = DateTime.UtcNow;
+
+    // Regular set: can mutate later
+    public OrderStatus Status { get; set; } = OrderStatus.Pending;
+    public List<OrderItem> Items { get; set; } = new();
+}
+
+var order = new Order
+{
+    CustomerId = "cust-123",
+    // Id and PlacedAt have defaults, but can be overridden here
+};
+
+order.Status = OrderStatus.Processing;  // OK — regular setter
+// order.CustomerId = "other";         // ERROR — init-only
+// order.PlacedAt = DateTime.Now;      // ERROR — init-only
+```
+
+<ConceptCallout type="tip" title="required + init = Immutable Required Properties">
+The combination `public required string Name { get; init; }` is like Dart's `required final String name` constructor parameter — must be provided, and immutable after creation. This is the idiomatic pattern for value objects and DTOs.
+</ConceptCallout>
+
+## `with` Expressions — Non-Destructive Mutation
+
+Records (covered in Day 32) support `with` expressions for creating modified copies. You can also use object initializers to build "copy constructors":
+
+```csharp
+// With records: 'with' works automatically
+public record ProductDto(string Name, double Price, string? Category);
+
+var dto = new ProductDto("Widget", 9.99, "Tools");
+var discounted = dto with { Price = 7.99 };  // new record, different price
+
+// With regular classes: build a copy constructor manually
+public class Options
+{
+    public int Timeout { get; init; } = 30;
+    public int Retries { get; init; } = 3;
+    public string BaseUrl { get; init; } = "https://api.example.com";
+
+    // Copy constructor
+    public Options With(
+        int? timeout = null,
+        int? retries = null,
+        string? baseUrl = null) =>
+        new Options
+        {
+            Timeout = timeout ?? Timeout,
+            Retries = retries ?? Retries,
+            BaseUrl = baseUrl ?? BaseUrl,
+        };
+}
+
+var defaults = new Options();
+var fast = defaults.With(timeout: 5, retries: 1);
+var prod = defaults.With(baseUrl: "https://prod.example.com");
+```
+
+## Object Initializers in the Wild
+
+You'll see this pattern constantly in ASP.NET and EF Core:
+
+```csharp
+// ASP.NET request logging options
+services.AddHttpLogging(options =>
+{
+    options.LoggingFields = HttpLoggingFields.RequestPath
+        | HttpLoggingFields.ResponseStatusCode
+        | HttpLoggingFields.Duration;
+    options.RequestBodyLogLimit = 4096;
+    options.ResponseBodyLogLimit = 4096;
+});
+
+// EF Core entity configuration
+modelBuilder.Entity<Post>(entity =>
+{
+    entity.HasKey(e => e.Id);
+    entity.Property(e => e.Title).HasMaxLength(200).IsRequired();
+    entity.HasOne(e => e.Author)
+          .WithMany(a => a.Posts)
+          .HasForeignKey(e => e.AuthorId);
+});
+
+// HttpClient setup
+var client = new HttpClient
+{
+    BaseAddress = new Uri("https://api.example.com"),
+    Timeout = TimeSpan.FromSeconds(30),
+    DefaultRequestHeaders = { { "Accept", "application/json" } },
+};
+```
+
+<ExerciseBlock>
+1. Create a `ServerConfig` class with `required` properties for `Host`, `Port`, and `DatabaseUrl`, plus optional properties for `MaxConnections` (default 100) and `EnableSsl` (default true). Use `init` on the required ones.
+2. Build a test data builder using object initializers: a `CreateTestUser(string? name = null, int? age = null)` helper method that returns a `User` with sensible defaults, overriding only what's specified.
+3. Model an EF Core entity `BlogPost` with: `required init` properties for Id (Guid) and Title, `set` properties for Body, PublishedAt, and IsPublished, and a `Tags` list. Show the object initializer syntax for creating instances in tests.
+</ExerciseBlock>

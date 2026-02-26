@@ -1,0 +1,236 @@
+---
+title: "LINQ: GroupBy, Join, and Aggregate"
+day: 44
+week: 9
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Manual grouping with Map, no native join, fold/reduce"
+csharpConcept: "GroupBy, Join, GroupJoin, Zip, Aggregate, Enumerable static methods"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+The operations in this lesson — `GroupBy`, `Join`, and `Aggregate` — are where LINQ starts to feel more like SQL. Dart developers typically implement these manually; C# makes them first-class collection operations.
+
+## GroupBy — Bucket Items by Key
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: manual grouping
+  final products = [...];
+  final byCategory = <String, List<Product>>{};
+  for (final p in products) {
+    byCategory.putIfAbsent(p.category, () => []).add(p);
+  }
+  // byCategory['Electronics'] → [Widget, Gadget, Laptop]
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // LINQ GroupBy — returns IEnumerable<IGrouping<TKey, TElement>>
+  var byCategory = products.GroupBy(p => p.Category);
+
+  foreach (var group in byCategory)
+  {
+      Console.WriteLine($"{group.Key}: {group.Count()} items");
+      foreach (var product in group)
+          Console.WriteLine($"  - {product.Name}: ${product.Price}");
+  }
+
+  // Project each group to a summary object
+  var categorySummaries = products
+      .GroupBy(p => p.Category)
+      .Select(g => new
+      {
+          Category = g.Key,
+          Count = g.Count(),
+          TotalValue = g.Sum(p => p.Price),
+          AveragePrice = g.Average(p => p.Price),
+          MostExpensive = g.Max(p => p.Price)
+      })
+      .OrderByDescending(s => s.TotalValue)
+      .ToList();
+  ```
+  </div>
+</CodeComparison>
+
+```csharp
+// Group by computed key
+var bySeason = dates.GroupBy(d => d.Month switch
+{
+    12 or 1 or 2 => "Winter",
+    3 or 4 or 5 => "Spring",
+    6 or 7 or 8 => "Summer",
+    _ => "Fall"
+});
+
+// Group by multiple properties — use anonymous type as key
+var byDeptAndLevel = employees.GroupBy(e => new { e.Department, e.Level });
+foreach (var group in byDeptAndLevel)
+    Console.WriteLine($"{group.Key.Department}/{group.Key.Level}: {group.Count()}");
+
+// ToLookup — multi-key dictionary (evaluates immediately, unlike GroupBy)
+// ILookup<TKey, TElement> is like Dictionary<TKey, IEnumerable<TElement>>
+ILookup<string, Product> lookup = products.ToLookup(p => p.Category);
+var electronics = lookup["Electronics"];  // IEnumerable<Product>
+var missing = lookup["NonExistent"];      // empty, not null (safe!)
+```
+
+<ConceptCallout type="tip" title="GroupBy Is Lazy, ToLookup Is Eager">
+`GroupBy()` returns a lazy sequence — the grouping is computed during enumeration. `ToLookup()` materializes immediately (like `.ToList()`). Use `ToLookup()` when you need to query the groups multiple times or randomly access groups by key.
+</ConceptCallout>
+
+## Join — Inner Join Between Two Sequences
+
+```csharp
+var orders = new[]
+{
+    new Order(1, customerId: 10, total: 99.99m),
+    new Order(2, customerId: 20, total: 149.50m),
+    new Order(3, customerId: 10, total: 29.99m),
+};
+
+var customers = new[]
+{
+    new Customer(10, "Alice"),
+    new Customer(20, "Bob"),
+    new Customer(30, "Charlie"),  // no orders
+};
+
+// Inner join — only matching pairs (like SQL INNER JOIN)
+var customerOrders = orders.Join(
+    customers,
+    order => order.CustomerId,   // outer key selector
+    customer => customer.Id,     // inner key selector
+    (order, customer) => new     // result selector
+    {
+        customer.Name,
+        order.Total,
+        order.Id
+    }
+);
+
+foreach (var co in customerOrders)
+    Console.WriteLine($"{co.Name}: Order #{co.Id} — ${co.Total}");
+// Alice: Order #1 — $99.99
+// Bob: Order #2 — $149.50
+// Alice: Order #3 — $29.99
+// (Charlie excluded — no orders)
+```
+
+## GroupJoin — Left Outer Join
+
+```csharp
+// GroupJoin — like SQL LEFT OUTER JOIN (keeps ALL left items)
+var customerSummaries = customers.GroupJoin(
+    orders,
+    customer => customer.Id,     // left key
+    order => order.CustomerId,   // right key
+    (customer, customerOrders) => new
+    {
+        customer.Name,
+        OrderCount = customerOrders.Count(),
+        TotalSpent = customerOrders.Sum(o => o.Total)
+    }
+);
+
+// Charlie included with 0 orders, $0 total
+foreach (var summary in customerSummaries)
+    Console.WriteLine($"{summary.Name}: {summary.OrderCount} orders, ${summary.TotalSpent}");
+// Alice: 2 orders, $129.98
+// Bob: 1 orders, $149.50
+// Charlie: 0 orders, $0
+```
+
+## Zip — Pair Elements from Two Sequences
+
+```csharp
+// Like Python's zip()
+var names = new[] { "Alice", "Bob", "Charlie" };
+var scores = new[] { 95, 87, 92 };
+
+var leaderboard = names.Zip(scores, (name, score) => $"{name}: {score}");
+// ["Alice: 95", "Bob: 87", "Charlie: 92"]
+
+// .NET 6+: Zip(first, second, third)
+var ages = new[] { 30, 25, 35 };
+var combined = names.Zip(scores, ages).Select(t => new
+{
+    Name = t.First,
+    Score = t.Second,
+    Age = t.Third
+});
+```
+
+## Aggregate — Fold/Reduce
+
+```csharp
+// Aggregate is Dart's .fold() or .reduce()
+var numbers = new[] { 1, 2, 3, 4, 5 };
+
+// Sum manually (normally use .Sum())
+int total = numbers.Aggregate(0, (acc, n) => acc + n);  // 15
+
+// Build a string
+string sentence = new[] { "Hello", "world", "from", "LINQ" }
+    .Aggregate((acc, word) => $"{acc} {word}");
+// "Hello world from LINQ"
+
+// Compute running max
+int maxVal = numbers.Aggregate(int.MinValue, Math.Max);
+
+// Complex: build a pipeline using Aggregate
+var pipeline = new List<Func<int, int>>
+{
+    x => x + 1,
+    x => x * 2,
+    x => x - 3
+};
+
+int result = pipeline.Aggregate(5, (current, transform) => transform(current));
+// 5 → 6 → 12 → 9
+
+// Aggregate with a final result selector (3-argument overload)
+string summary = numbers.Aggregate(
+    seed: (Sum: 0, Count: 0),
+    func: (acc, n) => (acc.Sum + n, acc.Count + 1),
+    resultSelector: acc => $"Sum={acc.Sum}, Count={acc.Count}, Avg={acc.Sum / acc.Count}"
+);
+// "Sum=15, Count=5, Avg=3"
+```
+
+## Combining GroupBy + Aggregate for Analytics
+
+```csharp
+record Sale(string Rep, string Region, decimal Amount, DateTime Date);
+
+var sales = GetSalesData();
+
+// Sales summary by region, sorted by total descending
+var regionalSummary = sales
+    .GroupBy(s => s.Region)
+    .Select(g => new
+    {
+        Region = g.Key,
+        TotalSales = g.Sum(s => s.Amount),
+        DealCount = g.Count(),
+        TopRep = g.GroupBy(s => s.Rep)
+                  .OrderByDescending(rg => rg.Sum(s => s.Amount))
+                  .First().Key
+    })
+    .OrderByDescending(r => r.TotalSales)
+    .ToList();
+```
+
+<ExerciseBlock>
+1. Given students with `Name`, `Grade` (A/B/C/D/F), and `Score`, use `GroupBy` to build a grade distribution report showing count and average score per grade, sorted from A to F.
+2. Given `Product(Id, Name, CategoryId)` and `Category(Id, Name)` lists, use `Join` to produce `ProductWithCategory(ProductName, CategoryName)` results. Then use `GroupJoin` to produce a list of ALL categories with their products (including empty categories).
+3. Use `Aggregate` to flatten a `List<List<T>>` into a `List<T>` without using `SelectMany`. Then implement `RunningTotal(IEnumerable<decimal> amounts)` that returns each amount paired with the running sum up to that point.
+</ExerciseBlock>

@@ -1,0 +1,268 @@
+---
+title: "Strings: Interpolation, Verbatim, and Raw Literals"
+day: 5
+week: 1
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "String interpolation ($var, ${expr}), raw strings r'...'"
+csharpConcept: "String interpolation $\"{expr}\", verbatim @\"...\", raw literals \"\"\"...\"\"\""
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# string handling is richer than Dart's in some ways — there are three distinct string literal styles that each solve a different problem. You'll reach for all three regularly.
+
+## String Interpolation
+
+The syntax is slightly different from Dart but the concept is identical.
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  var name = "Flutter";
+  var version = 3.7;
+
+  // Simple variable
+  print('Hello, $name');
+
+  // Expression
+  print('Version: ${version.toStringAsFixed(1)}');
+
+  // Multi-line string
+  var msg = '''
+  Hello $name,
+  version $version
+  ''';
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  var name = "dotnet";
+  var version = 9.0;
+
+  // Simple variable — braces always required
+  Console.WriteLine($"Hello, {name}");
+
+  // Expression
+  Console.WriteLine($"Version: {version:F1}");
+
+  // Format specifiers inside braces
+  var price = 9.99m;
+  Console.WriteLine($"Price: {price:C2}");   // "$9.99"
+  Console.WriteLine($"Hex: {255:X}");         // "FF"
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="Braces Always Required in C#">
+In Dart, `$name` works for simple identifiers. In C#, braces are always required: `{name}`. You'll type `{` and `}` a lot.
+</ConceptCallout>
+
+### Format Specifiers
+
+C# interpolation supports format specifiers directly inside the braces — no need for `.toStringAsFixed()` or similar:
+
+```csharp
+var pi = Math.PI;
+Console.WriteLine($"{pi}");          // 3.141592653589793
+Console.WriteLine($"{pi:F2}");       // 3.14  (fixed, 2 decimal places)
+Console.WriteLine($"{pi:E2}");       // 3.14E+000
+Console.WriteLine($"{pi:P1}");       // 314,159.3%  (percent)
+
+var now = DateTime.Now;
+Console.WriteLine($"{now:yyyy-MM-dd}");         // 2024-01-15
+Console.WriteLine($"{now:dddd, MMMM d}");       // Monday, January 15
+
+var n = 255;
+Console.WriteLine($"{n:D5}");        // 00255  (padded decimal)
+Console.WriteLine($"{n:X4}");        // 00FF   (hex)
+Console.WriteLine($"{n:B8}");        // 11111111  (binary, .NET 8+)
+```
+
+## Verbatim Strings (`@"..."`)
+
+Verbatim strings disable escape sequences. This is analogous to Dart's raw strings (`r'...'`) but specifically designed for Windows paths and multi-line strings.
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart raw string — prefix r
+  var path = r'C:\Users\adam\file.txt';
+  var regex = r'\d+\.\d+';
+
+  // Multi-line string
+  var sql = '''
+  SELECT *
+  FROM users
+  WHERE active = 1
+  ''';
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Verbatim string — prefix @
+  var path = @"C:\Users\adam\file.txt";
+  var regex = @"\d+\.\d+";
+
+  // Multi-line verbatim
+  var sql = @"
+  SELECT *
+  FROM users
+  WHERE active = 1
+  ";
+
+  // Double-up quotes to include a quote character
+  var msg = @"She said ""hello""";
+  // Result: She said "hello"
+  ```
+  </div>
+</CodeComparison>
+
+## Raw String Literals (`"""..."""`) — C# 11+
+
+C# 11 introduced raw string literals that work more like Dart's triple-quoted strings:
+
+```csharp
+// No escaping needed at all
+var json = """
+{
+  "name": "Adam",
+  "score": 100
+}
+""";
+
+// Indentation is trimmed based on closing """ position
+var html = """
+    <div>
+        <p>Hello</p>
+    </div>
+    """;
+// Leading 4-space indent is stripped
+
+// Combine with interpolation: $"""..."""
+var name = "World";
+var interpolated = $"""
+    Hello, {name}!
+    Today is {DateTime.Now:D}.
+    """;
+```
+
+<ConceptCallout type="tip" title="Raw Strings + Interpolation">
+`$"""..."""` combines raw string literals with string interpolation. Use `{{` and `}}` to escape literal braces inside raw interpolated strings. This is perfect for JSON templates, SQL, or HTML generation.
+</ConceptCallout>
+
+## Combining Verbatim and Interpolated
+
+```csharp
+var folder = "documents";
+var file = "report.txt";
+
+// @$ or $@ — both work, verbatim + interpolated
+var path = @$"C:\Users\adam\{folder}\{file}";
+// Result: C:\Users\adam\documents\report.txt
+```
+
+## Common String Operations
+
+Dart method → C# equivalent:
+
+```csharp
+var s = "  Hello, World!  ";
+
+// Dart: s.trim() → C#:
+s.Trim()         // "Hello, World!"
+s.TrimStart()    // "Hello, World!  "
+s.TrimEnd()      // "  Hello, World!"
+
+// Dart: s.toLowerCase() → C#:
+s.ToLower()      // "  hello, world!  "
+s.ToUpper()      // "  HELLO, WORLD!  "
+
+// Dart: s.contains('World') → C#:
+s.Contains("World")      // true
+s.Contains("world")      // false (case sensitive)
+s.Contains("world", StringComparison.OrdinalIgnoreCase)  // true
+
+// Dart: s.replaceAll('l', 'L') → C#:
+s.Replace("l", "L")   // "  HeLLo, WorLd!  "
+
+// Dart: s.split(', ') → C#:
+s.Split(", ")     // ["  Hello", "World!  "]
+s.Split(new[] { ", ", " " }, StringSplitOptions.RemoveEmptyEntries)
+
+// Dart: s.startsWith('Hello') → C#:
+s.TrimStart().StartsWith("Hello")   // true
+
+// Dart: s.substring(2, 7) → C#:
+s.Substring(2, 5)    // "Hello"  (start, LENGTH — not end index!)
+s[2..7]              // "Hello"  (C# range syntax, same as Dart)
+```
+
+<ConceptCallout type="gotcha" title="Substring Length, Not End Index">
+`s.Substring(start, length)` takes a **length** as the second argument, not an end index. `"Hello".Substring(1, 3)` = `"ell"`, not `"ell"`. Use the range operator `s[1..4]` if you want end-index semantics (exclusive end).
+</ConceptCallout>
+
+## String.Format and StringBuilder
+
+```csharp
+// String.Format — old style, still common in logs/resources
+string.Format("Hello, {0}! You have {1} messages.", name, count);
+
+// StringBuilder — use when concatenating in a loop
+var sb = new StringBuilder();
+for (int i = 0; i < 1000; i++)
+{
+    sb.Append("item");
+    sb.AppendLine($" #{i}");
+}
+var result = sb.ToString();
+```
+
+<ConceptCallout type="tip">
+String concatenation with `+` in a loop is O(n²) in C# (and Dart). For loops, use `StringBuilder`. For one-time joins, `string.Join(", ", items)` is cleaner.
+</ConceptCallout>
+
+## Practical Example
+
+```csharp
+// Building a URL with query params
+var baseUrl = @"https://api.example.com";
+var endpoint = "products";
+var page = 2;
+var pageSize = 20;
+var filter = "electronics";
+
+var url = $"{baseUrl}/{endpoint}?page={page}&pageSize={pageSize}&category={filter}";
+Console.WriteLine(url);
+// https://api.example.com/products?page=2&pageSize=20&category=electronics
+
+// Formatting a report line
+var products = new[]
+{
+    (Name: "Widget", Price: 9.99m, Stock: 150),
+    (Name: "Gadget", Price: 49.99m, Stock: 23),
+};
+
+Console.WriteLine($"{"Name",-15} {"Price",10} {"Stock",8}");
+Console.WriteLine(new string('-', 35));
+foreach (var (name, price, stock) in products)
+{
+    Console.WriteLine($"{name,-15} {price,10:C2} {stock,8:D}");
+}
+// Name                Price    Stock
+// -----------------------------------
+// Widget              $9.99      150
+// Gadget             $49.99       23
+```
+
+<ExerciseBlock>
+1. Create a method `FormatFileSize(long bytes)` that returns human-readable sizes: `"1.5 KB"`, `"2.3 MB"`, `"0.98 GB"`. Use format specifiers in the interpolated string.
+2. Write a verbatim multiline SQL query string and then use `$@"..."` to inject a table name variable into it.
+3. Use `StringBuilder` to build a CSV file header and 10 rows of fake product data.
+</ExerciseBlock>

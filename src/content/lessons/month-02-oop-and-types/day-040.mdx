@@ -1,0 +1,200 @@
+---
+title: "Read-Only and Immutable Collections"
+day: 40
+week: 8
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "List.unmodifiable(), const [], UnmodifiableListView"
+csharpConcept: "IReadOnlyList<T>, ReadOnlyCollection<T>, ImmutableList<T>, frozen collections"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# has three distinct levels of collection immutability, each with different trade-offs. This is more nuanced than Dart's approach, and choosing the right level matters for API design and thread safety.
+
+## Three Levels of Immutability
+
+<ConceptCallout type="new" title="Read-Only vs Immutable — A Key Distinction">
+**Read-only**: you can't modify *through this reference*, but the underlying data might change elsewhere. Like Dart's `UnmodifiableListView` — a window that prevents mutation, not a guarantee of stability.
+
+**Immutable**: the data genuinely cannot change. Any "modification" creates a new collection. Like Dart's `const []` — but with full type support.
+</ConceptCallout>
+
+## Level 1: Read-Only Interfaces
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: expose as non-modifiable view
+  class Repository {
+    final List<String> _items = [];
+
+    // Returns unmodifiable view — callers can't add/remove
+    List<String> get items => List.unmodifiable(_items);
+    // Or:
+    Iterable<String> get items => _items; // even better
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: return read-only interface
+  public class Repository
+  {
+      private readonly List<string> _items = new();
+
+      // IReadOnlyList<T> — indexed read-only access, Count
+      public IReadOnlyList<string> Items => _items;
+
+      // IReadOnlyCollection<T> — Count only, no indexer
+      // IReadOnlyDictionary<K,V>, IReadOnlySet<T> also exist
+
+      public void Add(string item) => _items.Add(item);
+  }
+
+  // Caller gets read-only access
+  var repo = new Repository();
+  repo.Add("item1");
+  var items = repo.Items;
+  Console.WriteLine(items[0]);    // OK: reads
+  // items.Add("x");              // COMPILE ERROR: no Add on IReadOnlyList
+  ```
+  </div>
+</CodeComparison>
+
+```csharp
+// The interfaces:
+IReadOnlyList<T>         // Count + indexer (Items[i]), but no Add/Remove
+IReadOnlyCollection<T>   // Count only (no indexer)
+IReadOnlyDictionary<K,V> // TryGetValue, ContainsKey, but no Add/Remove
+IReadOnlySet<T>          // .NET 5+: Contains, IsSubsetOf, but no Add/Remove
+
+// BUT: callers can cast back to the mutable type — not a true guarantee!
+var items = (List<string>)repo.Items;
+items.Add("sneaky");  // This works — IReadOnlyList is just a view
+```
+
+## Level 2: ReadOnlyCollection\<T\> Wrapper
+
+```csharp
+using System.Collections.ObjectModel;
+
+// Wraps a list, preventing mutation through the wrapper
+var mutable = new List<int> { 1, 2, 3 };
+ReadOnlyCollection<int> readOnly = mutable.AsReadOnly();
+// or: new ReadOnlyCollection<int>(mutable)
+
+// readOnly.Add(4);  // COMPILE ERROR: no Add method
+Console.WriteLine(readOnly[0]);   // OK: 1
+Console.WriteLine(readOnly.Count); // OK: 3
+
+// But changes to original ARE visible through the wrapper:
+mutable.Add(4);
+Console.WriteLine(readOnly.Count); // 4 — wrapper reflects the change!
+```
+
+## Level 3: ImmutableList\<T\> and Friends
+
+```csharp
+using System.Collections.Immutable;
+
+// Immutable collections — modifications return NEW collections
+var original = ImmutableList.Create(1, 2, 3);
+var withFour = original.Add(4);       // new list: [1,2,3,4]
+var withoutOne = original.Remove(1);  // new list: [2,3]
+
+Console.WriteLine(original.Count);    // still 3 — unchanged!
+Console.WriteLine(withFour.Count);    // 4
+
+// Full immutable collection family:
+ImmutableList<T>         // indexed, Add/Remove return new list
+ImmutableDictionary<K,V> // Add/Remove/SetItem return new dict
+ImmutableHashSet<T>      // Add/Remove return new set
+ImmutableQueue<T>        // Enqueue/Dequeue return new queue
+ImmutableStack<T>        // Push/Pop return new stack
+ImmutableArray<T>        // struct wrapper, fastest for reads
+
+// Builder pattern — efficient batch modifications
+var builder = ImmutableList.CreateBuilder<string>();
+for (int i = 0; i < 1000; i++)
+    builder.Add($"item{i}");
+ImmutableList<string> result = builder.ToImmutable();  // one allocation
+// Better than: 1000 ImmutableList.Add() calls (1000 allocations)
+```
+
+<ConceptCallout type="tip" title="ImmutableList is Thread-Safe by Design">
+`ImmutableList<T>` can be safely read from multiple threads simultaneously with no locking — because nothing can ever change it. This makes it ideal for caches, configuration, and any shared data in concurrent code. The trade-off: every "modification" allocates a new collection.
+</ConceptCallout>
+
+## FrozenDictionary\<K,V\> — .NET 8
+
+```csharp
+using System.Collections.Frozen;
+
+// FrozenDictionary — optimized for read-heavy scenarios
+// Build once, read millions of times (e.g., config, lookup tables)
+var config = new Dictionary<string, string>
+{
+    ["host"] = "localhost",
+    ["port"] = "5432",
+    ["dbname"] = "mydb"
+}.ToFrozenDictionary();
+
+// Faster lookup than regular Dictionary for read-only use
+string host = config["host"];  // Very fast — uses perfect hash
+
+// FrozenSet also exists
+var validCodes = new[] { "USD", "EUR", "GBP", "JPY" }.ToFrozenSet();
+Console.WriteLine(validCodes.Contains("EUR")); // true
+```
+
+## Choosing the Right Level
+
+```csharp
+// PUBLIC API — expose minimum needed
+IReadOnlyList<T>    // most common for properties/return types
+IEnumerable<T>      // when callers only need iteration
+
+// CLASS INTERNALS — prevent mutation from outside
+ReadOnlyCollection<T>   // when you want Add() to not compile
+
+// SHARED DATA / CONCURRENT CODE
+ImmutableList<T>    // thread-safe, safe across threads
+
+// STARTUP CONFIG — build once, read millions of times
+FrozenDictionary<K,V>   // fastest possible lookups
+```
+
+```csharp
+// Practical example: a settings class
+public class AppSettings
+{
+    // Bad: exposes mutable internals
+    public List<string> AllowedOrigins { get; } = new();
+
+    // Good: read-only interface
+    private readonly List<string> _origins = new();
+    public IReadOnlyList<string> AllowedOrigins => _origins;
+
+    // Better for thread-safety: truly immutable
+    public ImmutableHashSet<string> AllowedOriginsSet { get; }
+
+    public AppSettings(IEnumerable<string> origins)
+    {
+        AllowedOriginsSet = origins.ToImmutableHashSet(
+            StringComparer.OrdinalIgnoreCase);
+    }
+}
+```
+
+<ExerciseBlock>
+1. Create a `GameState` class with an internal `List<Player>` but expose only `IReadOnlyList<Player>`. Add `AddPlayer()` and `RemovePlayer()` methods. Verify that callers cannot call `Add()` directly on the exposed property.
+2. Implement a simple event sourcing store using `ImmutableList<DomainEvent>`. The store should have `Append(event)` that returns a NEW store with the event added (the original is unchanged). Verify two different "branches" of the store are independent.
+3. Benchmark `Dictionary<string, int>` vs `FrozenDictionary<string, int>` for lookups on a 10,000-entry table using `Stopwatch`. Run 1,000,000 lookups on each and compare the times.
+</ExerciseBlock>

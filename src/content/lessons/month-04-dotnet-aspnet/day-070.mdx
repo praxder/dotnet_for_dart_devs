@@ -1,0 +1,201 @@
+---
+title: "Logging with Microsoft.Extensions.Logging"
+day: 70
+week: 14
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "logger package, print(), debugPrint()"
+csharpConcept: "ILogger<T>, LogLevel, structured logging, Serilog, high-performance logging"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+.NET's logging system is a standard abstraction (`Microsoft.Extensions.Logging`) that separates the **logging API** from the **logging implementation**. Your code always uses `ILogger<T>`; the provider (console, file, Serilog, etc.) is configured at startup.
+
+## Basic Logging
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: simple logger package
+  import 'package:logger/logger.dart';
+  final log = Logger();
+
+  log.d('Debug message');
+  log.i('Info: user ${user.id} logged in');
+  log.w('Warning: low memory');
+  log.e('Error', error: e, stackTrace: st);
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C#: inject ILogger<T> — T is the category (usually the class name)
+  public class UserService(ILogger<UserService> logger)
+  {
+      public async Task LoginAsync(string userId)
+      {
+          logger.LogTrace("Entering LoginAsync for {UserId}", userId);
+          logger.LogDebug("Looking up user {UserId}", userId);
+          logger.LogInformation("User {UserId} logged in successfully", userId);
+          logger.LogWarning("User {UserId} has expired password", userId);
+          logger.LogError("Failed to find user {UserId}", userId);
+          logger.LogCritical("Database connection lost during login for {UserId}", userId);
+      }
+  }
+  // Log levels: Trace < Debug < Information < Warning < Error < Critical < None
+  ```
+  </div>
+</CodeComparison>
+
+## Structured Logging — NOT String Interpolation
+
+```csharp
+// ❌ WRONG: string interpolation loses the structure
+logger.LogInformation($"Processing order {orderId} for customer {customerId}");
+// Stored as: "Processing order 123e4567 for customer CUST-99"
+// Can't query: "all logs for customer CUST-99"
+
+// ✓ RIGHT: message template with named holes
+logger.LogInformation("Processing order {OrderId} for customer {CustomerId}",
+    orderId, customerId);
+// Stored as: { Message, OrderId: "123e4567", CustomerId: "CUST-99" }
+// Can query: WHERE CustomerId = 'CUST-99'
+
+// With exceptions — always pass as last argument (NOT in the template)
+try
+{
+    await ProcessAsync(order);
+}
+catch (Exception ex)
+{
+    // ❌ WRONG: exception in template is just a string
+    logger.LogError($"Failed: {ex.Message}");
+
+    // ✓ RIGHT: exception as first argument — preserves stack trace
+    logger.LogError(ex, "Failed to process order {OrderId}", order.Id);
+}
+```
+
+<ConceptCallout type="tip" title="Named Holes, Not Positional">
+.NET's logging uses **named** message template holes: `{OrderId}` — not `{0}`. The names become properties in structured logs. This enables powerful querying in log aggregators (Seq, Kibana, Grafana Loki). Always use descriptive names.
+</ConceptCallout>
+
+## High-Performance Logging with LoggerMessage
+
+```csharp
+// [LoggerMessage] source generator — zero-allocation for hot paths
+public partial class OrderService
+{
+    private readonly ILogger<OrderService> _logger;
+
+    [LoggerMessage(
+        Level = LogLevel.Information,
+        Message = "Processing order {OrderId} (total: {Total:C})")]
+    private partial void LogProcessing(Guid orderId, decimal total);
+
+    [LoggerMessage(
+        Level = LogLevel.Error,
+        Message = "Failed to process order {OrderId}")]
+    private partial void LogProcessingFailed(Exception ex, Guid orderId);
+
+    public async Task ProcessAsync(Order order)
+    {
+        LogProcessing(order.Id, order.Total);  // no string allocation if log is disabled
+        try
+        {
+            await DoProcessAsync(order);
+        }
+        catch (Exception ex)
+        {
+            LogProcessingFailed(ex, order.Id);
+            throw;
+        }
+    }
+}
+```
+
+## Configuring Logging in appsettings.json
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.EntityFrameworkCore.Database.Command": "Information",
+      "MyApp.Services": "Debug"
+    },
+    "Console": {
+      "LogLevel": {
+        "Default": "Information"
+      }
+    }
+  }
+}
+```
+
+## Adding Serilog (Production-Grade Logging)
+
+```bash
+dotnet add package Serilog.AspNetCore
+dotnet add package Serilog.Sinks.Console
+dotnet add package Serilog.Sinks.File
+dotnet add package Serilog.Sinks.Seq   # optional: log aggregation server
+```
+
+```csharp
+// Program.cs
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+    .Enrich.FromLogContext()
+    .Enrich.WithMachineName()
+    .Enrich.WithThreadId()
+    .WriteTo.Console(outputTemplate:
+        "[{Timestamp:HH:mm:ss} {Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.File("logs/app-.log",
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: 7)
+    .WriteTo.Seq("http://localhost:5341")  // optional
+    .CreateLogger();
+
+builder.Host.UseSerilog();  // replace default provider with Serilog
+```
+
+## Scoped Logging — Add Context to All Logs
+
+```csharp
+// Add properties that appear on all log statements within a scope
+using (logger.BeginScope("Processing batch {BatchId}", batchId))
+{
+    logger.LogInformation("Starting batch");  // includes BatchId
+
+    foreach (var item in items)
+    {
+        using (logger.BeginScope("Item {ItemId}", item.Id))
+        {
+            logger.LogDebug("Processing");  // includes BatchId AND ItemId
+            await ProcessAsync(item);
+        }
+    }
+
+    logger.LogInformation("Batch complete");  // includes BatchId
+}
+
+// ASP.NET Core: RequestId and TraceId added automatically via middleware
+// All logs within an HTTP request carry the same correlation IDs
+```
+
+<ExerciseBlock>
+1. Create a service with 5 methods, each logging at a different level (Trace through Critical). Configure logging to show only `Warning` and above in the console. Verify only the right messages appear.
+2. Demonstrate the difference between `LogInformation($"User {userId}")` (string interpolation) and `LogInformation("User {UserId}", userId)` (structured). Use Serilog's `WriteTo.Memory` sink to capture and inspect the logged events — show the structured one has the `UserId` property.
+3. Use `[LoggerMessage]` source generator to define 3 log messages in a service class. Verify the generated code in the `.g.cs` file, and benchmark the generated method vs a regular `logger.LogInformation(...)` call using `BenchmarkDotNet`.
+</ExerciseBlock>

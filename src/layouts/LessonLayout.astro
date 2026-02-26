@@ -1,0 +1,106 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import Header from '../components/layout/Header.astro';
+import Sidebar from '../components/layout/Sidebar.astro';
+import Footer from '../components/layout/Footer.astro';
+import LessonComplete from '../components/progress/LessonComplete';
+import type { Lesson } from '../lib/lessons';
+import type { LessonNav } from '../lib/navigation';
+import { MODULES } from '../lib/curriculum';
+
+interface Props {
+  lesson: Lesson;
+  allLessons: Lesson[];
+  nav: LessonNav;
+}
+
+const { lesson, allLessons, nav } = Astro.props;
+const { day, title, module: moduleId, moduleName, phase, dartConcept, csharpConcept, estimatedMinutes, isProject, projectType } = lesson.data;
+
+const mod = MODULES.find(m => m.id === moduleId)!;
+const phaseLabel = phase === 'csharp' ? 'Phase 1: C# Language' : 'Phase 2: .NET & ASP.NET';
+const nextUrl = nav.next ? `/lessons/day-${String(nav.next.data.day).padStart(3, '0')}` : undefined;
+---
+
+<BaseLayout title={`Day ${day}: ${title}`} description={`Day ${day} — ${title}. Learn ${csharpConcept} in C# from a Dart developer perspective.`}>
+  <Header currentDay={day} />
+
+  <div class="flex">
+    <Sidebar lessons={allLessons} currentDay={day} />
+
+    <!-- Main content -->
+    <main class="flex-1 lg:ml-72 min-w-0">
+      <div class="max-w-3xl mx-auto px-4 sm:px-6 py-8">
+
+        <!-- Breadcrumb -->
+        <nav class="flex items-center gap-2 text-xs text-slate-600 mb-6">
+          <a href="/" class="hover:text-slate-400 transition-colors">Dashboard</a>
+          <span>/</span>
+          <a href={`/modules/${mod.slug}`} class="hover:text-slate-400 transition-colors">{mod.shortName}</a>
+          <span>/</span>
+          <span class="text-slate-400">Day {day}</span>
+        </nav>
+
+        <!-- Lesson header -->
+        <header class="mb-8">
+          <!-- Phase + Module badge -->
+          <div class="flex flex-wrap items-center gap-2 mb-4">
+            <span class="text-xs px-2.5 py-1 rounded-full font-medium"
+              style={`background-color: ${mod.color}22; color: ${mod.color}; border: 1px solid ${mod.color}44`}
+            >
+              {mod.icon} {mod.shortName}
+            </span>
+            {isProject && (
+              <span class={`text-xs px-2.5 py-1 rounded-full font-medium border ${
+                projectType === 'capstone'
+                  ? 'bg-amber-950/50 text-amber-300 border-amber-700/50'
+                  : 'bg-purple-950/50 text-purple-300 border-purple-700/50'
+              }`}>
+                {projectType === 'capstone' ? '🏆 Capstone Project' : '🔨 Mini-Project'}
+              </span>
+            )}
+            <span class="text-xs text-slate-600 ml-auto">⏱ {estimatedMinutes} min · Week {Math.ceil(day / 5)}</span>
+          </div>
+
+          <h1 class="text-2xl sm:text-3xl font-bold text-white leading-tight mb-3">
+            <span class="text-slate-600 font-normal text-lg">Day {day} — </span>
+            {title}
+          </h1>
+
+          {dartConcept && (
+            <p class="text-sm text-slate-500">
+              <span class="text-teal-500">Dart:</span> {dartConcept}
+              <span class="text-slate-700 mx-2">→</span>
+              <span class="text-indigo-400">C#:</span> {csharpConcept}
+            </p>
+          )}
+        </header>
+
+        <!-- Lesson content -->
+        <article class="lesson-prose">
+          <slot />
+        </article>
+
+        <!-- Complete button -->
+        <LessonComplete day={day} nextUrl={nextUrl} client:load />
+
+        <!-- Prev/Next footer -->
+        <Footer prev={nav.prev} next={nav.next} />
+      </div>
+    </main>
+  </div>
+
+  <!-- Mobile sidebar toggle -->
+  <button
+    id="sidebar-toggle"
+    class="fixed bottom-6 right-6 lg:hidden z-50 w-12 h-12 rounded-full bg-indigo-600 text-white shadow-lg flex items-center justify-center text-lg"
+    onclick="
+      const s = document.getElementById('sidebar');
+      const o = document.getElementById('sidebar-overlay');
+      s?.classList.toggle('-translate-x-full');
+      o?.classList.toggle('hidden');
+    "
+  >
+    ☰
+  </button>
+</BaseLayout>

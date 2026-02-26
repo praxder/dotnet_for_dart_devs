@@ -1,0 +1,209 @@
+---
+title: "The Generic Host and Worker Services"
+day: 71
+week: 15
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "isolates, background services, long-running tasks"
+csharpConcept: "IHost, HostBuilder, IHostedService, BackgroundService, Worker Service"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+The Generic Host is the backbone of all .NET applications — ASP.NET Core, Worker Services, and console apps. It provides DI, configuration, logging, and lifecycle management. Understanding it means understanding how all .NET apps start, run, and stop.
+
+## What Is the Generic Host?
+
+```csharp
+// Every .NET 6+ app starts like this (implicit top-level statements):
+
+// ASP.NET Core app
+var builder = WebApplication.CreateBuilder(args);
+// ↑ Creates a HostApplicationBuilder with:
+//   - IServiceCollection for DI registration
+//   - IConfiguration (appsettings.json, env vars, etc.)
+//   - ILoggingBuilder (console, debug, etc.)
+
+builder.Services.AddControllers();
+builder.Services.AddScoped<IUserService, UserService>();
+
+var app = builder.Build();   // ← builds the host
+app.MapControllers();
+await app.RunAsync();        // ← starts and blocks until shutdown
+
+// Console/Worker app
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddHostedService<MyWorker>();
+await builder.Build().RunAsync();
+```
+
+## IHostedService — Background Work
+
+```csharp
+// IHostedService is the contract for background services
+public interface IHostedService
+{
+    Task StartAsync(CancellationToken cancellationToken);
+    Task StopAsync(CancellationToken cancellationToken);
+}
+
+// Register any hosted service:
+builder.Services.AddHostedService<CacheWarmupService>();
+builder.Services.AddHostedService<MessageQueueConsumer>();
+```
+
+## BackgroundService — The Easier Way
+
+```csharp
+// BackgroundService is the base class for long-running services
+// It implements IHostedService and calls ExecuteAsync() for you
+public class DataSyncWorker : BackgroundService
+{
+    private readonly ILogger<DataSyncWorker> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
+
+    public DataSyncWorker(
+        ILogger<DataSyncWorker> logger,
+        IServiceScopeFactory scopeFactory)
+    {
+        _logger = logger;
+        _scopeFactory = scopeFactory;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Data sync worker starting");
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await SyncDataAsync(stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;  // graceful shutdown
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during data sync");
+                // Don't rethrow — service continues running
+            }
+
+            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+        }
+
+        _logger.LogInformation("Data sync worker stopped");
+    }
+
+    private async Task SyncDataAsync(CancellationToken ct)
+    {
+        // IMPORTANT: BackgroundService is a singleton!
+        // Create a scope to use Scoped services (like DbContext)
+        using var scope = _scopeFactory.CreateScope();
+        var repo = scope.ServiceProvider.GetRequiredService<IDataRepository>();
+
+        _logger.LogInformation("Syncing data...");
+        var count = await repo.SyncAsync(ct);
+        _logger.LogInformation("Synced {Count} records", count);
+    }
+}
+
+// Register
+builder.Services.AddHostedService<DataSyncWorker>();
+```
+
+<ConceptCallout type="gotcha" title="BackgroundService Is Singleton — Can't Inject Scoped Directly">
+`BackgroundService` (and all `IHostedService`) are registered as **singletons** — they live for the app's lifetime. You cannot inject `DbContext` or other Scoped services directly into their constructors. Always use `IServiceScopeFactory` to create a scope when you need Scoped services in a background worker.
+</ConceptCallout>
+
+## Hosted Service Lifecycle
+
+```csharp
+// Startup order:
+// 1. All services registered
+// 2. Host built (IHost)
+// 3. IHostedService.StartAsync() called for all registered hosted services
+//    (in registration order, can be made concurrent)
+// 4. App runs (RunAsync() blocks)
+// 5. SIGTERM/Ctrl+C received
+// 6. IHostedService.StopAsync() called (reverse order)
+// 7. Process exits
+
+// Control startup timeout (default: 30s)
+builder.Services.Configure<HostOptions>(options =>
+{
+    options.StartupTimeout = TimeSpan.FromSeconds(60);
+    options.ShutdownTimeout = TimeSpan.FromSeconds(30);
+});
+```
+
+## Worker Service Project Template
+
+```bash
+# Create a new Worker Service (background service with DI, config, logging)
+dotnet new worker -n MyDataProcessor
+cd MyDataProcessor
+```
+
+The generated structure:
+
+```
+MyDataProcessor/
+├── Program.cs         ← host setup
+├── Worker.cs          ← your BackgroundService subclass
+├── appsettings.json
+└── MyDataProcessor.csproj
+```
+
+```csharp
+// Generated Program.cs
+IHost host = Host.CreateDefaultBuilder(args)
+    .ConfigureServices(services =>
+    {
+        services.AddHostedService<Worker>();
+    })
+    .Build();
+
+await host.RunAsync();
+
+// Generated Worker.cs
+public class Worker : BackgroundService
+{
+    private readonly ILogger<Worker> _logger;
+
+    public Worker(ILogger<Worker> logger) => _logger = logger;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
+            await Task.Delay(1000, stoppingToken);
+        }
+    }
+}
+```
+
+## Running as a Windows Service or systemd
+
+```csharp
+// Add NuGet: Microsoft.Extensions.Hosting.Systemd (Linux)
+// or Microsoft.Extensions.Hosting.WindowsServices (Windows)
+
+builder.Host.UseSystemd();    // Linux systemd
+// OR
+builder.Host.UseWindowsService(); // Windows Service
+```
+
+<ExerciseBlock>
+1. Build a Worker Service that reads messages from a `Channel<string>` (simulating a message queue), processes each message (log it + fake 200ms work), and every 60 seconds logs a summary of how many messages it processed.
+2. Add a `IHealthCheck` implementation to your worker that reports `Healthy` when the processing rate is > 10 messages/minute, `Degraded` when 1-10/minute, and `Unhealthy` when 0. Use `AddHealthChecks()` and expose a `/health` endpoint.
+3. Implement graceful shutdown: when `stoppingToken` is cancelled, finish processing the current message, then drain the remaining messages in the channel (with a 5-second timeout), then shut down cleanly. Log what happens during shutdown.
+</ExerciseBlock>

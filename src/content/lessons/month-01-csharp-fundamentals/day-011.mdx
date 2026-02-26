@@ -1,0 +1,258 @@
+---
+title: "Switch Expressions and Pattern Matching"
+day: 11
+week: 3
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart 3 switch expressions, pattern matching"
+csharpConcept: "C# switch expressions (C# 8+), switch statements"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# switch expressions and pattern matching have an interesting history: **C# pioneered many of these features**, and Dart 3 later adopted similar syntax. If you love Dart 3's switch expressions, you'll feel right at home — but C# goes further with more pattern types and a more mature feature set.
+
+## The Switch Statement (Classic)
+
+Before switch expressions existed, C# had the traditional switch statement. Unlike Dart's classic switch, **C# fall-through is not allowed** (unless the case is empty), which is a safety improvement.
+
+```csharp
+string day = "Monday";
+
+switch (day)
+{
+    case "Monday":
+    case "Tuesday":
+        Console.WriteLine("Early week");
+        break;
+    case "Friday":
+        Console.WriteLine("End of week!");
+        break;
+    default:
+        Console.WriteLine("Midweek");
+        break;
+}
+```
+
+<ConceptCallout type="gotcha">
+In C#, `break` is mandatory in non-empty cases. You cannot accidentally fall through to the next case. Attempting to do so is a **compile error**, not just a warning. This is stricter and safer than many languages.
+</ConceptCallout>
+
+## Switch Expressions (C# 8+)
+
+This is where it gets exciting. C# 8 introduced switch expressions, which return a value — identical in spirit to Dart 3's switch expressions.
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  String describe(int n) => switch (n) {
+    0 => 'zero',
+    1 => 'one',
+    _ => 'many',
+  };
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  string Describe(int n) => n switch
+  {
+      0 => "zero",
+      1 => "one",
+      _ => "many",
+  };
+  ```
+  </div>
+</CodeComparison>
+
+The syntax differences are small but important:
+- C# puts the variable **before** the `switch` keyword: `n switch { ... }`
+- Dart puts it after: `switch (n) { ... }`
+- Both use `=>` for the arm result
+- Both use `_` as the wildcard/default
+
+<ConceptCallout type="same">
+The `_` wildcard discard pattern works identically in both languages. It matches anything and is used as the default arm in switch expressions.
+</ConceptCallout>
+
+## Exhaustiveness Checking
+
+Both languages check that switch expressions are exhaustive, but they handle it differently.
+
+```csharp
+// This compiles fine — int has a clear default
+string result = someInt switch
+{
+    0 => "zero",
+    > 0 => "positive",
+    _ => "negative",  // covers all remaining cases
+};
+```
+
+For **sealed class hierarchies and enums**, C# performs exhaustiveness checking at compile time:
+
+```csharp
+enum Direction { North, South, East, West }
+
+string Describe(Direction d) => d switch
+{
+    Direction.North => "Going north",
+    Direction.South => "Going south",
+    Direction.East  => "Going east",
+    Direction.West  => "Going west",
+    // No default needed — compiler knows all 4 cases are covered
+};
+```
+
+<ConceptCallout type="different">
+C# only guarantees exhaustiveness for enums and sealed class hierarchies at compile time. For open types like `int` or `string`, you **must** include a `_` default arm or the compiler emits a warning that the expression might not handle all inputs. Dart 3 has similar behavior.
+</ConceptCallout>
+
+## Multiple Values per Arm (Comma Syntax)
+
+In a switch expression, you can match multiple patterns in a single arm using commas:
+
+```csharp
+string GetQuadrant(int x, int y) => (x, y) switch
+{
+    (> 0, > 0) => "Q1",
+    (< 0, > 0) => "Q2",
+    (< 0, < 0) => "Q3",
+    (> 0, < 0) => "Q4",
+    (0, _) or (_, 0) => "On an axis",
+    _ => "Origin"
+};
+```
+
+This is matching on a **tuple** — we'll cover tuples in depth on Day 20, but this previews how switch expressions compose with other features.
+
+<DartEquivalent>
+Dart 3's switch expressions also support multi-value matching via records:
+
+```dart
+String getQuadrant(int x, int y) => (x, y) switch {
+  (> 0, > 0) => 'Q1',
+  (< 0, > 0) => 'Q2',
+  (< 0, < 0) => 'Q3',
+  (> 0, < 0) => 'Q4',
+  (0, _) || (_, 0) => 'On an axis',
+  _ => 'Origin',
+};
+```
+
+The pattern is nearly identical! C# uses `or` (the keyword) while Dart uses `||`. C# uses regular tuples `(x, y)` while Dart uses record patterns.
+</DartEquivalent>
+
+## When Guards (Case Guards)
+
+Both C# and Dart support guards on switch arms — additional boolean conditions that must be true for the arm to match. C# uses `when`, Dart uses `when` too (added in Dart 3).
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  String classify(int n) => switch (n) {
+    int x when x < 0  => 'negative',
+    int x when x == 0 => 'zero',
+    int x when x < 10 => 'small positive',
+    _                 => 'large positive',
+  };
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  string Classify(int n) => n switch
+  {
+      var x when x < 0  => "negative",
+      0                 => "zero",
+      var x when x < 10 => "small positive",
+      _                 => "large positive",
+  };
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="tip">
+In C# switch expressions, `var x when x < 0` binds the value to `x` for use in the guard and the result expression. This is a **var pattern** — anything matches, and the value is captured. You'll see this pattern constantly in real C# code.
+</ConceptCallout>
+
+## Switch Statements with Patterns (C# 7+)
+
+Switch statements (not expressions) also gained pattern matching in C# 7. This is particularly useful when you need multiple statements in a case body:
+
+```csharp
+object shape = GetShape();
+
+switch (shape)
+{
+    case Circle c when c.Radius > 10:
+        Console.WriteLine($"Large circle, radius: {c.Radius}");
+        break;
+    case Circle c:
+        Console.WriteLine($"Small circle, radius: {c.Radius}");
+        break;
+    case Rectangle r:
+        Console.WriteLine($"Rectangle {r.Width}x{r.Height}");
+        break;
+    case null:
+        Console.WriteLine("Shape is null");
+        break;
+    default:
+        Console.WriteLine("Unknown shape");
+        break;
+}
+```
+
+<ConceptCallout type="info">
+Order matters in switch statements with patterns. More specific cases (with `when` guards) should come first. The compiler will warn you if a case is unreachable because a previous case already handles it.
+</ConceptCallout>
+
+## Real-World Example: HTTP Status Codes
+
+Here's a realistic example showing how switch expressions read beautifully in production code:
+
+```csharp
+public string GetStatusMessage(int statusCode) => statusCode switch
+{
+    200 => "OK",
+    201 => "Created",
+    204 => "No Content",
+    >= 400 and < 500 => "Client Error",
+    >= 500 and < 600 => "Server Error",
+    _ => $"Unknown status: {statusCode}"
+};
+```
+
+This uses **relational patterns** (`>= 400`) and **logical patterns** (`and`) — we'll cover these in depth tomorrow on Day 12.
+
+<ExerciseBlock>
+**Exercise 1: Traffic Light Controller**
+
+Write a method `GetNextLight(string current)` that uses a switch expression to return the next traffic light color:
+- "red" → "green"
+- "green" → "yellow"  
+- "yellow" → "red"
+- anything else → throw an `ArgumentException`
+
+**Exercise 2: Season Calculator**
+
+Write a method `GetSeason(int month)` that uses a switch expression with range patterns to return the season name. January (1), February (2), March (3) etc. Months 12, 1, 2 are Winter. Use relational patterns (`>= 3 and <= 5` style) for the ranges. Make it exhaustive without a default arm — use the `> 12 or < 1` pattern to handle invalid input.
+
+**Exercise 3: Shape Area Calculator**
+
+Create an abstract `Shape` class with subclasses `Circle(double Radius)`, `Rectangle(double Width, double Height)`, and `Triangle(double Base, double Height)`. Write a method `CalculateArea(Shape shape)` using a switch expression with type patterns. This previews Day 12 patterns — a `Circle c` pattern matches if shape is a Circle and binds it to `c`.
+</ExerciseBlock>
+
+## Key Takeaways
+
+- C# switch expressions use `variable switch { pattern => result }` syntax (variable first)
+- Dart came **after** C# for this feature — the concepts are very similar
+- `_` is the universal wildcard/default in both languages
+- `when` guards work identically in both C# and Dart
+- C# switch statements require explicit `break` statements — no fall-through
+- Exhaustiveness is checked for enums and sealed hierarchies at compile time
+- Tomorrow we go deep on the full C# pattern matching system

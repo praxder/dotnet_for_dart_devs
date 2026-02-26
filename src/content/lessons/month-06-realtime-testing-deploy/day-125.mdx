@@ -1,0 +1,225 @@
+---
+title: "Microservices Patterns and Service Communication"
+day: 125
+week: 25
+module: 10
+moduleName: "Deployment and Production"
+phase: "dotnet"
+dartConcept: "multi-package Flutter apps, module boundaries"
+csharpConcept: "microservices, API gateway, service discovery, Dapr, gRPC between services"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Microservices decompose a monolith into independently deployable services. This lesson covers when (and when NOT) to use microservices, service communication patterns, API gateways, and Dapr — a portable microservices runtime.
+
+## Monolith First — The Right Starting Point
+
+<ConceptCallout type="tip" title="Start with a Modular Monolith">
+Microservices solve scaling problems you might not have. Most successful systems start as monoliths and extract services when clear boundaries and scaling needs emerge. A modular monolith (strong internal boundaries, separate assemblies) is often the right architecture for the first 2+ years. Extract a service when: one module needs independent scaling, teams need independent deployment, or the domain boundary is very clear.
+</ConceptCallout>
+
+## Modular Monolith — Services in One Process
+
+```csharp
+// Separate assemblies for each module — same process, strong boundaries
+
+// Solution structure:
+// BlogApp.sln
+// ├── src/
+// │   ├── BlogApp.Api/           ← Entry point, routes
+// │   ├── BlogApp.Posts/         ← Post domain, EF models, CQRS
+// │   ├── BlogApp.Auth/          ← Identity, JWT, OAuth
+// │   ├── BlogApp.Comments/      ← Comment domain
+// │   └── BlogApp.Shared/        ← Shared DTOs, interfaces
+// └── tests/
+
+// Cross-module communication through interfaces (not direct class references):
+// BlogApp.Posts knows about ICommentCount, not Comment entity
+
+// Program.cs composes all modules:
+builder.Services.AddPostsModule(builder.Configuration);
+builder.Services.AddAuthModule(builder.Configuration);
+builder.Services.AddCommentsModule(builder.Configuration);
+```
+
+## gRPC for Internal Service Communication
+
+```csharp
+// When you do have separate services, gRPC is faster than HTTP/REST for internal calls
+// Binary protocol, streaming, code-generated clients
+
+// Proto definition (shared between services):
+// inventory.proto
+syntax = "proto3";
+package inventory;
+
+service InventoryService {
+    rpc CheckStock(CheckStockRequest) returns (CheckStockResponse);
+    rpc ReserveItems(ReserveRequest) returns (ReserveResponse);
+    rpc StreamInventory(StreamRequest) returns (stream InventoryUpdate);
+}
+
+message CheckStockRequest { int32 product_id = 1; int32 quantity = 2; }
+message CheckStockResponse { bool available = 1; int32 current_stock = 2; }
+
+// .NET caller (blog API calling inventory service):
+var channel = GrpcChannel.ForAddress("https://inventory-svc:5001");
+var client = new InventoryService.InventoryServiceClient(channel);
+
+var response = await client.CheckStockAsync(
+    new CheckStockRequest { ProductId = productId, Quantity = 1 });
+
+if (!response.Available)
+    return Results.Conflict("Out of stock");
+```
+
+## API Gateway — YARP Reverse Proxy
+
+```csharp
+// YARP (Yet Another Reverse Proxy) — .NET-native API gateway
+// Routes external requests to internal services
+// dotnet add package Yarp.ReverseProxy
+
+builder.Services.AddReverseProxy()
+    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
+
+app.MapReverseProxy(pipeline =>
+{
+    pipeline.UseSessionAffinity();
+    pipeline.UseLoadBalancing();
+    pipeline.UsePassiveHealthChecks();
+});
+```
+
+```json
+// appsettings.json
+{
+  "ReverseProxy": {
+    "Routes": {
+      "posts-route": {
+        "ClusterId": "posts-cluster",
+        "Match": { "Path": "/api/posts/{**catch-all}" }
+      },
+      "auth-route": {
+        "ClusterId": "auth-cluster",
+        "Match": { "Path": "/api/auth/{**catch-all}" }
+      }
+    },
+    "Clusters": {
+      "posts-cluster": {
+        "LoadBalancingPolicy": "RoundRobin",
+        "Destinations": {
+          "posts-1": { "Address": "http://posts-svc:5000/" },
+          "posts-2": { "Address": "http://posts-svc-2:5000/" }
+        },
+        "HealthCheck": {
+          "Passive": { "Enabled": true },
+          "Active": {
+            "Enabled": true,
+            "Path": "/health",
+            "Interval": "00:00:10"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+## Dapr — Portable Microservices Runtime
+
+```csharp
+// Dapr sidecars handle: service invocation, pub/sub, state, secrets
+// Your code is infrastructure-agnostic — Dapr handles Redis vs Service Bus vs Kafka
+// dotnet add package Dapr.AspNetCore
+
+builder.Services.AddDaprClient();
+
+// Service-to-Service invocation (replaces HttpClient + service discovery)
+public class OrderService(DaprClient dapr)
+{
+    public async Task<InventoryCheckResult> CheckInventoryAsync(int productId, int quantity)
+    {
+        // Dapr handles service discovery, retries, and circuit breaking
+        return await dapr.InvokeMethodAsync<InventoryCheckResult>(
+            HttpMethod.Get,
+            "inventory-service",    // Dapr app-id of the inventory service
+            $"api/inventory/{productId}/check?qty={quantity}");
+    }
+}
+
+// Pub/Sub through Dapr (works with Redis, RabbitMQ, Service Bus transparently)
+public class PublishingService(DaprClient dapr)
+{
+    public async Task PublishOrderAsync(Order order)
+    {
+        await dapr.PublishEventAsync(
+            "pubsub",         // component name
+            "order-placed",   // topic name
+            new OrderPlacedEvent(order.Id, order.Total));
+    }
+}
+
+// Subscribe:
+app.MapPost("/dapr/subscribe", () => new[] {
+    new { pubsubname = "pubsub", topic = "order-placed", route = "/orders/handle" }
+});
+
+app.MapPost("/orders/handle", async (OrderPlacedEvent @event) =>
+{
+    await ProcessOrderAsync(@event);
+    return Results.Ok();
+}).WithTopic("pubsub", "order-placed");
+```
+
+## Service Mesh — Istio/Linkerd
+
+```yaml
+# Service mesh handles: mTLS, observability, traffic management, retries
+# Works at the network level — your code doesn't change
+
+# kubernetes/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blog-api
+  annotations:
+    sidecar.istio.io/inject: "true"  # Istio injects a proxy sidecar
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: blog-api
+  template:
+    spec:
+      containers:
+      - name: blog-api
+        image: ghcr.io/yourusername/blog-api:latest
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+```
+
+<ExerciseBlock>
+1. Refactor your blog monolith into a modular monolith: create separate class library projects for `Posts`, `Comments`, and `Auth` modules. Each module registers its own DI services. The API project only references the `Shared` contracts assembly from other modules — no direct entity references across boundaries.
+2. Extract the blog's email-sending logic into a separate "EmailWorker" console app (in the same solution). Communicate via RabbitMQ + MassTransit: blog API publishes `EmailRequested`, EmailWorker consumes it. Verify they work together in docker-compose.
+3. Set up YARP as an API gateway in front of two local API instances on different ports. Configure round-robin load balancing. Run a k6 test and verify requests are distributed across both instances (use different log identifiers).
+</ExerciseBlock>

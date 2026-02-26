@@ -1,0 +1,232 @@
+---
+title: "Configuration and the Options Pattern"
+day: 68
+week: 14
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "dart-define, environment variables, config files"
+csharpConcept: "IConfiguration, appsettings.json, Options pattern, IOptions<T>, environment-specific config"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+.NET has a built-in, layered configuration system that reads from JSON files, environment variables, command-line args, and secrets — in priority order. The Options pattern then binds configuration sections to strongly-typed classes.
+
+## Configuration Hierarchy
+
+```
+appsettings.json (base configuration)
+    ↓ overridden by
+appsettings.{Environment}.json (e.g., appsettings.Development.json)
+    ↓ overridden by
+Environment Variables
+    ↓ overridden by
+Command-line arguments
+    ↓ overridden by
+User Secrets (development only)
+```
+
+## appsettings.json
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=localhost;Database=MyApp;..."
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "EmailSettings": {
+    "SmtpHost": "smtp.example.com",
+    "SmtpPort": 587,
+    "FromAddress": "noreply@example.com",
+    "EnableSsl": true
+  },
+  "FeatureFlags": {
+    "NewCheckoutFlow": false,
+    "DarkMode": true
+  }
+}
+```
+
+```json
+// appsettings.Development.json — overrides for local dev
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=localhost;Database=MyApp_Dev;Integrated Security=true"
+  },
+  "EmailSettings": {
+    "SmtpHost": "localhost",
+    "SmtpPort": 1025
+  },
+  "FeatureFlags": {
+    "NewCheckoutFlow": true
+  }
+}
+```
+
+## Reading Configuration Directly
+
+```csharp
+// In Program.cs (ASP.NET Core) or after building a host:
+IConfiguration config = builder.Configuration;
+
+// Read by key (returns null if missing)
+string? host = config["EmailSettings:SmtpHost"];
+int port = config.GetValue<int>("EmailSettings:SmtpPort");
+int portWithDefault = config.GetValue<int>("EmailSettings:SmtpPort", 587);
+
+// Connection strings — special shorthand
+string connStr = config.GetConnectionString("DefaultConnection")!;
+
+// Read a section
+IConfigurationSection emailSection = config.GetSection("EmailSettings");
+string? smtpHost = emailSection["SmtpHost"];
+```
+
+## The Options Pattern — Strongly Typed Config
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: no built-in options pattern
+  // Common approach: env vars + custom config class
+  class AppConfig {
+    static final shared = AppConfig._();
+    AppConfig._();
+
+    String get smtpHost => Platform.environment['SMTP_HOST'] ?? 'localhost';
+    int get smtpPort => int.parse(Platform.environment['SMTP_PORT'] ?? '587');
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // 1. Define the options class
+  public class EmailSettings
+  {
+      public const string SectionName = "EmailSettings";
+
+      public required string SmtpHost { get; init; }
+      public int SmtpPort { get; init; } = 587;
+      public required string FromAddress { get; init; }
+      public bool EnableSsl { get; init; } = true;
+  }
+
+  // 2. Register in Program.cs
+  builder.Services.AddOptions<EmailSettings>()
+      .BindConfiguration(EmailSettings.SectionName)
+      .ValidateDataAnnotations()   // validate on startup
+      .ValidateOnStart();
+
+  // Or simpler (no validation):
+  builder.Services.Configure<EmailSettings>(
+      builder.Configuration.GetSection(EmailSettings.SectionName));
+
+  // 3. Inject where needed
+  public class EmailService
+  {
+      private readonly EmailSettings _settings;
+
+      public EmailService(IOptions<EmailSettings> options)
+      {
+          _settings = options.Value;
+      }
+
+      public Task SendAsync(string to, string subject, string body)
+      {
+          Console.WriteLine($"Sending from {_settings.FromAddress} via {_settings.SmtpHost}:{_settings.SmtpPort}");
+          // ...
+      }
+  }
+  ```
+  </div>
+</CodeComparison>
+
+## IOptions vs IOptionsSnapshot vs IOptionsMonitor
+
+```csharp
+// IOptions<T> — singleton, config frozen at startup
+// Use for: most services — config doesn't change at runtime
+public class MyService(IOptions<MySettings> opts)
+{
+    private readonly MySettings _settings = opts.Value;
+}
+
+// IOptionsSnapshot<T> — scoped, re-reads config per request
+// Use for: web app settings that should reflect config file changes
+public class PerRequestService(IOptionsSnapshot<FeatureFlags> flags)
+{
+    // flags.Value refreshed per HTTP request
+}
+
+// IOptionsMonitor<T> — singleton, but notified when config changes
+// Use for: long-running services that should pick up changes at runtime
+public class BackgroundService(IOptionsMonitor<WorkerSettings> monitor)
+{
+    public void Run()
+    {
+        // monitor.CurrentValue always returns latest
+        var settings = monitor.CurrentValue;
+
+        // Subscribe to changes
+        monitor.OnChange(newSettings =>
+            Console.WriteLine($"Config changed: {newSettings.Interval}"));
+    }
+}
+```
+
+## Environment Variables and Secrets
+
+```bash
+# Environment variable naming — replace : with __ (double underscore)
+# EmailSettings:SmtpHost → EMAILSETTINGS__SMTPHOST
+export EMAILSETTINGS__SMTPHOST=smtp.production.com
+export EMAILSETTINGS__SMTPPORT=465
+export CONNECTIONSTRINGS__DEFAULTCONNECTION="Server=prod-db;..."
+
+# User Secrets — development only, stored outside project directory
+dotnet user-secrets init
+dotnet user-secrets set "EmailSettings:SmtpPassword" "secret-password"
+dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Server=dev-db;..."
+dotnet user-secrets list
+```
+
+## Validation with Data Annotations
+
+```csharp
+using System.ComponentModel.DataAnnotations;
+
+public class EmailSettings
+{
+    [Required]
+    public required string SmtpHost { get; init; }
+
+    [Range(1, 65535)]
+    public int SmtpPort { get; init; } = 587;
+
+    [Required, EmailAddress]
+    public required string FromAddress { get; init; }
+}
+
+// Register with validation:
+builder.Services.AddOptions<EmailSettings>()
+    .BindConfiguration("EmailSettings")
+    .ValidateDataAnnotations()
+    .ValidateOnStart();  // fail fast at startup, not first use
+```
+
+<ExerciseBlock>
+1. Create a console app with a `DatabaseSettings` class (host, port, database name, max pool size). Read from `appsettings.json`, override with `appsettings.Development.json`, and further override with environment variables. Print which source each value came from.
+2. Add validation: `DatabaseSettings` host is required, port must be 1-65535, max pool size 1-100. Wire up `ValidateOnStart()` and verify it throws at startup when the port is invalid.
+3. Implement a `FeatureFlags` options class with 5 boolean flags. Use `IOptionsMonitor<FeatureFlags>` in a background loop that prints a message every 5 seconds. Modify the JSON file and show the change is detected without restarting.
+</ExerciseBlock>

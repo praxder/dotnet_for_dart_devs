@@ -1,0 +1,279 @@
+---
+title: "Mini-Project: Blog REST API"
+day: 80
+week: 16
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "Full-stack Dart backend"
+csharpConcept: "ASP.NET Core, JWT auth, validation, in-memory persistence, REST design"
+estimatedMinutes: 30
+isProject: true
+projectType: "mini"
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+This mini-project consolidates Days 73-79: Minimal APIs, middleware, JWT authentication, authorization policies, validation, and route design. You'll build a fully functional blog API with authentication.
+
+## API Specification
+
+```
+POST /api/auth/register      → Create account, return JWT
+POST /api/auth/login         → Login, return JWT
+
+GET  /api/posts              → List published posts (public)
+GET  /api/posts/{id}         → Get post by ID (public)
+POST /api/posts              → Create draft (requires auth)
+PUT  /api/posts/{id}         → Update post (author or admin)
+DELETE /api/posts/{id}       → Delete post (author or admin)
+POST /api/posts/{id}/publish → Publish post (author or admin)
+
+GET  /api/posts/{id}/comments    → Get comments (public)
+POST /api/posts/{id}/comments    → Add comment (requires auth)
+DELETE /api/posts/{id}/comments/{commentId} → Delete (author or admin)
+```
+
+### Domain Models
+
+```csharp
+public record User(Guid Id, string Email, string HashedPassword, string DisplayName, string Role)
+{
+    public static User Create(string email, string password, string displayName)
+        => new(Guid.NewGuid(), email, BCrypt.HashPassword(password), displayName, "Author");
+}
+
+public class Post
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required Guid AuthorId { get; init; }
+    public required string Title { get; set; }
+    public required string Content { get; set; }
+    public string? Slug { get; set; }
+    public PostStatus Status { get; set; } = PostStatus.Draft;
+    public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
+    public DateTime? PublishedAt { get; set; }
+    public List<Comment> Comments { get; init; } = [];
+}
+
+public enum PostStatus { Draft, Published, Archived }
+
+public record Comment(
+    Guid Id,
+    Guid PostId,
+    Guid AuthorId,
+    string AuthorName,
+    string Content,
+    DateTime CreatedAt);
+```
+
+### In-Memory Store
+
+```csharp
+public class InMemoryBlogStore
+{
+    private readonly ConcurrentDictionary<Guid, User> _users = new();
+    private readonly ConcurrentDictionary<Guid, Post> _posts = new();
+
+    // Users
+    public bool TryAddUser(User user) => _users.TryAdd(user.Id, user);
+    public User? FindByEmail(string email)
+        => _users.Values.FirstOrDefault(u =>
+            u.Email.Equals(email, StringComparison.OrdinalIgnoreCase));
+    public User? GetUser(Guid id) => _users.GetValueOrDefault(id);
+
+    // Posts
+    public Post? GetPost(Guid id) => _posts.GetValueOrDefault(id);
+    public IReadOnlyList<Post> GetPublishedPosts()
+        => _posts.Values.Where(p => p.Status == PostStatus.Published)
+                        .OrderByDescending(p => p.PublishedAt)
+                        .ToList();
+    public void SavePost(Post post) => _posts[post.Id] = post;
+    public bool DeletePost(Guid id) => _posts.TryRemove(id, out _);
+}
+```
+
+### Program.cs Setup
+
+```csharp
+using BCrypt.Net;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Services
+builder.Services.AddSingleton<InMemoryBlogStore>();
+builder.Services.AddSingleton<TokenService>();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// Auth
+var jwtKey = builder.Configuration["Jwt:SecretKey"]
+    ?? throw new InvalidOperationException("JWT key missing");
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+            ValidateIssuer = false,
+            ValidateAudience = false
+        };
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("PostAuthorOrAdmin", policy =>
+        policy.RequireAuthenticatedUser());
+
+var app = builder.Build();
+app.UseSwagger();
+app.UseSwaggerUI();
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Map endpoint groups
+app.MapAuthEndpoints();
+app.MapPostEndpoints();
+app.MapCommentEndpoints();
+
+await app.RunAsync();
+```
+
+### Auth Endpoints
+
+```csharp
+public static class AuthEndpoints
+{
+    public static IEndpointRouteBuilder MapAuthEndpoints(this IEndpointRouteBuilder routes)
+    {
+        var group = routes.MapGroup("/api/auth").WithTags("Auth");
+
+        group.MapPost("/register", async (
+            RegisterRequest req,
+            InMemoryBlogStore store,
+            TokenService tokens) =>
+        {
+            if (store.FindByEmail(req.Email) is not null)
+                return Results.Conflict(new { message = "Email already registered" });
+
+            var user = User.Create(req.Email, req.Password, req.DisplayName);
+            store.TryAddUser(user);
+
+            return Results.Ok(new { Token = tokens.Generate(user) });
+        });
+
+        group.MapPost("/login", async (
+            LoginRequest req,
+            InMemoryBlogStore store,
+            TokenService tokens) =>
+        {
+            var user = store.FindByEmail(req.Email);
+            if (user is null || !BCrypt.Verify(req.Password, user.HashedPassword))
+                return Results.Unauthorized();
+
+            return Results.Ok(new { Token = tokens.Generate(user) });
+        });
+
+        return routes;
+    }
+}
+```
+
+### Post Endpoints
+
+```csharp
+public static class PostEndpoints
+{
+    public static IEndpointRouteBuilder MapPostEndpoints(this IEndpointRouteBuilder routes)
+    {
+        var group = routes.MapGroup("/api/posts").WithTags("Posts");
+
+        group.MapGet("", (InMemoryBlogStore store) =>
+            Results.Ok(store.GetPublishedPosts().Select(PostDto.From)));
+
+        group.MapGet("{id:guid}", (Guid id, InMemoryBlogStore store) =>
+        {
+            var post = store.GetPost(id);
+            if (post is null) return Results.NotFound();
+            if (post.Status != PostStatus.Published) return Results.NotFound();
+            return Results.Ok(PostDto.From(post));
+        });
+
+        group.MapPost("", (CreatePostRequest req, ClaimsPrincipal user, InMemoryBlogStore store) =>
+        {
+            var authorId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var post = new Post
+            {
+                AuthorId = authorId,
+                Title = req.Title,
+                Content = req.Content,
+                Slug = req.Title.ToLower().Replace(" ", "-")
+            };
+            store.SavePost(post);
+            return Results.Created($"/api/posts/{post.Id}", PostDto.From(post));
+        }).RequireAuthorization();
+
+        group.MapPut("{id:guid}", (
+            Guid id, UpdatePostRequest req,
+            ClaimsPrincipal user, InMemoryBlogStore store) =>
+        {
+            var post = store.GetPost(id);
+            if (post is null) return Results.NotFound();
+
+            if (!CanModifyPost(user, post)) return Results.Forbid();
+
+            post.Title = req.Title;
+            post.Content = req.Content;
+            store.SavePost(post);
+            return Results.Ok(PostDto.From(post));
+        }).RequireAuthorization();
+
+        group.MapDelete("{id:guid}", (Guid id, ClaimsPrincipal user, InMemoryBlogStore store) =>
+        {
+            var post = store.GetPost(id);
+            if (post is null) return Results.NotFound();
+            if (!CanModifyPost(user, post)) return Results.Forbid();
+
+            store.DeletePost(id);
+            return Results.NoContent();
+        }).RequireAuthorization();
+
+        group.MapPost("{id:guid}/publish", (Guid id, ClaimsPrincipal user, InMemoryBlogStore store) =>
+        {
+            var post = store.GetPost(id);
+            if (post is null) return Results.NotFound();
+            if (!CanModifyPost(user, post)) return Results.Forbid();
+
+            post.Status = PostStatus.Published;
+            post.PublishedAt = DateTime.UtcNow;
+            store.SavePost(post);
+            return Results.Ok(PostDto.From(post));
+        }).RequireAuthorization();
+
+        return routes;
+    }
+
+    private static bool CanModifyPost(ClaimsPrincipal user, Post post)
+    {
+        var userId = Guid.Parse(user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var isAdmin = user.IsInRole("Admin");
+        return post.AuthorId == userId || isAdmin;
+    }
+}
+
+public record PostDto(Guid Id, string Title, string Content, string Status, DateTime? PublishedAt)
+{
+    public static PostDto From(Post p) => new(p.Id, p.Title, p.Content, p.Status.ToString(), p.PublishedAt);
+}
+```
+
+<ExerciseBlock>
+1. Add comment endpoints: `GET /api/posts/{id}/comments` (public), `POST /api/posts/{id}/comments` (auth required), `DELETE /api/posts/{id}/comments/{commentId}` (comment author or admin).
+2. Add pagination to `GET /api/posts`: support `?page=1&pageSize=10` and return `{ items, totalCount, page, pageSize, totalPages }` in the response.
+3. Add a `GET /api/my/posts` endpoint that returns the authenticated user's posts (including drafts), and a `GET /api/my/stats` endpoint that returns total posts, total published posts, and total comments received.
+</ExerciseBlock>

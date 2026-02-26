@@ -1,0 +1,223 @@
+---
+title: "Pattern Matching: Advanced Techniques"
+day: 59
+week: 12
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "switch expressions, sealed classes for ADTs"
+csharpConcept: "list patterns, property patterns, positional patterns, when guards, active patterns"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+You covered basic switch expressions and type patterns in Module 2. This lesson dives into C# 11's powerful list patterns, nested property patterns, and how to build discriminated unions — C#'s answer to Dart's sealed class hierarchies.
+
+## List Patterns (C# 11)
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: no native list pattern matching
+  // Must use if/switch manually
+  void processArgs(List<String> args) {
+    if (args.isEmpty) {
+      print('No args');
+    } else if (args.length == 1) {
+      print('Single: ${args[0]}');
+    } else if (args[0] == '--verbose') {
+      print('Verbose mode');
+    }
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# 11: list patterns
+  void ProcessArgs(string[] args) => Console.WriteLine(args switch
+  {
+      []                      => "No args",
+      [var single]            => $"Single: {single}",
+      ["--verbose", ..]       => "Verbose mode with other args",
+      [var first, var second] => $"Two args: {first}, {second}",
+      [var first, ..]         => $"Many args, first: {first}",
+  });
+
+  // Match specific values in specific positions
+  int[] data = [1, 2, 3, 4, 5];
+  string description = data switch
+  {
+      [0, ..]      => "starts with zero",
+      [_, 0, ..]   => "second element is zero",
+      [.., 0]      => "ends with zero",
+      [var a, var b] when a + b > 10 => "first two sum > 10",
+      _            => "other"
+  };
+  ```
+  </div>
+</CodeComparison>
+
+## Property Patterns — Deep Matching
+
+```csharp
+record Address(string City, string Country, string PostalCode);
+record Order(string Id, decimal Amount, Address ShipTo, OrderStatus Status);
+
+// Nested property patterns
+string GetShippingClass(Order order) => order switch
+{
+    { Status: OrderStatus.Cancelled } => "Not shipping",
+
+    { ShipTo: { Country: "US" }, Amount: > 100 }
+        => "Free US shipping",
+
+    { ShipTo: { Country: "US" or "CA" }, Amount: > 50 }
+        => "Discounted North America shipping",
+
+    { ShipTo: { Country: "US" } }
+        => "Standard US shipping",
+
+    { ShipTo.Country: var country, Amount: var amt }
+        => $"International {country}: ${amt:F2}",
+};
+
+// Combine with var pattern to capture while matching
+decimal CalculateTax(Order order) => order switch
+{
+    { ShipTo: { Country: "US", PostalCode: var zip } } when zip.StartsWith("90")
+        => order.Amount * 0.095m,  // California
+
+    { ShipTo: { Country: "US", PostalCode: var zip } } when zip.StartsWith("98")
+        => order.Amount * 0.102m,  // Washington
+
+    { ShipTo.Country: "US" }
+        => order.Amount * 0.07m,   // Default US
+
+    _ => 0m  // International — no tax
+};
+```
+
+## Discriminated Unions with Sealed Classes
+
+```csharp
+// Pattern: sealed base + records for exhaustive matching
+// Similar to Dart's sealed class hierarchy
+
+[JsonPolymorphic]
+public abstract record Shape
+{
+    public abstract double Area();
+    public abstract double Perimeter();
+}
+
+public record Circle(double Radius) : Shape
+{
+    public override double Area() => Math.PI * Radius * Radius;
+    public override double Perimeter() => 2 * Math.PI * Radius;
+}
+
+public record Rectangle(double Width, double Height) : Shape
+{
+    public override double Area() => Width * Height;
+    public override double Perimeter() => 2 * (Width + Height);
+}
+
+public record Triangle(double A, double B, double C) : Shape
+{
+    public override double Area()
+    {
+        double s = (A + B + C) / 2;
+        return Math.Sqrt(s * (s - A) * (s - B) * (s - C));
+    }
+    public override double Perimeter() => A + B + C;
+}
+
+// Exhaustive pattern matching
+string Describe(Shape shape) => shape switch
+{
+    Circle { Radius: > 10 } c       => $"Large circle (r={c.Radius:F1})",
+    Circle c                         => $"Small circle (r={c.Radius:F1})",
+    Rectangle { Width: var w, Height: var h } when w == h
+                                     => $"Square ({w}x{h})",
+    Rectangle(var w, var h)          => $"Rectangle ({w}x{h})",
+    Triangle t when t.A == t.B && t.B == t.C
+                                     => $"Equilateral triangle (side={t.A})",
+    Triangle t                       => $"Triangle ({t.A:F1},{t.B:F1},{t.C:F1})",
+    _ => throw new UnreachableException()
+};
+```
+
+## Result Types with Pattern Matching
+
+```csharp
+// Result<T> as a discriminated union
+public abstract record Result<T>
+{
+    public record Success(T Value) : Result<T>;
+    public record Failure(string Error, Exception? Exception = null) : Result<T>;
+}
+
+// Create helpers
+public static class Result
+{
+    public static Result<T> Ok<T>(T value) => new Result<T>.Success(value);
+    public static Result<T> Fail<T>(string error) => new Result<T>.Failure(error);
+}
+
+// Pattern match the result
+async Task<Result<User>> GetUserAsync(int id)
+{
+    try
+    {
+        var user = await _db.Users.FindAsync(id);
+        return user is not null
+            ? Result.Ok(user)
+            : Result.Fail<User>($"User {id} not found");
+    }
+    catch (Exception ex)
+    {
+        return new Result<User>.Failure("Database error", ex);
+    }
+}
+
+// Consumer
+var result = await GetUserAsync(42);
+string message = result switch
+{
+    Result<User>.Success { Value: { Name: var name } } => $"Found: {name}",
+    Result<User>.Failure { Error: var err, Exception: not null } => $"Error with exception: {err}",
+    Result<User>.Failure { Error: var err } => $"Error: {err}",
+};
+```
+
+## when Guards
+
+```csharp
+// when clause adds arbitrary conditions to a pattern
+int[] numbers = [1, 5, 12, -3, 0, 7];
+
+foreach (var n in numbers)
+{
+    string category = n switch
+    {
+        0                     => "zero",
+        < 0                   => "negative",
+        > 0 and < 10          => "small positive",
+        > 0 and < 100 when n % 2 == 0 => "medium even",
+        > 0 and < 100         => "medium odd",
+        _                     => "large"
+    };
+    Console.WriteLine($"{n}: {category}");
+}
+```
+
+<ExerciseBlock>
+1. Implement an HTTP response handler using a discriminated union: `abstract record HttpResult` with cases `Ok<T>(T Data)`, `NotFound(string Url)`, `BadRequest(string[] Errors)`, `ServerError(int StatusCode, string Message)`. Write a `Handle(HttpResult result)` method using exhaustive pattern matching.
+2. Use list patterns to implement a command-line argument parser: `["--output", var file, ..]`, `["--verbose", "--output", var file]`, `["help"]`, `[var command, var target, ..]`, etc.
+3. Model a payment state machine as a discriminated union: `Pending`, `Processing(TransactionId)`, `Completed(TransactionId, DateTime)`, `Failed(string Reason, bool Retriable)`, `Refunded(decimal Amount)`. Write `CanTransitionTo(PaymentState next)` using pattern matching.
+</ExerciseBlock>

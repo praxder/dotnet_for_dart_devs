@@ -1,0 +1,191 @@
+---
+title: "Lambda Expressions and Closures"
+day: 55
+week: 11
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Arrow functions, closures, captured variables, Function type"
+csharpConcept: "lambda expressions, closures, captured variables, static lambdas, method groups"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart and C# lambdas behave almost identically — both are anonymous functions that capture variables from their enclosing scope. The differences are in syntax and a few C#-specific optimizations.
+
+## Lambda Syntax
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart lambda forms
+  var greet = (String name) => 'Hello, $name';
+
+  var add = (int a, int b) => a + b;
+
+  var process = (List<int> nums) {
+    nums.sort();
+    return nums.first;
+  };
+
+  // Inferred parameter types in context
+  [1, 2, 3].where((n) => n.isEven);
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# lambda forms
+  Func<string, string> greet = name => $"Hello, {name}";       // single param — no parens needed
+  Func<string, string> greet2 = (string name) => $"Hello, {name}"; // explicit type
+
+  Func<int, int, int> add = (a, b) => a + b;  // two params — parens required
+
+  Func<List<int>, int> process = nums =>       // statement body
+  {
+      nums.Sort();
+      return nums.First();
+  };
+
+  // Inferred parameter types in context
+  new[] { 1, 2, 3 }.Where(n => n % 2 == 0);
+  ```
+  </div>
+</CodeComparison>
+
+## Closures — Capturing Variables
+
+```csharp
+// Lambdas capture variables BY REFERENCE (not by value)
+int counter = 0;
+Action increment = () => counter++;
+
+increment();
+increment();
+Console.WriteLine(counter);  // 2 — lambda modified the outer variable
+
+// Classic closure gotcha in loops
+var actions = new List<Action>();
+for (int i = 0; i < 5; i++)
+{
+    // WRONG: captures 'i' by reference — all see i=5 at the end
+    actions.Add(() => Console.WriteLine(i));
+}
+actions.ForEach(a => a());  // prints: 5 5 5 5 5
+
+// FIX: capture a copy
+var correctActions = new List<Action>();
+for (int i = 0; i < 5; i++)
+{
+    int copy = i;  // new variable per iteration
+    correctActions.Add(() => Console.WriteLine(copy));
+}
+correctActions.ForEach(a => a());  // prints: 0 1 2 3 4
+```
+
+<ConceptCallout type="gotcha" title="Dart Has the Same Closure Issue">
+This loop-closure bug exists in Dart too: `for (var i = 0; i < 5; i++) { list.add(() => print(i)); }` prints `5` five times. The fix is the same: capture into a local variable inside the loop body.
+</ConceptCallout>
+
+## Static Lambdas — Zero Allocation
+
+```csharp
+// Regular lambda that captures a variable allocates a closure object
+int threshold = 10;
+var filter = (int n) => n > threshold;  // Allocates: closure holds 'threshold'
+
+// static lambda — explicitly prevents capture, zero allocation
+// Great for LINQ predicates that don't need captured state
+var filtered = numbers.Where(static n => n > 10);  // No closure allocation
+
+// Compiler enforces: static lambda cannot capture variables
+int limit = 5;
+// var invalid = (static int n) => n > limit;  // COMPILE ERROR — can't capture
+
+// Use when: the lambda is called millions of times (hot path)
+// Most LINQ predicates should be static where possible
+```
+
+## Method Groups — Delegate from Named Method
+
+```csharp
+// Method group — reference to a named method
+// Cleaner and sometimes faster than a wrapper lambda
+
+// Instead of: s => Console.WriteLine(s)
+// Use the method group directly:
+var strings = new[] { "hello", "world" };
+strings.ToList().ForEach(Console.WriteLine);  // method group
+
+// Instead of: n => int.Parse(n)
+var numbers = strings.Select(int.Parse);      // method group
+
+// With extension methods
+Func<string, int> parser = int.Parse;         // stores the method as a delegate
+int result = parser("42");                    // 42
+
+// Method groups with instance methods
+var sb = new StringBuilder();
+Action<string> append = sb.Append;            // captures sb as the instance
+append("Hello");
+append(" World");
+Console.WriteLine(sb);  // "Hello World"
+```
+
+## Expression-Bodied Lambda Variations
+
+```csharp
+// Discard parameter — lambda that ignores its input
+Action<object, EventArgs> handler = (_, _) => Console.WriteLine("Clicked!");
+button.Click += handler;
+
+// Tuple deconstruction in lambda parameters
+var pairs = new[] { (1, "one"), (2, "two"), (3, "three") };
+var result = pairs.Select(((int n, string s) pair) => $"{pair.n}={pair.s}");
+
+// .NET 7+: auto-inferred delegate type (var with lambda)
+var parse = (string s) => int.Parse(s);  // type: Func<string, int>
+var action = () => Console.WriteLine("hello");  // type: Action
+
+// Async lambda
+Func<Task> asyncAction = async () =>
+{
+    await Task.Delay(100);
+    Console.WriteLine("Done");
+};
+
+Func<string, Task<int>> asyncFunc = async url =>
+{
+    var response = await httpClient.GetStringAsync(url);
+    return response.Length;
+};
+```
+
+## Lambda Compilation Details
+
+```csharp
+// The compiler generates different code based on what the lambda captures:
+
+// 1. No capture → static method (most efficient)
+Func<int, bool> isEven = n => n % 2 == 0;
+// Compiled as: private static bool <M>b__0(int n) => n % 2 == 0;
+
+// 2. Captures 'this' → instance method on the enclosing class
+Func<int, bool> meetsThreshold = n => n > _threshold;
+// (where _threshold is a field)
+
+// 3. Captures local variable → closure class allocated on heap
+int limit = 5;
+Func<int, bool> underLimit = n => n < limit;
+// Compiled as: new <>c__DisplayClass { limit = 5 } + method reference
+```
+
+<ExerciseBlock>
+1. Demonstrate the loop-closure bug with a `List<Func<int>>` where each function should return its index `i`, but all return 5. Show the captured-copy fix. Then rewrite using `Select` with index to avoid the issue entirely.
+2. Write a `Counter` class that uses closures to create private state without fields: `var (increment, get, reset) = Counter.Create(0)` returns three lambdas that share the same closed-over `count` variable.
+3. Benchmark (using `Stopwatch`) a regular lambda `n => n > threshold` vs a `static` lambda `n => n > 10` running 10 million iterations on a list. Observe the difference in allocation (can check with `GC.GetTotalAllocatedBytes`).
+</ExerciseBlock>

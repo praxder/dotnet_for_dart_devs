@@ -1,0 +1,236 @@
+---
+title: "Generics and Type Constraints"
+day: 41
+week: 9
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Dart generics, type bounds (extends), generic functions"
+csharpConcept: "generic classes, methods, constraints (where T : ...), multiple constraints"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# generics are similar to Dart's, but with a richer constraint system. C#'s `where T : ...` clause gives you fine-grained control over what types a generic parameter can accept — enabling APIs that are both flexible and type-safe.
+
+## Generic Classes and Methods
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart generics
+  class Box<T> {
+    T value;
+    Box(this.value);
+    T unwrap() => value;
+  }
+
+  // Generic function with bound
+  T maxOf<T extends Comparable<T>>(T a, T b) => a.compareTo(b) >= 0 ? a : b;
+
+  // Usage
+  var box = Box<String>('hello');
+  print(maxOf(3, 7)); // 7
+  print(maxOf('apple', 'banana')); // banana
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# generics
+  public class Box<T>
+  {
+      public T Value { get; }
+      public Box(T value) => Value = value;
+      public T Unwrap() => Value;
+  }
+
+  // Generic method with constraint
+  public static T MaxOf<T>(T a, T b) where T : IComparable<T>
+      => a.CompareTo(b) >= 0 ? a : b;
+
+  // Usage
+  var box = new Box<string>("hello");
+  Console.WriteLine(MaxOf(3, 7));          // 7
+  Console.WriteLine(MaxOf("apple", "banana")); // banana
+  ```
+  </div>
+</CodeComparison>
+
+## Type Constraints
+
+C# has 8 types of constraints:
+
+```csharp
+// 1. Interface constraint — T must implement the interface
+void Print<T>(T item) where T : IPrintable
+    => item.Print();
+
+// 2. Class constraint — T must be a reference type
+void Store<T>(T item) where T : class
+    => _cache[item] = DateTime.UtcNow;
+
+// 3. Struct constraint — T must be a value type (no null)
+void Process<T>(T item) where T : struct
+{
+    // T is a value type — never null, stack-allocated
+}
+
+// 4. new() constraint — T must have a parameterless constructor
+T Create<T>() where T : new()
+    => new T();
+
+// 5. Base class constraint — T must derive from base class
+void Log<T>(T entity) where T : BaseEntity
+    => Console.WriteLine(entity.Id);
+
+// 6. Unmanaged constraint — T is a primitive or struct of primitives
+void WriteToBuffer<T>(T value, Span<byte> buffer) where T : unmanaged
+{
+    MemoryMarshal.Write(buffer, ref value);
+}
+
+// 7. notnull constraint — T cannot be null
+void Add<T>(T item) where T : notnull
+    => _items.Add(item);
+
+// 8. Enum constraint
+TEnum ParseEnum<TEnum>(string value) where TEnum : struct, Enum
+    => Enum.Parse<TEnum>(value);
+```
+
+## Multiple Constraints
+
+```csharp
+// Multiple constraints on one type parameter
+public class Repository<T>
+    where T : class, IEntity, new()
+{
+    public T Create() => new T();
+    public void Save(T entity) { /* entity.Id is available */ }
+}
+
+// Multiple type parameters with separate constraints
+public class Converter<TInput, TOutput>
+    where TInput : class
+    where TOutput : struct
+{
+    public TOutput Convert(TInput input) { /* ... */ }
+}
+
+// Constraint on return type (less common)
+public static TResult Invoke<T, TResult>(T source, Func<T, TResult> selector)
+    where T : class
+    where TResult : struct
+{
+    return selector(source);
+}
+```
+
+## Generic Interfaces and Inheritance
+
+```csharp
+// Generic interface
+public interface IRepository<T> where T : class
+{
+    T? GetById(Guid id);
+    IReadOnlyList<T> GetAll();
+    void Add(T entity);
+    void Remove(T entity);
+}
+
+// Concrete implementation
+public class InMemoryRepository<T> : IRepository<T> where T : class, IEntity
+{
+    private readonly Dictionary<Guid, T> _store = new();
+
+    public T? GetById(Guid id) => _store.GetValueOrDefault(id);
+    public IReadOnlyList<T> GetAll() => _store.Values.ToList();
+    public void Add(T entity) => _store[entity.Id] = entity;
+    public void Remove(T entity) => _store.Remove(entity.Id);
+}
+
+// Specialized repository
+public class UserRepository : InMemoryRepository<User>
+{
+    public User? GetByEmail(string email)
+        => GetAll().FirstOrDefault(u => u.Email == email);
+}
+```
+
+## Static Generic Methods — Utility Classes
+
+```csharp
+public static class CollectionUtils
+{
+    // Swap two elements in a list
+    public static void Swap<T>(IList<T> list, int i, int j)
+        => (list[i], list[j]) = (list[j], list[i]);
+
+    // Shuffle
+    public static void Shuffle<T>(IList<T> list)
+    {
+        var rng = Random.Shared;
+        for (int i = list.Count - 1; i > 0; i--)
+            Swap(list, i, rng.Next(i + 1));
+    }
+
+    // Binary search — requires IComparable
+    public static int BinarySearch<T>(IReadOnlyList<T> list, T target)
+        where T : IComparable<T>
+    {
+        int lo = 0, hi = list.Count - 1;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) / 2;
+            int cmp = list[mid].CompareTo(target);
+            if (cmp == 0) return mid;
+            if (cmp < 0) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        return -1;
+    }
+
+    // Only works with structs (no null check needed)
+    public static T[] CreateArray<T>(int size, T defaultValue) where T : struct
+    {
+        var arr = new T[size];
+        Array.Fill(arr, defaultValue);
+        return arr;
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Prefer Interfaces Over Classes in Constraints">
+Constrain to interfaces (`where T : IComparable<T>`) rather than classes (`where T : MyBase`) when possible. Interface constraints are more flexible — any type implementing the interface qualifies, not just direct subclasses.
+</ConceptCallout>
+
+## `default(T)` and Nullable in Generics
+
+```csharp
+// default(T) returns the "zero value" for any type
+// null for reference types, 0/false/empty struct for value types
+public static T? FirstOrDefault<T>(IEnumerable<T> source)
+{
+    foreach (var item in source)
+        return item;
+    return default;  // null for class T, 0 for int T, etc.
+}
+
+// Checking for null in generics
+public static bool IsNullOrDefault<T>(T value)
+{
+    if (value is null) return true;
+    return EqualityComparer<T>.Default.Equals(value, default);
+}
+```
+
+<ExerciseBlock>
+1. Build a generic `Result<T>` type (like Rust's `Result<T, E>` or Dart's `Either`) with two states: `Success(T value)` and `Failure(string error)`. Add `Map<TNew>(Func<T, TNew> transform)`, `GetValueOrDefault(T fallback)`, and implicit conversion from `T`.
+2. Write a `Cache<TKey, TValue>` class with `where TKey : notnull` constraint, backed by a `Dictionary`. Add `GetOrAdd(TKey key, Func<TKey, TValue> factory)` that caches and returns the result.
+3. Implement `MergeSort<T>(IList<T> list) where T : IComparable<T>` using C# generics. It should work correctly for `int[]`, `string[]`, and any other `IComparable<T>` type.
+</ExerciseBlock>

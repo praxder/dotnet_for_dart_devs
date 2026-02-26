@@ -1,0 +1,217 @@
+---
+title: "CORS, Rate Limiting, and Security Headers"
+day: 86
+week: 18
+module: 7
+moduleName: "ASP.NET Core Fundamentals"
+phase: "dotnet"
+dartConcept: "CORS handling, security headers in server config"
+csharpConcept: "CORS policy, rate limiting, security headers, HSTS, Content-Security-Policy"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Production APIs need protection beyond authentication: CORS to control browser access, rate limiting to prevent abuse, and security headers to mitigate common attacks. These are non-negotiable in a public-facing API.
+
+## CORS — Cross-Origin Resource Sharing
+
+```csharp
+// CORS is a browser security mechanism — APIs without it block browser clients
+// Server tells browsers which origins are allowed to call it
+
+builder.Services.AddCors(options =>
+{
+    // Development: allow everything
+    options.AddPolicy("Development", policy =>
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader());
+
+    // Production: specific origins only
+    options.AddPolicy("Production", policy =>
+        policy.WithOrigins(
+            "https://myapp.com",
+            "https://www.myapp.com",
+            "https://admin.myapp.com")
+        .WithMethods("GET", "POST", "PUT", "DELETE", "PATCH")
+        .WithHeaders("Authorization", "Content-Type", "X-Correlation-Id")
+        .AllowCredentials()  // allows cookies/auth headers
+        .SetPreflightMaxAge(TimeSpan.FromHours(1)));  // cache OPTIONS response
+
+    // Partner APIs: header-based origins
+    options.AddPolicy("Partners", policy =>
+        policy.SetIsOriginAllowedToAllowWildcardSubdomains()
+              .WithOrigins("https://*.partner.com")
+              .AllowAnyMethod()
+              .AllowAnyHeader());
+});
+
+// Apply globally (before routing)
+app.UseCors("Production");
+
+// Or per-endpoint
+app.MapGet("/public", GetPublicData).RequireCors("Development");
+app.MapPost("/api/data", PostData).RequireCors("Partners");
+```
+
+<ConceptCallout type="gotcha" title="CORS Is Browser-Only — It Doesn't Secure Your API">
+CORS only blocks browser-initiated cross-origin requests. Any non-browser client (curl, Postman, your mobile app, another server) is completely unaffected by CORS headers. Use authentication and authorization for actual security.
+</ConceptCallout>
+
+## Rate Limiting (.NET 7+)
+
+```csharp
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
+
+builder.Services.AddRateLimiter(options =>
+{
+    // Global default: 100 requests per minute per IP
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+    {
+        var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(ip, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 100,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 0  // reject immediately when full
+        });
+    });
+
+    // Named policy: stricter for auth endpoints
+    options.AddFixedWindowLimiter("AuthPolicy", options =>
+    {
+        options.PermitLimit = 10;
+        options.Window = TimeSpan.FromMinutes(1);
+        options.QueueLimit = 0;
+    });
+
+    // Sliding window: allows bursting
+    options.AddSlidingWindowLimiter("ApiPolicy", options =>
+    {
+        options.PermitLimit = 60;
+        options.Window = TimeSpan.FromMinutes(1);
+        options.SegmentsPerWindow = 6;  // check every 10 seconds
+    });
+
+    // Token bucket: smooth rate limiting
+    options.AddTokenBucketLimiter("BurstPolicy", options =>
+    {
+        options.TokenLimit = 100;
+        options.ReplenishmentPeriod = TimeSpan.FromSeconds(10);
+        options.TokensPerPeriod = 10;
+        options.AutoReplenishment = true;
+    });
+
+    options.OnRejected = async (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.StatusCode = 429;
+        if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+            ctx.HttpContext.Response.Headers.RetryAfter = retryAfter.TotalSeconds.ToString();
+        await ctx.HttpContext.Response.WriteAsJsonAsync(
+            new { error = "Rate limit exceeded. Try again later." }, ct);
+    };
+});
+
+app.UseRateLimiter();
+
+// Apply policies
+app.MapPost("/api/auth/login", Login).RequireRateLimiting("AuthPolicy");
+app.MapGet("/api/products", GetProducts).RequireRateLimiting("ApiPolicy");
+```
+
+## Security Headers
+
+```csharp
+// Add security headers to every response
+app.Use(async (context, next) =>
+{
+    // Prevent clickjacking
+    context.Response.Headers.XFrameOptions = "DENY";
+
+    // Prevent MIME-type sniffing
+    context.Response.Headers.XContentTypeOptions = "nosniff";
+
+    // XSS protection (legacy browsers)
+    context.Response.Headers.XXSSProtection = "1; mode=block";
+
+    // Referrer policy
+    context.Response.Headers.Append("Referrer-Policy", "strict-origin-when-cross-origin");
+
+    // Permissions policy
+    context.Response.Headers.Append("Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()");
+
+    // Content Security Policy
+    context.Response.Headers.ContentSecurityPolicy =
+        "default-src 'self'; " +
+        "script-src 'self' 'unsafe-inline' https://cdn.example.com; " +
+        "style-src 'self' 'unsafe-inline'; " +
+        "img-src 'self' data: https:; " +
+        "connect-src 'self' https://api.example.com";
+
+    await next();
+});
+
+// HSTS — always use HTTPS (browsers remember this)
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+app.UseHttpsRedirection();
+```
+
+## User-Keyed Rate Limiting
+
+```csharp
+// Limit per authenticated user, not per IP
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("PerUser", httpContext =>
+    {
+        var userId = httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? httpContext.Connection.RemoteIpAddress?.ToString()
+            ?? "anonymous";
+
+        return RateLimitPartition.GetSlidingWindowLimiter(userId, _ => new SlidingWindowRateLimiterOptions
+        {
+            PermitLimit = 200,
+            Window = TimeSpan.FromMinutes(1),
+            SegmentsPerWindow = 6,
+        });
+    });
+
+    // Premium users get higher limits
+    options.AddPolicy("PerUserTiered", httpContext =>
+    {
+        var userId = httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "anon";
+        var tier = httpContext.User.FindFirst("subscription_tier")?.Value ?? "free";
+
+        int limit = tier switch
+        {
+            "enterprise" => 10000,
+            "premium" => 1000,
+            _ => 100
+        };
+
+        return RateLimitPartition.GetSlidingWindowLimiter(userId, _ => new SlidingWindowRateLimiterOptions
+        {
+            PermitLimit = limit,
+            Window = TimeSpan.FromMinutes(1),
+            SegmentsPerWindow = 6,
+        });
+    });
+});
+```
+
+<ExerciseBlock>
+1. Configure CORS for a three-environment setup: Development (any origin), Staging (your staging domain), Production (production domain + admin subdomain). Verify that invalid origins receive the appropriate CORS errors.
+2. Implement IP-based rate limiting with three tiers: 10 req/min for auth endpoints, 60 req/min for API endpoints, and 1000 req/min for webhooks. Return `Retry-After` headers on 429 responses.
+3. Build a security header middleware that reads its configuration from `appsettings.json` (CSP, frame options, etc.) so security headers can be updated without code changes. Verify headers are present using the browser's Network tab or `curl -I`.
+</ExerciseBlock>

@@ -1,0 +1,319 @@
+---
+title: "Value Types vs Reference Types: The Stack/Heap Split"
+day: 3
+week: 1
+module: 1
+moduleName: "C# Environment & Type System"
+phase: "csharp"
+dartConcept: "everything is an object in Dart"
+csharpConcept: "value types (struct, int, bool) vs reference types (class)"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+# Value Types vs Reference Types: The Stack/Heap Split
+
+This lesson covers the single most important conceptual difference between Dart and C#. In Dart, **everything is an object** — `int`, `bool`, `double`, your custom classes, all of it. There are no exceptions. In C#, there is a fundamental split between two categories of types, and understanding this split changes how you reason about memory, performance, equality, and mutation.
+
+---
+
+## The Core Distinction
+
+| | Value Type | Reference Type |
+|--|-----------|----------------|
+| **Examples** | `int`, `bool`, `double`, `char`, `struct`, `enum` | `class`, `string`, `object`, arrays, delegates |
+| **Storage** | Stack (or inline in containing type) | Heap |
+| **Assignment** | Copies the value | Copies the reference (pointer) |
+| **Default equality** | Compares contents | Compares identity (same object?) |
+| **Null by default** | Cannot be null (without `?`) | Can be null |
+| **Base type** | `System.ValueType` → `object` | `object` directly |
+
+<ConceptCallout type="different">
+In Dart, `int x = 5; int y = x;` — both `x` and `y` refer to the same integer object in the Dart VM's object pool. Mutation is impossible because Dart integers are immutable objects. In C#, `int x = 5; int y = x;` copies the 32-bit integer value. `x` and `y` are completely independent storage locations. There is no object, no heap allocation, no GC involvement.
+</ConceptCallout>
+
+---
+
+## Value Types in Detail
+
+### Primitive value types
+
+```csharp
+int a = 42;
+int b = a;      // b gets a COPY of 42
+b = 100;        // only b changes
+
+Console.WriteLine(a);  // 42  — a is unaffected
+Console.WriteLine(b);  // 100
+```
+
+This behavior would be identical in Dart — but for a different reason. In Dart, integers are immutable objects, so you cannot mutate `b` without re-assigning it anyway. The end result looks the same. The difference becomes visible with mutable value types.
+
+### Structs: custom value types
+
+You can define your own value types using `struct`:
+
+```csharp
+struct Point
+{
+    public int X;
+    public int Y;
+}
+
+Point p1 = new Point { X = 3, Y = 4 };
+Point p2 = p1;      // p2 is a COPY of p1
+
+p2.X = 99;
+
+Console.WriteLine(p1.X);   // 3  — p1 is unchanged
+Console.WriteLine(p2.X);   // 99
+```
+
+<DartEquivalent>
+Dart has no `struct`. The closest Dart equivalent is an immutable class or a `record` (Dart 3):
+
+```dart
+// Dart — using a class (reference type always)
+class Point {
+  int x;
+  int y;
+  Point(this.x, this.y);
+}
+
+final p1 = Point(3, 4);
+final p2 = p1;   // p2 is a REFERENCE to the same object
+
+p2.x = 99;
+print(p1.x);  // 99 — BOTH changed because p2 is the same object!
+```
+
+This is the key gotcha: assignment in C# with value types gives you independence. The same assignment in Dart gives you a shared reference.
+</DartEquivalent>
+
+---
+
+## Reference Types in Detail
+
+```csharp
+class Point
+{
+    public int X;
+    public int Y;
+}
+
+var p1 = new Point { X = 3, Y = 4 };
+var p2 = p1;        // p2 holds the same reference as p1
+
+p2.X = 99;
+
+Console.WriteLine(p1.X);   // 99 — BOTH changed, same object
+Console.WriteLine(p2.X);   // 99
+```
+
+When `Point` is a `class`, `p1` and `p2` both point to the same heap object. Mutating through either variable mutates the shared object. This is identical to Dart's behavior for all objects.
+
+---
+
+## Where Things Live in Memory
+
+### Stack allocation
+
+Value types declared as local variables live on the **stack**:
+
+```csharp
+void Compute()
+{
+    int x = 10;          // on the stack
+    double y = 3.14;     // on the stack
+    bool flag = true;    // on the stack
+    // When Compute() returns, the stack frame is popped — instant cleanup, no GC
+}
+```
+
+Stack allocation is extremely fast — it is just a pointer increment. And cleanup is free — just decrement the stack pointer when the function returns. No garbage collector involvement whatsoever.
+
+### Heap allocation
+
+Reference types are allocated on the **managed heap**:
+
+```csharp
+void CreateUser()
+{
+    var user = new User { Name = "Alice" };  // on the heap
+    // user holds a reference (pointer) to the heap object
+    // When user goes out of scope, it becomes eligible for GC
+}
+```
+
+<ConceptCallout type="info">
+The C# garbage collector is generational and highly optimized. Most short-lived objects are collected in "Gen 0" with very low overhead. But frequent small heap allocations in hot paths (like inside tight loops processing millions of items) can cause GC pressure. This is why C# gives you value types as an escape hatch — you can process large data sets with zero heap allocation.
+</ConceptCallout>
+
+---
+
+## Equality: The Practical Consequence
+
+The most day-to-day impact of value vs reference types is equality semantics:
+
+```csharp
+// Value type equality: compares contents
+int a = 5;
+int b = 5;
+Console.WriteLine(a == b);   // true — same value
+
+// Struct equality: also compares contents (all fields)
+Point p1 = new Point { X = 1, Y = 2 };
+Point p2 = new Point { X = 1, Y = 2 };
+Console.WriteLine(p1 == p2);  // ERROR unless you define == for the struct
+                               // But p1.Equals(p2) returns true by default for structs
+```
+
+```csharp
+// Reference type equality: compares identity by default
+class Point { public int X; public int Y; }
+
+var p1 = new Point { X = 1, Y = 2 };
+var p2 = new Point { X = 1, Y = 2 };
+Console.WriteLine(p1 == p2);       // false — different objects on the heap
+Console.WriteLine(p1.Equals(p2));  // also false — unless you override Equals()
+```
+
+<DartEquivalent>
+Dart's `==` operator is always a virtual method call — you override it on any class. In Dart, two different `Point` objects with the same coordinates are NOT equal by default (same behavior as C# classes). But Dart's `Record` type (`(1, 2) == (1, 2)` is `true`) gives you value-equality semantics for lightweight data — similar to C#'s `record struct` (which we will cover in the OOP module).
+</DartEquivalent>
+
+### String equality
+
+String is a special case — it is a reference type, but `==` compares content:
+
+```csharp
+string s1 = "hello";
+string s2 = "hello";
+Console.WriteLine(s1 == s2);              // true (content comparison)
+Console.WriteLine(object.ReferenceEquals(s1, s2));  // true (string interning — but do not rely on this)
+
+string s3 = new string("hello".ToCharArray());
+Console.WriteLine(s1 == s3);              // true (still content comparison)
+Console.WriteLine(object.ReferenceEquals(s1, s3));  // false (different objects)
+```
+
+`string` overrides `==` to do content comparison. This is a convenience that mirrors how Dart's `String ==` works.
+
+---
+
+## Boxing and Unboxing
+
+Because all types in C# ultimately derive from `object`, a value type can be assigned to a variable of type `object`. This is called **boxing** — the value type is wrapped in a heap-allocated object:
+
+```csharp
+int x = 42;
+object boxed = x;        // BOXING: heap allocation occurs here
+int unboxed = (int)boxed; // UNBOXING: extracts the value back
+```
+
+<ConceptCallout type="gotcha">
+Boxing is a performance trap in hot paths. Every time you put a value type into a collection typed as `List<object>`, or pass it to a method accepting `object`, a heap allocation occurs. This was a major problem before generics were added in C# 2.0. Today you avoid it by using generic collections (`List<int>` instead of `ArrayList`) and generic methods. Avoid `object` as a type in performance-sensitive code.
+</ConceptCallout>
+
+<DartEquivalent>
+Dart does not have boxing because everything is already a heap object. There is no performance penalty for putting an `int` in a `List<Object>` — it was already an object. C# gives you better performance in return for this complexity.
+</DartEquivalent>
+
+---
+
+## Passing to Methods: ref and out
+
+By default, both value types AND reference types pass their current value to methods (value types pass the value, reference types pass the reference). You can override this with `ref` and `out`:
+
+```csharp
+void DoubleIt(ref int x)
+{
+    x *= 2;   // modifies the caller's variable
+}
+
+int n = 5;
+DoubleIt(ref n);
+Console.WriteLine(n);  // 10
+```
+
+```csharp
+// out: like ref but the method is guaranteed to assign it
+bool TryParse(string s, out int result)
+{
+    return int.TryParse(s, out result);
+}
+
+if (TryParse("42", out int value))
+{
+    Console.WriteLine(value);  // 42
+}
+```
+
+<DartEquivalent>
+Dart has no `ref`/`out` parameter modifiers. The Dart pattern for returning multiple values is to return a `Record` or a small class. The C# `out` pattern is primarily used for the `TryX` pattern (like `int.TryParse`), which is idiomatic C#. When you see `TryX(input, out result)`, think of it as Dart's `(success, value)` tuple return.
+</DartEquivalent>
+
+---
+
+## readonly struct: The Best of Both Worlds
+
+For performance-critical value types that should be immutable, use `readonly struct`:
+
+```csharp
+readonly struct Vector2
+{
+    public readonly float X;
+    public readonly float Y;
+
+    public Vector2(float x, float y) => (X, Y) = (x, y);
+
+    public float Length => MathF.Sqrt(X * X + Y * Y);
+
+    // Returns a NEW Vector2 — cannot mutate because it is readonly
+    public Vector2 Normalized()
+    {
+        float len = Length;
+        return new Vector2(X / len, Y / len);
+    }
+}
+```
+
+A `readonly struct` guarantees no defensive copies are made when passing to `in` parameters, and the compiler enforces immutability.
+
+<ConceptCallout type="tip">
+The .NET runtime itself uses `readonly struct` extensively for high-performance types: `System.Numerics.Vector3`, `System.Drawing.Color`, `System.TimeSpan`, and many others. When you see these types in the framework, you know they are stack-allocated, copy-on-assign, and zero heap allocation in most usage patterns.
+</ConceptCallout>
+
+---
+
+## Quick Reference: When to Use Each
+
+| Situation | Use |
+|-----------|-----|
+| Simple data with 2–4 fields, logically a single value | `struct` or `readonly struct` |
+| Data with identity (two objects can be "equal" or "not equal" despite same data) | `class` |
+| Performance-critical, millions of instances | `struct` (avoids GC pressure) |
+| Needs inheritance | `class` (structs cannot inherit) |
+| Default domain model objects | `class` |
+| Small coordinate/color/size types | `struct` |
+
+---
+
+<ExerciseBlock>
+## Exercises
+
+1. **Verify copy semantics**: Create a `struct Temperature` with a `Celsius` field. Assign one `Temperature` to another, modify the copy's field, and print both. Then repeat with a `class Temperature`. Confirm the different behavior and write a comment explaining why each behaves as it does.
+
+2. **Boxing detection**: Create a `List<object>` and add 1000 integers to it. Then create a `List<int>` and add the same 1000 integers. Use `GC.Collect()` and `GC.GetTotalMemory(true)` before and after each to observe the allocation difference. (Hint: call `GC.GetTotalMemory(true)` after a `GC.Collect()` for a more accurate reading.)
+
+3. **Equality investigation**: Create a `class Point` with `X` and `Y`. Create two instances with identical values. Print the result of `==`, `Equals()`, and `ReferenceEquals()`. Now override `Equals()` and `GetHashCode()` to make value-based comparison work, and repeat.
+
+4. **ref parameters**: Write a method `Swap<T>(ref T a, ref T b)` that swaps two values without a temporary variable (use tuples: `(a, b) = (b, a)`). Call it with two `int` values and two `string` values. What happens when you try to call it without the `ref` keyword?
+
+5. **struct limitations**: Try to make a `struct` inherit from another `struct`. What compiler error do you get? Now try to give a `struct` a parameterless constructor that sets default values in C# 10+. Does it work?
+</ExerciseBlock>

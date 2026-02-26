@@ -1,0 +1,238 @@
+---
+title: "Iteration: foreach, IEnumerable, and yield"
+day: 19
+week: 4
+module: 2
+moduleName: "Control Flow, Functions & Methods"
+phase: "csharp"
+dartConcept: "Dart for-in, Iterable<T>, sync* / yield"
+csharpConcept: "foreach over IEnumerable<T>, yield return, yield break, custom iterators"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+`foreach` and `yield` in C# work just like Dart's `for-in` and `sync*` — same mental model, slightly different syntax. Understanding how C# iterators work under the hood prepares you for LINQ's deferred execution.
+
+## `foreach` and `IEnumerable<T>`
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart for-in works on any Iterable
+  var nums = [1, 2, 3, 4, 5];
+  for (final n in nums) {
+    print(n);
+  }
+
+  // Works on any Iterable (Set, Map.keys, etc.)
+  for (final entry in map.entries) {
+    print('${entry.key}: ${entry.value}');
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# foreach works on any IEnumerable<T>
+  var nums = new[] { 1, 2, 3, 4, 5 };
+  foreach (var n in nums)
+  {
+      Console.WriteLine(n);
+  }
+
+  // Works on any IEnumerable<T> (Dictionary, HashSet, etc.)
+  var map = new Dictionary<string, int> { {"a", 1}, {"b", 2} };
+  foreach (var (key, value) in map)  // deconstruction!
+  {
+      Console.WriteLine($"{key}: {value}");
+  }
+  ```
+  </div>
+</CodeComparison>
+
+`foreach` works on any type that implements `IEnumerable<T>` — or even any type with a `GetEnumerator()` method (duck typing for iterators). That includes arrays, `List<T>`, `HashSet<T>`, `Dictionary<K,V>`, custom collections, and LINQ query results.
+
+## `yield return` — Lazy Sequences
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart sync* generator
+  Iterable<int> range(int start, int end) sync* {
+    for (int i = start; i < end; i++) {
+      yield i;
+    }
+  }
+
+  Iterable<int> fibonacci() sync* {
+    int a = 0, b = 1;
+    while (true) {
+      yield a;
+      (a, b) = (b, a + b);
+    }
+  }
+
+  // Lazy — no values computed until iterated
+  for (final n in range(0, 1000000)) {
+    if (n > 10) break;
+    print(n);
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# iterator method with yield return
+  IEnumerable<int> Range(int start, int end)
+  {
+      for (int i = start; i < end; i++)
+          yield return i;
+  }
+
+  IEnumerable<long> Fibonacci()
+  {
+      long a = 0, b = 1;
+      while (true)
+      {
+          yield return a;
+          (a, b) = (b, a + b);
+      }
+  }
+
+  // Lazy — values computed on demand
+  foreach (var n in Range(0, 1_000_000))
+  {
+      if (n > 10) break;  // stops iterator cleanly
+      Console.WriteLine(n);
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="same" title="yield Works the Same Way as Dart's sync*">
+The mental model is identical: `yield return` pauses the method and returns one value. The method resumes from where it left off on the next iteration. The compiler generates a state machine class behind the scenes — in both Dart and C#.
+</ConceptCallout>
+
+## `yield break` — Early Exit
+
+```csharp
+IEnumerable<string> ReadUntilEmpty(TextReader reader)
+{
+    while (true)
+    {
+        var line = reader.ReadLine();
+        if (line is null || line.Length == 0)
+            yield break;  // stop the iterator
+
+        yield return line;
+    }
+}
+```
+
+## Custom Iterators — Practical Examples
+
+```csharp
+// Tree traversal
+public class TreeNode<T>
+{
+    public T Value { get; init; }
+    public List<TreeNode<T>> Children { get; } = new();
+
+    // Depth-first traversal as a lazy sequence
+    public IEnumerable<T> Traverse()
+    {
+        yield return Value;
+        foreach (var child in Children)
+            foreach (var item in child.Traverse())
+                yield return item;
+    }
+}
+
+// Sliding window
+public static IEnumerable<T[]> Window<T>(this IEnumerable<T> source, int size)
+{
+    var buffer = new Queue<T>(size);
+    foreach (var item in source)
+    {
+        buffer.Enqueue(item);
+        if (buffer.Count > size) buffer.Dequeue();
+        if (buffer.Count == size)
+            yield return buffer.ToArray();
+    }
+}
+
+// Infinite sequence with take
+public static IEnumerable<int> NaturalNumbers()
+{
+    int n = 1;
+    while (true) yield return n++;
+}
+
+// Usage
+var evens = NaturalNumbers().Where(n => n % 2 == 0).Take(5);
+// [2, 4, 6, 8, 10] — only computes what's needed
+```
+
+## The GetEnumerator Protocol
+
+Under the hood, `foreach` calls `GetEnumerator()` and iterates with `MoveNext()` / `Current`. You can implement this manually for custom types:
+
+```csharp
+public class NumberRange : IEnumerable<int>
+{
+    private readonly int _start, _end;
+
+    public NumberRange(int start, int end)
+    {
+        _start = start;
+        _end = end;
+    }
+
+    public IEnumerator<int> GetEnumerator()
+    {
+        for (int i = _start; i <= _end; i++)
+            yield return i;  // compiler generates the state machine
+    }
+
+    // Required by non-generic IEnumerable
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+        => GetEnumerator();
+}
+
+// foreach just works
+foreach (var n in new NumberRange(1, 10))
+    Console.Write($"{n} ");
+// 1 2 3 4 5 6 7 8 9 10
+```
+
+## Performance: Lazy vs Eager
+
+```csharp
+// LAZY — yield creates an IEnumerable<T>
+IEnumerable<int> GetLargeNumbers(IEnumerable<int> source, int threshold)
+{
+    foreach (var n in source)
+        if (n > threshold) yield return n;
+}
+
+// EAGER — processes everything immediately, returns List<T>
+List<int> GetLargeNumbersEager(IEnumerable<int> source, int threshold)
+    => source.Where(n => n > threshold).ToList();
+
+// Which to use?
+// Lazy: when caller might not need all results, or source is huge/infinite
+// Eager: when you'll iterate the result multiple times, or need Count/indexing
+```
+
+<ConceptCallout type="tip">
+In LINQ, most operators (`Where`, `Select`, `OrderBy`) are lazy — they don't execute until you iterate. Operators like `ToList()`, `ToArray()`, `Count()`, `Sum()` are eager — they force execution and materialize all results. This deferred execution is one of the most important things to internalize about C# LINQ and IEnumerable.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Write an infinite `Primes()` iterator that lazily generates prime numbers. Take the first 20 primes with `.Take(20).ToList()`.
+2. Create a `Zip3<T1,T2,T3>` extension method that zips three sequences together, yielding tuples `(T1, T2, T3)`. Stop when any sequence is exhausted.
+3. Implement a `ReadCsvRows(string path)` iterator that opens a file and yields each row as a `string[]` of fields. Make sure the file is properly closed when iteration ends (use a `try/finally` around the `while` loop with `yield return` inside).
+</ExerciseBlock>

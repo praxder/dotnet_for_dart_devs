@@ -1,0 +1,158 @@
+---
+title: "Covariance and Contravariance"
+day: 42
+week: 9
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Dart covariance (implicit, often unsound), no contravariance"
+csharpConcept: "out T (covariance), in T (contravariance), IEnumerable<out T>, Action<in T>"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Covariance and contravariance control whether generic types are compatible with subtypes. C# handles this explicitly with `out` and `in` keywords on interface type parameters — giving you type safety that Dart's implicit covariance lacks.
+
+## The Problem Without Variance
+
+```csharp
+// Why can't we do this?
+IEnumerable<Animal> animals = new List<Dog>();  // Is this OK?
+
+// Answer depends on what you can DO with it:
+// If IEnumerable<T> is OUT-only (you only read T), it's safe → covariant
+// If IList<T> is IN-and-OUT (you read AND write T), it's not safe
+```
+
+```csharp
+// If List<Dog> were assignable to List<Animal>:
+List<Animal> animals = new List<Dog>();  // imagine this compiled
+animals.Add(new Cat());  // Adding a Cat to a List<Dog>! 💥
+
+// This is why List<T> is NOT covariant — it would be unsound
+```
+
+<ConceptCallout type="new" title="Dart vs C# Variance">
+Dart uses **implicit, unsound covariance** — you CAN assign `List&lt;Dog&gt;` to `List&lt;Animal&gt;`, but a runtime `CastError` occurs if you then add a `Cat`. C# is **explicit and sound** — you declare `out` or `in` on interface parameters, and the compiler prevents the unsafe operations at compile time.
+</ConceptCallout>
+
+## Covariance: `out T` — "Produces T"
+
+A type parameter is **covariant** (`out T`) when the interface only produces values of type `T` (you can only read/return `T`):
+
+```csharp
+// IEnumerable<out T> — covariant because you only GET items, never add
+// This is why this works:
+IEnumerable<Animal> animals = new List<Dog>();  // ✓ COMPILES
+// You can only read from IEnumerable, never add — so it's safe
+
+// Another covariant interface:
+IReadOnlyList<out T>  // read-only, so covariant
+
+// Your own covariant interface:
+public interface IProducer<out T>
+{
+    T Produce();          // Returns T — OK for covariance
+    // void Consume(T t); // Would be ILLEGAL with out T
+}
+
+// With a covariant interface:
+IProducer<Animal> producer = new DogFactory();  // DogFactory : IProducer<Dog>
+Animal animal = producer.Produce();  // Safe — DogFactory produces dogs, which are animals
+```
+
+```csharp
+// Practical covariance in action
+List<string> strings = new() { "hello", "world" };
+IEnumerable<object> objects = strings;  // string is-a object, IEnumerable is covariant
+
+foreach (object obj in objects)  // Each string can be treated as object
+    Console.WriteLine(obj);
+```
+
+## Contravariance: `in T` — "Consumes T"
+
+A type parameter is **contravariant** (`in T`) when the interface only consumes values of type `T` (you can only pass `T` in, never return it):
+
+```csharp
+// IComparer<in T> — contravariant
+// A comparer that works on Animals can also compare Dogs (Dogs are Animals)
+IComparer<Animal> animalComparer = Comparer<Animal>.Create((a, b) => ...);
+IComparer<Dog> dogComparer = animalComparer;  // ✓ WORKS — Dog is more specific
+
+// Wait — why is this safe?
+// If you can compare any two Animals, you can certainly compare two Dogs
+// The comparer accepts Animals (supertype), so it accepts Dogs (subtype) too
+// This is "upside-down" subtyping: Animal ← Dog but IComparer<Animal> → IComparer<Dog>
+
+// Action<in T> — contravariant
+Action<Animal> feedAnimal = animal => Console.WriteLine($"Feeding {animal.Name}");
+Action<Dog> feedDog = feedAnimal;  // ✓ WORKS — can use animal feeder for dogs
+feedDog(new Dog("Rex"));  // "Feeding Rex"
+```
+
+```csharp
+// Your own contravariant interface:
+public interface IConsumer<in T>
+{
+    void Consume(T item);     // Accepts T — OK for contravariance
+    // T Produce();           // Would be ILLEGAL with in T
+}
+
+// Practical: IEqualityComparer<in T> — compare subtypes with supertype comparer
+IEqualityComparer<Animal> byName = EqualityComparer<Animal>.Create(
+    (a, b) => a?.Name == b?.Name,
+    a => a?.Name?.GetHashCode() ?? 0);
+
+// Can be used wherever a Dog comparer is needed
+IEqualityComparer<Dog> dogByName = byName;  // ✓ contravariance
+```
+
+## Func and Action Variance
+
+```csharp
+// Func<in T, out TResult> — contravariant input, covariant output
+Func<Animal, string> getName = animal => animal.Name;
+Func<Dog, object> getDogName = getName;  // ✓ WORKS
+// in T: Dog is more specific than Animal — contravariant input ✓
+// out TResult: string is more specific than object — covariant output ✓
+
+// Action<in T> — contravariant
+Action<object> print = obj => Console.WriteLine(obj);
+Action<string> printString = print;  // ✓ WORKS — string is-a object
+
+// This is why callbacks compose naturally:
+void ForEach<T>(IEnumerable<T> source, Action<T> action)
+{
+    foreach (var item in source) action(item);
+}
+
+ForEach(new List<string> { "a", "b" }, (object x) => Console.WriteLine(x));
+// Works! Action<object> accepted where Action<string> expected (contravariance)
+```
+
+## Summary Table
+
+| Keyword | Direction | Allowed Operations | Example |
+|---------|-----------|-------------------|---------|
+| `out T` | Covariant | Return T, not accept | `IEnumerable<out T>`, `IProducer<out T>` |
+| `in T` | Contravariant | Accept T, not return | `IComparer<in T>`, `Action<in T>` |
+| (none) | Invariant | Both | `IList<T>`, `List<T>` |
+
+```csharp
+// When to use:
+// out T — read-only collections, factories, producers
+// in T — comparers, validators, consumers, predicates
+// neither — when you both read and write (most mutable collections)
+```
+
+<ExerciseBlock>
+1. Create a covariant interface `IAnimalShelter<out T> where T : Animal` with `T AdoptNext()` and `IReadOnlyList<T> Available`. Then show that an `IAnimalShelter<Dog>` can be assigned to `IAnimalShelter<Animal>`.
+2. Create a contravariant interface `IAnimalTrainer<in T> where T : Animal` with `void Train(T animal)`. Show that an `IAnimalTrainer<Animal>` can be assigned to `IAnimalTrainer<Dog>` — and explain WHY this is logically correct.
+3. Show why `IList<T>` cannot be covariant: write the code that would be unsafe if `IList<Dog>` were assignable to `IList<Animal>`, and explain what runtime error would occur in Dart vs what compile error C# prevents.
+</ExerciseBlock>

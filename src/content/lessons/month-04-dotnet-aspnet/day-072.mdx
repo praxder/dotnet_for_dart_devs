@@ -1,0 +1,216 @@
+---
+title: ".NET Diagnostics: Metrics, Tracing, and Profiling"
+day: 72
+week: 15
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "Flutter DevTools, dart:developer Timeline"
+csharpConcept: "dotnet-counters, dotnet-trace, OpenTelemetry, ActivitySource, Meter"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Production .NET apps are observable through three pillars: **logs** (you've done this), **metrics** (counters and gauges), and **traces** (request spans). This lesson covers the built-in .NET diagnostics tools and how to instrument your code for observability.
+
+## The Three Pillars of Observability
+
+```
+Logs   → What happened (structured log messages)
+Metrics → How much / how fast (counters, gauges, histograms)
+Traces  → Where time was spent (distributed request tracing)
+```
+
+## dotnet CLI Diagnostic Tools
+
+```bash
+# Install globally
+dotnet tool install -g dotnet-counters
+dotnet tool install -g dotnet-trace
+dotnet tool install -g dotnet-dump
+dotnet tool install -g dotnet-monitor
+
+# Monitor a running app (real-time metrics)
+dotnet-counters monitor --process-id 12345 \
+    --counters System.Runtime,Microsoft.AspNetCore.Hosting
+
+# Collect a trace (CPU sampling, GC events, etc.)
+dotnet-trace collect --process-id 12345 --duration 30s
+
+# Capture a memory dump for analysis
+dotnet-dump collect --process-id 12345
+
+# Analyze a dump
+dotnet-dump analyze core.dmp
+> dumpheap -stat        # heap object stats
+> gcroots <address>     # find GC roots for object
+```
+
+## .NET Metrics with System.Diagnostics.Metrics
+
+```csharp
+using System.Diagnostics.Metrics;
+
+// Create a meter (one per library/component)
+var meter = new Meter("MyApp.Orders", "1.0.0");
+
+// Counter — monotonically increasing
+var ordersPlaced = meter.CreateCounter<long>(
+    "orders.placed",
+    unit: "{order}",
+    description: "Total number of orders placed");
+
+// Gauge — current value (can go up and down)
+var activeConnections = meter.CreateObservableGauge(
+    "connections.active",
+    () => _connectionPool.ActiveCount);
+
+// Histogram — distribution (latency, payload size)
+var orderProcessingTime = meter.CreateHistogram<double>(
+    "orders.processing_time",
+    unit: "ms",
+    description: "Order processing duration");
+
+// Use in your code
+public async Task<Order> PlaceOrderAsync(CreateOrderRequest request)
+{
+    var sw = Stopwatch.StartNew();
+
+    var order = new Order(request);
+    await _repository.SaveAsync(order);
+
+    ordersPlaced.Add(1, new TagList
+    {
+        { "payment_method", order.PaymentMethod.ToString() },
+        { "region", order.ShipTo.Country }
+    });
+
+    orderProcessingTime.Record(sw.ElapsedMilliseconds, new TagList
+    {
+        { "success", true }
+    });
+
+    return order;
+}
+```
+
+## Distributed Tracing with ActivitySource
+
+```csharp
+using System.Diagnostics;
+
+// One ActivitySource per component
+public class OrderService
+{
+    private static readonly ActivitySource _source =
+        new("MyApp.OrderService", "1.0.0");
+
+    public async Task<Order> ProcessAsync(Order order)
+    {
+        // Create a span (Activity) for this operation
+        using var activity = _source.StartActivity("ProcessOrder");
+        activity?.SetTag("order.id", order.Id.ToString());
+        activity?.SetTag("order.total", order.Total);
+        activity?.SetTag("customer.id", order.CustomerId);
+
+        try
+        {
+            await ValidateAsync(order);
+            await ChargePaymentAsync(order);
+            await FulfillAsync(order);
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return order;
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.RecordException(ex);
+            throw;
+        }
+    }
+
+    private async Task ValidateAsync(Order order)
+    {
+        using var activity = _source.StartActivity("ValidateOrder");
+        // ... validation logic
+    }
+}
+```
+
+## OpenTelemetry — Export to Observability Platforms
+
+```bash
+dotnet add package OpenTelemetry.Extensions.Hosting
+dotnet add package OpenTelemetry.Instrumentation.AspNetCore
+dotnet add package OpenTelemetry.Instrumentation.Http
+dotnet add package OpenTelemetry.Exporter.Console
+dotnet add package OpenTelemetry.Exporter.Otlp  # for Jaeger, Grafana Tempo, etc.
+```
+
+```csharp
+// Program.cs — wire up OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddSource("MyApp.OrderService")
+        .AddAspNetCoreInstrumentation()  // auto-instrument HTTP requests
+        .AddHttpClientInstrumentation()  // auto-instrument outbound HTTP
+        .AddConsoleExporter()            // dev: print to console
+        .AddOtlpExporter(opts =>         // prod: send to Jaeger/Tempo
+        {
+            opts.Endpoint = new Uri("http://localhost:4317");
+        }))
+    .WithMetrics(metrics => metrics
+        .AddMeter("MyApp.Orders")
+        .AddAspNetCoreInstrumentation()
+        .AddRuntimeInstrumentation()     // GC, thread pool metrics
+        .AddPrometheusExporter());       // expose /metrics for Prometheus
+
+// Expose /metrics endpoint for Prometheus scraping
+app.MapPrometheusScrapingEndpoint();
+```
+
+## BenchmarkDotNet — Micro-Benchmarking
+
+```csharp
+// The gold standard for .NET performance measurement
+// dotnet add package BenchmarkDotNet
+
+using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Running;
+
+[MemoryDiagnoser]          // also measure allocations
+[SimpleJob(RuntimeMoniker.Net90)]
+public class StringBenchmarks
+{
+    private readonly string[] _words = ["hello", "world", "foo", "bar", "baz"];
+
+    [Benchmark(Baseline = true)]
+    public string StringBuilder()
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var w in _words) sb.Append(w);
+        return sb.ToString();
+    }
+
+    [Benchmark]
+    public string StringConcat() => string.Concat(_words);
+
+    [Benchmark]
+    public string StringJoin() => string.Join("", _words);
+}
+
+// Run: dotnet run -c Release
+BenchmarkRunner.Run<StringBenchmarks>();
+```
+
+<ExerciseBlock>
+1. Add custom metrics to a simple web API: count requests by endpoint and HTTP method using `Meter.CreateCounter<long>`. Record response time in a histogram. Expose via `/metrics` and use `dotnet-counters` to monitor live.
+2. Instrument a 3-step pipeline (validate → process → notify) with `ActivitySource`. Run the app and view the traces in the console exporter — verify child activities show parent/child relationships.
+3. Use `BenchmarkDotNet` to compare three dictionary lookup implementations: `Dictionary<string, int>`, `FrozenDictionary<string, int>`, and a manual linear scan `List<(string, int)>`. Include `[MemoryDiagnoser]` to see allocations.
+</ExerciseBlock>

@@ -1,0 +1,171 @@
+---
+title: "Expression Trees"
+day: 56
+week: 12
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "No Dart equivalent — unique to C#"
+csharpConcept: "Expression<Func<T>>, expression trees, runtime code inspection, dynamic LINQ"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Expression trees are the secret power behind Entity Framework's SQL translation, AutoMapper's property mapping, and many other "magic" libraries. A lambda becomes a **data structure representing code** rather than compiled code — and you can inspect, modify, or compile it at runtime.
+
+## Lambda vs Expression Tree
+
+```csharp
+// Regular lambda — compiled to IL, executes C# code
+Func<int, bool> isEven = n => n % 2 == 0;
+bool result = isEven(4);  // runs C# code
+
+// Expression tree — the lambda stored as DATA, not code
+Expression<Func<int, bool>> isEvenExpr = n => n % 2 == 0;
+// isEvenExpr is NOT a function — it's an AST (Abstract Syntax Tree)!
+
+// You can inspect it:
+Console.WriteLine(isEvenExpr.Body);         // (n % 2) == 0
+Console.WriteLine(isEvenExpr.Parameters[0].Name);  // n
+
+// You can compile it to a delegate:
+Func<int, bool> compiled = isEvenExpr.Compile();
+bool r = compiled(4);  // now it runs
+```
+
+<ConceptCallout type="new" title="Why Expression Trees Exist">
+LINQ-to-SQL and Entity Framework need to translate your C# lambda into SQL. A compiled `Func&lt;T,bool&gt;` is black-box machine code — you can't read it. An `Expression&lt;Func&lt;T,bool&gt;&gt;` is a tree of objects (`BinaryExpression`, `MemberExpression`, etc.) that EF can inspect and translate to `WHERE n % 2 = 0`.
+</ConceptCallout>
+
+## Inspecting Expression Trees
+
+```csharp
+Expression<Func<Person, bool>> expr = p => p.Age > 18 && p.Name.StartsWith("A");
+
+// The tree structure:
+// AndAlso
+//   ├── GreaterThan
+//   │   ├── MemberAccess (p.Age)
+//   │   └── Constant (18)
+//   └── Call (StartsWith)
+//       ├── MemberAccess (p.Name)
+//       └── Constant ("A")
+
+// Navigate the tree:
+var body = expr.Body as BinaryExpression;  // AndAlso
+var left = body!.Left as BinaryExpression; // GreaterThan
+var ageAccess = left!.Left as MemberExpression;
+Console.WriteLine(ageAccess!.Member.Name); // "Age"
+
+var rightConst = left.Right as ConstantExpression;
+Console.WriteLine(rightConst!.Value);  // 18
+
+// Visitor pattern to walk the tree:
+public class ExpressionPrinter : ExpressionVisitor
+{
+    protected override Expression VisitMember(MemberExpression node)
+    {
+        Console.WriteLine($"Accessing: {node.Member.DeclaringType?.Name}.{node.Member.Name}");
+        return base.VisitMember(node);
+    }
+
+    protected override Expression VisitConstant(ConstantExpression node)
+    {
+        Console.WriteLine($"Constant: {node.Value}");
+        return base.VisitConstant(node);
+    }
+}
+
+new ExpressionPrinter().Visit(expr);
+// Accessing: Person.Age
+// Constant: 18
+// Accessing: Person.Name
+// Constant: A
+```
+
+## Building Expression Trees Dynamically
+
+```csharp
+// Build an expression programmatically — no lambda syntax needed
+// Equivalent to: p => p.Age > minAge
+
+ParameterExpression param = Expression.Parameter(typeof(Person), "p");
+MemberExpression ageProp = Expression.Property(param, nameof(Person.Age));
+ConstantExpression minAgeConst = Expression.Constant(18);
+BinaryExpression comparison = Expression.GreaterThan(ageProp, minAgeConst);
+
+var lambda = Expression.Lambda<Func<Person, bool>>(comparison, param);
+// lambda is now: p => p.Age > 18
+var compiled = lambda.Compile();
+```
+
+## Dynamic Predicate Building
+
+```csharp
+// Build WHERE clauses dynamically — used by filtering UIs
+public static Expression<Func<T, bool>> BuildFilter<T>(
+    string propertyName,
+    object value)
+{
+    var param = Expression.Parameter(typeof(T), "x");
+    var property = Expression.Property(param, propertyName);
+    var constant = Expression.Constant(value, property.Type);
+    var equality = Expression.Equal(property, constant);
+    return Expression.Lambda<Func<T, bool>>(equality, param);
+}
+
+// Usage
+var filter = BuildFilter<Product>("Category", "Electronics");
+var results = dbContext.Products.Where(filter).ToList();
+// SQL: SELECT * FROM Products WHERE Category = 'Electronics'
+
+// Combine predicates
+public static Expression<Func<T, bool>> And<T>(
+    Expression<Func<T, bool>> left,
+    Expression<Func<T, bool>> right)
+{
+    var param = left.Parameters[0];
+    var body = Expression.AndAlso(
+        left.Body,
+        Expression.Invoke(right, param));
+    return Expression.Lambda<Func<T, bool>>(body, param);
+}
+```
+
+## Real-World: Property Name Extraction
+
+```csharp
+// Extract property name from expression — used by MVVM frameworks
+// Avoids magic strings: nameof() is compile-time, this works for nested access
+public static string GetPropertyName<T, TProp>(Expression<Func<T, TProp>> expr)
+{
+    if (expr.Body is MemberExpression member)
+        return member.Member.Name;
+    if (expr.Body is UnaryExpression unary && unary.Operand is MemberExpression m)
+        return m.Member.Name;
+    throw new ArgumentException("Expression must be a property access");
+}
+
+// Usage
+string name = GetPropertyName<Person, string>(p => p.Name);  // "Name"
+string age = GetPropertyName<Person, int>(p => p.Age);       // "Age"
+
+// Strongly-typed property changed notification (no magic strings)
+protected void OnPropertyChanged<T>(Expression<Func<T>> expr)
+{
+    var propName = (expr.Body as MemberExpression)!.Member.Name;
+    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
+}
+// Usage: OnPropertyChanged(() => Name);
+```
+
+<ExerciseBlock>
+1. Write a method `PrintExpressionTree(Expression expr)` that recursively prints the tree structure with indentation, showing the node type, operator, member names, and constants.
+2. Build a `FilterBuilder<T>` that can dynamically create `Expression<Func<T, bool>>` from a `Dictionary<string, object>` of property name → value pairs, combining all filters with AND.
+3. Implement `OrderByProperty<T>(IQueryable<T> source, string propertyName, bool ascending)` that dynamically creates an `OrderBy` expression tree for Entity Framework (so the sort runs in SQL, not in-memory).
+</ExerciseBlock>

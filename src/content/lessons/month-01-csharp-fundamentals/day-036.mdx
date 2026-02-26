@@ -1,0 +1,378 @@
+---
+title: "List<T>: C#'s Workhorse Collection"
+day: 36
+week: 8
+module: 4
+moduleName: "Collections, Generics & LINQ"
+phase: "csharp"
+dartConcept: "Dart List<T>"
+csharpConcept: "List<T>, IList<T>, collection expressions (C# 12)"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Welcome to Module 4. You already know how to write C# code — now you learn to use it at scale. Collections are the backbone of every real application, and `List<T>` is where nearly every C# developer reaches first.
+
+The good news: if you know Dart's `List<T>`, you already understand 80% of C#'s `List<T>`. The remaining 20% — method naming differences, interface hierarchy, C# 12 collection expressions, and comparer-based sorting — is what this lesson covers.
+
+## The Big Picture: Same Concept, Different Names
+
+Both Dart and C# have a generic, resizable, index-based list. They are backed by arrays internally and grow dynamically. The conceptual model is identical.
+
+<ConceptCallout type="same">
+Both `List&lt;T&gt;` implementations are resizable arrays with O(1) amortized append, O(n) insert/remove, and O(1) index access. The data structure is the same.
+</ConceptCallout>
+
+Where they differ is in method names and a few behavioral details. Let's map the most common operations directly.
+
+<CodeComparison>
+```dart
+// Dart
+final names = <String>[];
+names.add('Alice');
+names.add('Bob');
+names.addAll(['Carol', 'Dave']);
+
+print(names.length);         // 4
+print(names[0]);             // Alice
+print(names.contains('Bob')); // true
+print(names.indexOf('Carol')); // 2
+
+names.remove('Bob');         // removes by value
+names.removeAt(0);           // removes by index
+
+names.insert(0, 'Zara');    // insert at index
+names.clear();
+```
+
+```csharp
+// C#
+var names = new List<string>();
+names.Add("Alice");
+names.Add("Bob");
+names.AddRange(["Carol", "Dave"]);  // C# 12 collection expression
+
+Console.WriteLine(names.Count);        // 4  (not .Length!)
+Console.WriteLine(names[0]);           // Alice
+Console.WriteLine(names.Contains("Bob")); // true
+Console.WriteLine(names.IndexOf("Carol")); // 2
+
+names.Remove("Bob");        // removes by value (first occurrence)
+names.RemoveAt(0);          // removes by index
+
+names.Insert(0, "Zara");   // insert at index
+names.Clear();
+```
+</CodeComparison>
+
+<ConceptCallout type="gotcha">
+The single most common muscle-memory error coming from Dart: `list.length` does not exist in C#. It is `list.Count`. Arrays use `.Length`, lists use `.Count`. This will catch you constantly in the first few weeks.
+</ConceptCallout>
+
+## Creating Lists: All the Ways
+
+```csharp
+// Empty list — traditional
+var list1 = new List<int>();
+
+// With initial capacity (optimization — avoids early reallocations)
+var list2 = new List<int>(capacity: 1000);
+
+// From an existing collection
+var list3 = new List<string> { "one", "two", "three" };  // collection initializer
+
+// C# 12: collection expressions (the new preferred way)
+List<string> list4 = ["one", "two", "three"];
+int[] arr = [1, 2, 3, 4, 5];           // works for arrays too
+var list5 = new List<int>([1, 2, 3]);  // spread into constructor
+
+// From IEnumerable (like Dart's List.from())
+IEnumerable<int> source = Enumerable.Range(1, 10);
+var list6 = source.ToList();  // materialized copy
+var list7 = new List<int>(source);  // equivalent
+```
+
+<ConceptCallout type="new">
+**C# 12 Collection Expressions** — the `[1, 2, 3]` syntax is brand new (C# 12 / .NET 8). It works for `List&lt;T&gt;`, arrays, `ImmutableArray&lt;T&gt;`, `Span&lt;T&gt;`, and any type that opts in. It is the modern way to write collection literals. You will see both the old initializer syntax and the new syntax in codebases.
+</ConceptCallout>
+
+## The Spread Operator `..`
+
+Dart has the `...` spread operator for list literals. C# 12 has `..` inside collection expressions:
+
+<CodeComparison>
+```dart
+// Dart spread
+final first = [1, 2, 3];
+final second = [4, 5, 6];
+final combined = [...first, ...second, 7];
+// [1, 2, 3, 4, 5, 6, 7]
+```
+
+```csharp
+// C# 12 spread in collection expressions
+int[] first = [1, 2, 3];
+int[] second = [4, 5, 6];
+int[] combined = [..first, ..second, 7];
+// [1, 2, 3, 4, 5, 6, 7]
+```
+</CodeComparison>
+
+<ConceptCallout type="same">
+The spread concept is the same. Dart uses `...` (three dots), C# uses `..` (two dots, called the "spread element"). Both work inside collection literals to flatten sequences.
+</ConceptCallout>
+
+## Slicing and Ranges
+
+C# has first-class range support via `Index` and `Range` types, which Dart lacks:
+
+```csharp
+var numbers = new List<int> { 10, 20, 30, 40, 50 };
+
+// Range indexing (C# 8+)
+var slice = numbers[1..3];    // [20, 30] — indices 1 inclusive to 3 exclusive
+var last2 = numbers[^2..];    // [40, 50] — last 2 elements
+var first3 = numbers[..3];    // [10, 20, 30]
+var copy = numbers[..];       // full copy
+
+// ^1 means "index 1 from the end" = last element
+Console.WriteLine(numbers[^1]);  // 50
+Console.WriteLine(numbers[^2]);  // 40
+```
+
+<ConceptCallout type="new">
+The `^n` syntax is called "index from end" — `^1` is the last element, `^2` is second to last. There is no equivalent in Dart. In Dart you write `list[list.length - 1]`; in C# you write `list[^1]`. This is one of those C# features that feels immediately natural once you learn it.
+</ConceptCallout>
+
+## The IList&lt;T&gt; Interface Hierarchy
+
+C# has a rich interface hierarchy for collections. Unlike Dart where you mostly just use `List<T>` directly, C# code often uses interfaces in APIs:
+
+```
+IEnumerable<T>         // can iterate (foreach)
+  └─ ICollection<T>    // can Count, Add, Remove, Contains
+       └─ IList<T>     // can index access, Insert, RemoveAt
+            └─ List<T> // concrete implementation
+```
+
+```csharp
+// You'll see these in APIs
+void ProcessItems(IList<string> items) { ... }   // caller can pass any list-like thing
+void ReadItems(IEnumerable<string> items) { ... } // most permissive — anything iterable
+
+// Why this matters
+public class OrderService
+{
+    // Good: expose interface, not implementation
+    public IReadOnlyList<Order> GetOrders() => _orders;
+    
+    // Less good: exposes the concrete type, allows mutation
+    public List<Order> GetOrders() => _orders;  // caller can Add/Remove!
+    
+    private readonly List<Order> _orders = new();
+}
+```
+
+<ConceptCallout type="different">
+Dart does not have the same multi-level interface hierarchy. C# code heavily uses `IList&lt;T&gt;`, `IEnumerable&lt;T&gt;`, `IReadOnlyList&lt;T&gt;` etc. to express intent and enable flexibility. You will see these everywhere in .NET APIs and should match this pattern in your own code.
+</ConceptCallout>
+
+## Sorting: The C# Way
+
+Dart's `list.sort()` takes an optional comparator function. C# has three approaches:
+
+```csharp
+var numbers = new List<int> { 5, 2, 8, 1, 9, 3 };
+
+// Simple sort — uses default IComparable<T>
+numbers.Sort();
+// [1, 2, 3, 5, 8, 9]
+
+// Sort with a lambda comparator (like Dart)
+numbers.Sort((a, b) => b.CompareTo(a));  // descending
+// [9, 8, 5, 3, 2, 1]
+
+var people = new List<Person>
+{
+    new("Alice", 30),
+    new("Bob", 25),
+    new("Carol", 35),
+};
+
+// Sort by property
+people.Sort((a, b) => a.Age.CompareTo(b.Age));
+
+// Using Comparison<T> delegate explicitly
+people.Sort(Comparison);
+static int Comparison(Person a, Person b) => a.Name.CompareTo(b.Name);
+
+// Using IComparer<T>
+people.Sort(Comparer<Person>.Create((a, b) => a.Age - b.Age));
+```
+
+<DartEquivalent>
+```dart
+// Dart
+people.sort((a, b) => a.age.compareTo(b.age));
+```
+The lambda form is identical. C# uses `CompareTo()` just like Dart.  
+The main difference: C# `Sort()` mutates in place (same as Dart) but also has  
+`OrderBy()` from LINQ (covered in Day 44) which returns a new sorted sequence  
+without mutating the original — equivalent to Dart's `sorted()` extension.
+</DartEquivalent>
+
+## `List.of()` vs `List.from()` Pattern
+
+Dart distinguishes `List.from()` (accepts any `Iterable`, runtime type check) from `List.of()` (generic, compile-time safe). C# doesn't make this distinction — the constructor always takes `IEnumerable<T>`:
+
+```csharp
+// These are all equivalent ways to copy a list in C#
+var original = new List<int> { 1, 2, 3 };
+
+var copy1 = new List<int>(original);    // constructor from IEnumerable
+var copy2 = original.ToList();          // LINQ extension (most idiomatic)
+var copy3 = [..original];              // C# 12 spread
+
+// All three create independent copies — mutating copy1 doesn't affect original
+copy1.Add(4);
+Console.WriteLine(original.Count);  // still 3
+```
+
+## Useful Methods You Might Miss
+
+```csharp
+var items = new List<string> { "apple", "banana", "cherry", "date" };
+
+// Find first match (like Dart's firstWhere)
+string? found = items.Find(x => x.StartsWith("b"));   // "banana"
+string? notFound = items.Find(x => x.StartsWith("z")); // null (not exception!)
+
+// Find index of match (like Dart's indexWhere)
+int idx = items.FindIndex(x => x.Length > 5);  // 1 (banana)
+
+// Find last match
+string? last = items.FindLast(x => x.Contains("a"));  // "date"
+
+// Check if any/all match (covered more in LINQ, but available here too)
+bool anyLong = items.Exists(x => x.Length > 5);    // true
+bool allShort = items.TrueForAll(x => x.Length < 10); // true
+
+// ForEach — like Dart's forEach
+items.ForEach(item => Console.WriteLine(item));
+
+// GetRange — like sublist in Dart
+var sub = items.GetRange(1, 2);  // ["banana", "cherry"] — start index, count (NOT end index!)
+```
+
+<ConceptCallout type="gotcha">
+`GetRange(index, count)` takes an **index and a count**, not a start and end index. This is different from Dart's `sublist(start, end)` which takes start and end positions. `items.GetRange(1, 2)` gives you 2 items starting at index 1. Dart's equivalent would be `items.sublist(1, 3)`.
+</ConceptCallout>
+
+## Capacity vs Count
+
+This is a performance detail that's worth knowing:
+
+```csharp
+var list = new List<int>();
+Console.WriteLine(list.Count);    // 0 — number of items
+Console.WriteLine(list.Capacity); // 0 — allocated array size
+
+list.Add(1);
+Console.WriteLine(list.Capacity); // 4 — grew to default initial capacity
+
+for (int i = 0; i < 10; i++) list.Add(i);
+Console.WriteLine(list.Count);    // 11
+Console.WriteLine(list.Capacity); // 16 — doubled from 8
+
+// If you know the size upfront, set capacity to avoid reallocations
+var optimized = new List<int>(capacity: 10_000);
+for (int i = 0; i < 10_000; i++) optimized.Add(i);
+// Only 1 allocation instead of ~14 doublings
+
+// After bulk operations, trim wasted space
+optimized.TrimExcess();
+```
+
+<ConceptCallout type="tip">
+When building a list from a known-size data set (e.g., loading records from a database), always pass the expected count to the constructor: `new List<Order>(recordCount)`. This eliminates all the grow-and-copy operations. In tight loops or large data processing, this can make a meaningful difference.
+</ConceptCallout>
+
+## Complete Working Example
+
+```csharp
+using System;
+using System.Collections.Generic;
+
+// A simple student grade tracker demonstrating List<T>
+var students = new List<Student>
+{
+    new("Alice",   new List<int> { 92, 87, 95, 88 }),
+    new("Bob",     new List<int> { 75, 68, 82, 71 }),
+    new("Carol",   new List<int> { 98, 100, 97, 99 }),
+    new("Dave",    new List<int> { 55, 62, 48, 70 }),
+};
+
+// Add a new student
+students.Add(new("Eve", [88, 91, 85, 93]));
+
+// Sort by average grade descending
+students.Sort((a, b) => b.AverageGrade.CompareTo(a.AverageGrade));
+
+// Print ranking
+Console.WriteLine("=== Grade Rankings ===");
+for (int i = 0; i < students.Count; i++)
+{
+    var s = students[i];
+    Console.WriteLine($"{i + 1}. {s.Name,-8} avg: {s.AverageGrade:F1}");
+}
+
+// Find students below passing threshold
+var failing = students.FindAll(s => s.AverageGrade < 70);
+if (failing.Count > 0)
+{
+    Console.WriteLine("\nStudents needing support:");
+    failing.ForEach(s => Console.WriteLine($"  - {s.Name}"));
+}
+
+// Get top 3 as a new list
+var top3 = students.GetRange(0, Math.Min(3, students.Count));
+Console.WriteLine($"\nTop {top3.Count}: {string.Join(", ", top3.Select(s => s.Name))}");
+
+record Student(string Name, List<int> Grades)
+{
+    public double AverageGrade => Grades.Count > 0
+        ? Grades.Sum() / (double)Grades.Count
+        : 0;
+}
+```
+
+<ExerciseBlock>
+**Exercise: Playlist Manager**
+
+Build a simple playlist manager using `List<string>` for song names.
+
+Requirements:
+1. Create a playlist with 5 initial songs using a collection expression `[...]`
+2. Add 2 more songs at the end
+3. Insert a "priority" song at position 2
+4. Remove a song by name (your choice)
+5. Sort the playlist alphabetically, then reverse it
+6. Print the playlist with numbered positions (1-based)
+7. Find and print all songs longer than 20 characters, or print "none" if empty
+
+Extension: Add a second `List<int>` for play counts (parallel arrays), keeping them in sync when you add/remove/sort. Hint: sort is the tricky part — you may need a `List<(string Name, int Plays)>` instead.
+</ExerciseBlock>
+
+## Key Takeaways
+
+- `List<T>` in C# is the direct equivalent of Dart's `List<T>` — same data structure, mostly same API
+- Use `.Count` not `.Length` (arrays use `.Length`; `List<T>` uses `.Count`)
+- C# 12 collection expressions `[1, 2, 3]` and spread `..` are the modern syntax
+- Prefer `IList<T>` or `IReadOnlyList<T>` in method signatures; keep `List<T>` as the internal implementation
+- `GetRange(index, count)` is different from Dart's `sublist(start, end)` — it takes a count, not an end index
+- Set `Capacity` upfront when you know the approximate size to avoid repeated reallocations

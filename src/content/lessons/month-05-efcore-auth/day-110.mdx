@@ -1,0 +1,228 @@
+---
+title: "Data Protection and Secrets Management"
+day: 110
+week: 22
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "flutter_secure_storage, environment variables in Dart"
+csharpConcept: "IDataProtector, Data Protection API, Azure Key Vault, user secrets, encryption at rest"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+The Data Protection API (DPAPI) is ASP.NET Core's built-in solution for encrypting sensitive data — cookies, tokens, PII fields. Secrets management keeps API keys and connection strings out of source code. Together they protect data at rest and prevent credential leaks.
+
+## Data Protection API — Encrypt Sensitive Data
+
+```csharp
+// The Data Protection API handles key management, rotation, and encryption
+// Used internally by ASP.NET Core for cookie protection, antiforgery tokens, etc.
+
+// Setup (already configured by default in WebApplication.CreateBuilder):
+builder.Services.AddDataProtection()
+    // Key storage — default is local file system
+    // For production, use Azure Key Vault or Redis:
+    .PersistKeysToAzureBlobStorage(
+        new Uri("https://mystorageaccount.blob.core.windows.net/keys/keys.xml"),
+        new DefaultAzureCredential())
+    .ProtectKeysWithAzureKeyVault(
+        new Uri("https://myvault.vault.azure.net/keys/mykey/version"),
+        new DefaultAzureCredential())
+    .SetApplicationName("MyApp")    // keys are app-specific by default
+    .SetDefaultKeyLifetime(TimeSpan.FromDays(90));  // rotate every 90 days
+```
+
+## Encrypting Sensitive Fields
+
+```csharp
+// Encrypt PII stored in the database — phone numbers, SSNs, etc.
+public class SensitiveDataService(IDataProtectionProvider dataProtection)
+{
+    private readonly IDataProtector _protector =
+        dataProtection.CreateProtector("PersonalData.v1");
+
+    public string Encrypt(string plaintext) => _protector.Protect(plaintext);
+    public string Decrypt(string ciphertext) => _protector.Unprotect(ciphertext);
+}
+
+// Value converter for EF Core — transparently encrypt/decrypt
+public class EncryptedStringConverter(SensitiveDataService service)
+    : ValueConverter<string, string>(
+        v => service.Encrypt(v),         // encrypt when saving
+        v => service.Decrypt(v));        // decrypt when reading
+
+// Apply to specific properties:
+modelBuilder.Entity<User>()
+    .Property(u => u.PhoneNumber)
+    .HasConversion(new EncryptedStringConverter(sensitiveDataService));
+
+// Time-limited protection — tokens that expire
+public class TimeLimitedProtector(IDataProtectionProvider provider)
+{
+    private readonly ITimeLimitedDataProtector _protector =
+        provider.CreateProtector("EmailConfirmation").ToTimeLimitedDataProtector();
+
+    public string CreateToken(string email)
+        => _protector.Protect(email, lifetime: TimeSpan.FromHours(24));
+
+    public bool TryValidateToken(string token, out string email)
+    {
+        try
+        {
+            email = _protector.Unprotect(token);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            email = "";
+            return false;  // expired or tampered
+        }
+    }
+}
+```
+
+## User Secrets — Development Credentials
+
+```bash
+# NEVER commit secrets to git — use user secrets in development
+dotnet user-secrets init  # creates secrets.json outside project directory
+dotnet user-secrets set "Jwt:Key" "my-super-secret-development-key-32-chars"
+dotnet user-secrets set "ConnectionStrings:Default" "Server=localhost;..."
+dotnet user-secrets set "Google:ClientSecret" "google-oauth-secret"
+
+# Secrets are stored at: ~/.microsoft/usersecrets/{project-id}/secrets.json
+# They're AUTOMATICALLY loaded by WebApplication.CreateBuilder in Development mode
+```
+
+```csharp
+// In code — exactly like appsettings.json (Configuration merges them):
+var jwtKey = builder.Configuration["Jwt:Key"];  // comes from user secrets in dev
+
+// Structure mirrors appsettings.json:
+// "Google:ClientId" → { "Google": { "ClientId": "..." } }
+```
+
+## Environment Variables — Production Secrets
+
+```csharp
+// Configuration priority (highest wins):
+// 1. Environment variables
+// 2. User secrets (Development only)
+// 3. appsettings.{Environment}.json
+// 4. appsettings.json
+
+// Environment variables use double underscore for nesting:
+// JWT__KEY=my-secret → config["Jwt:Key"]
+// CONNECTIONSTRINGS__DEFAULT=Server=... → config.GetConnectionString("Default")
+
+// Dockerfile:
+// ENV JWT__KEY=secret          ← hardcoded (bad)
+// Pass at runtime:
+// docker run -e JWT__KEY=secret myapp
+
+// docker-compose.yml:
+// environment:
+//   JWT__KEY: ${JWT_KEY}       ← from host environment
+
+// Kubernetes secrets (mounted as env vars or files):
+// kubectl create secret generic app-secrets --from-literal=jwt-key=mysecret
+```
+
+## Azure Key Vault — Production Secrets Management
+
+```csharp
+// dotnet add package Azure.Extensions.AspNetCore.Configuration.Secrets
+// dotnet add package Azure.Identity
+
+// Load all secrets from Key Vault automatically:
+if (builder.Environment.IsProduction())
+{
+    builder.Configuration.AddAzureKeyVault(
+        new Uri($"https://{builder.Configuration["KeyVault:Name"]}.vault.azure.net/"),
+        new DefaultAzureCredential());
+    // DefaultAzureCredential tries: managed identity, VS auth, CLI auth, env vars
+    // In Azure: enable Managed Identity on your App Service
+}
+
+// Key Vault secret names: "Jwt--Key" maps to "Jwt:Key" (-- → :)
+// Store: az keyvault secret set --vault-name MyVault --name "Jwt--Key" --value "..."
+
+// Access like any other config:
+var jwtKey = builder.Configuration["Jwt:Key"];  // transparent — same code everywhere
+```
+
+## Hashing and Sensitive Data
+
+```csharp
+// Use ASP.NET Core's built-in password hasher for any secret hashing needs
+public class SecureHasher(IPasswordHasher<object> hasher)
+{
+    // For non-password secrets (API keys, etc.) — use your own HMAC
+    public string HashApiKey(string apiKey)
+    {
+        using var hmac = new HMACSHA256(GetHmacKey());
+        var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(apiKey));
+        return Convert.ToBase64String(bytes);
+    }
+
+    private byte[] GetHmacKey() =>
+        Convert.FromBase64String(Environment.GetEnvironmentVariable("HMAC_KEY")!);
+}
+
+// Never store plaintext API keys:
+public class ApiKey
+{
+    public int Id { get; set; }
+    public required string KeyHash { get; set; }    // store hash only
+    public required string KeyPrefix { get; set; }  // "sk_live_ab12..." (first 8 chars for lookup)
+    public required string Name { get; set; }
+    public required string UserId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? LastUsedAt { get; set; }
+}
+
+public class ApiKeyService(AppDbContext db, SecureHasher hasher)
+{
+    public async Task<(string fullKey, ApiKey record)> CreateApiKeyAsync(string userId, string name)
+    {
+        var key = $"sk_live_{Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))}";
+        var record = new ApiKey
+        {
+            KeyHash = hasher.HashApiKey(key),
+            KeyPrefix = key[..12],  // prefix for display and lookup
+            Name = name,
+            UserId = userId
+        };
+        db.ApiKeys.Add(record);
+        await db.SaveChangesAsync();
+        return (key, record);  // only return full key once — can't recover it
+    }
+
+    public async Task<ApiKey?> ValidateApiKeyAsync(string key)
+    {
+        var prefix = key[..12];
+        var candidates = await db.ApiKeys
+            .Where(k => k.KeyPrefix == prefix)
+            .ToListAsync();
+
+        var hash = hasher.HashApiKey(key);
+        return candidates.FirstOrDefault(k => k.KeyHash == hash);
+    }
+}
+```
+
+<ConceptCallout type="gotcha" title="Secrets Checklist">
+Before committing: ✅ No connection strings in `appsettings.json` (use `{Server}`, not actual values). ✅ No JWT keys, API keys, or OAuth secrets in code or config files. ✅ `.gitignore` includes `appsettings.*.json` if they contain secrets. ✅ No secrets in Docker images (use env vars or mounted secrets). ✅ Key Vault or equivalent in production. ✅ `git log` and `git diff` don't contain secrets.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Implement an API key authentication scheme: `ApiKeyAuthenticationHandler` that reads `X-API-Key` header, validates it against hashed keys in the database, and populates `ClaimsPrincipal`. Make it an alternative to JWT (both should work on the same app).
+2. Encrypt email addresses stored in the database using a Data Protection API `ValueConverter` in EF Core. Verify that the database contains ciphertext, but your service layer reads plaintext. Test that key rotation (simulated by changing the purpose string) invalidates old ciphertext.
+3. Configure your app to load secrets from three sources in order: `appsettings.json` → user secrets (dev) → Azure Key Vault (prod). Write a test that verifies the correct source is used in each environment without actually connecting to Azure.
+</ExerciseBlock>

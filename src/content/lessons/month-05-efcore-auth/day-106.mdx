@@ -1,0 +1,252 @@
+---
+title: "ASP.NET Core Identity"
+day: 106
+week: 22
+module: 9
+moduleName: "Auth and Security"
+phase: "dotnet"
+dartConcept: "Firebase Auth, custom auth in Flutter"
+csharpConcept: "IdentityUser, UserManager<T>, RoleManager<T>, SignInManager<T>, password hashing, claims"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+ASP.NET Core Identity is the complete membership system for .NET — user registration, login, password hashing, roles, claims, email confirmation, lockouts, two-factor auth, and external provider login. It integrates directly with EF Core for persistence.
+
+## Setup
+
+```bash
+dotnet add package Microsoft.AspNetCore.Identity.EntityFrameworkCore
+```
+
+```csharp
+// Custom user — extend IdentityUser for app-specific fields
+public class AppUser : IdentityUser
+{
+    // IdentityUser already has: Id, UserName, Email, PasswordHash,
+    // PhoneNumber, TwoFactorEnabled, LockoutEnd, AccessFailedCount, etc.
+
+    public required string DisplayName { get; set; }
+    public string? AvatarUrl { get; set; }
+    public DateTime JoinedAt { get; set; } = DateTime.UtcNow;
+    public bool IsActive { get; set; } = true;
+}
+
+// DbContext — extend IdentityDbContext
+public class AppDbContext : IdentityDbContext<AppUser>
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    // Identity already adds: AspNetUsers, AspNetRoles, AspNetUserRoles,
+    // AspNetUserClaims, AspNetUserLogins, AspNetUserTokens, AspNetRoleClaims
+}
+
+// Program.cs:
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite(connectionString));
+
+builder.Services.AddIdentity<AppUser, IdentityRole>(options =>
+{
+    // Password rules
+    options.Password.RequiredLength = 8;
+    options.Password.RequireDigit = true;
+    options.Password.RequireUppercase = false;
+    options.Password.RequireNonAlphanumeric = false;
+
+    // Lockout
+    options.Lockout.MaxFailedAccessAttempts = 5;
+    options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+
+    // User
+    options.User.RequireUniqueEmail = true;
+    options.SignIn.RequireConfirmedEmail = false;  // set true for production
+})
+.AddEntityFrameworkStores<AppDbContext>()
+.AddDefaultTokenProviders();  // for password reset, email confirmation
+```
+
+## Registration and Login
+
+```csharp
+// Registration endpoint
+app.MapPost("/api/auth/register", async (
+    RegisterRequest request,
+    UserManager<AppUser> userManager) =>
+{
+    // UserManager handles password hashing, validation, uniqueness
+    var user = new AppUser
+    {
+        UserName = request.Email,
+        Email = request.Email,
+        DisplayName = request.DisplayName
+    };
+
+    var result = await userManager.CreateAsync(user, request.Password);
+
+    if (!result.Succeeded)
+        return Results.ValidationProblem(result.Errors.ToDictionary(
+            e => e.Code, e => new[] { e.Description }));
+
+    // Optionally add to default role
+    await userManager.AddToRoleAsync(user, "User");
+
+    return Results.Created($"/api/users/{user.Id}", new { user.Id, user.Email });
+});
+
+// Login endpoint — returns JWT (covered in day-107)
+app.MapPost("/api/auth/login", async (
+    LoginRequest request,
+    UserManager<AppUser> userManager,
+    SignInManager<AppUser> signInManager,
+    IJwtService jwtService) =>
+{
+    var user = await userManager.FindByEmailAsync(request.Email);
+    if (user is null)
+        return Results.Unauthorized();
+
+    // CheckPasswordSignInAsync handles lockout tracking
+    var result = await signInManager.CheckPasswordSignInAsync(
+        user, request.Password, lockoutOnFailure: true);
+
+    if (result.IsLockedOut)
+        return Results.Problem("Account locked. Try again later.", statusCode: 429);
+
+    if (!result.Succeeded)
+        return Results.Unauthorized();
+
+    var token = await jwtService.GenerateTokenAsync(user);
+    return Results.Ok(new { token.AccessToken, token.ExpiresAt, user.Email, user.DisplayName });
+});
+```
+
+## UserManager — Managing Users
+
+```csharp
+// UserManager<T> has ~50 methods for all user operations
+public class UserService(UserManager<AppUser> userManager)
+{
+    // Find users
+    public Task<AppUser?> FindByIdAsync(string id)
+        => userManager.FindByIdAsync(id);
+
+    public Task<AppUser?> FindByEmailAsync(string email)
+        => userManager.FindByEmailAsync(email);
+
+    // Change password (requires current password)
+    public async Task<bool> ChangePasswordAsync(string userId, string current, string newPass)
+    {
+        var user = await userManager.FindByIdAsync(userId);
+        if (user is null) return false;
+        var result = await userManager.ChangePasswordAsync(user, current, newPass);
+        return result.Succeeded;
+    }
+
+    // Password reset flow
+    public async Task<string> GeneratePasswordResetTokenAsync(string email)
+    {
+        var user = await userManager.FindByEmailAsync(email)
+            ?? throw new KeyNotFoundException();
+        return await userManager.GeneratePasswordResetTokenAsync(user);
+    }
+
+    public async Task<bool> ResetPasswordAsync(string email, string token, string newPass)
+    {
+        var user = await userManager.FindByEmailAsync(email);
+        if (user is null) return false;
+        var result = await userManager.ResetPasswordAsync(user, token, newPass);
+        return result.Succeeded;
+    }
+
+    // Claims
+    public async Task AddClaimAsync(string userId, string type, string value)
+    {
+        var user = await userManager.FindByIdAsync(userId)!;
+        await userManager.AddClaimAsync(user!, new Claim(type, value));
+    }
+
+    // Roles
+    public async Task AddToRoleAsync(string userId, string role)
+    {
+        var user = await userManager.FindByIdAsync(userId)!;
+        await userManager.AddToRoleAsync(user!, role);
+    }
+}
+```
+
+## Roles and Claims
+
+```csharp
+// Seed roles on startup
+app.MapGet("/api/admin/seed-roles", async (RoleManager<IdentityRole> roleManager) =>
+{
+    string[] roles = ["Admin", "Author", "Moderator", "User"];
+    foreach (var role in roles)
+    {
+        if (!await roleManager.RoleExistsAsync(role))
+            await roleManager.CreateAsync(new IdentityRole(role));
+    }
+    return Results.Ok("Roles seeded");
+}).RequireAuthorization("Admin");
+
+// Authorization policies using roles and claims
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Admin", p => p.RequireRole("Admin"));
+    options.AddPolicy("Author", p => p.RequireRole("Admin", "Author"));
+    options.AddPolicy("VerifiedEmail", p => p.RequireClaim("email_verified", "true"));
+    options.AddPolicy("PremiumUser", p =>
+        p.RequireAssertion(ctx =>
+            ctx.User.IsInRole("Admin") ||
+            ctx.User.HasClaim("subscription", "premium")));
+});
+```
+
+## Email Confirmation
+
+```csharp
+// Generate confirmation token
+app.MapPost("/api/auth/confirm-email/send", async (
+    string email,
+    UserManager<AppUser> userManager,
+    IEmailService emailService,
+    LinkGenerator links) =>
+{
+    var user = await userManager.FindByEmailAsync(email);
+    if (user is null) return Results.Ok();  // don't reveal if email exists
+
+    var token = await userManager.GenerateEmailConfirmationTokenAsync(user);
+    var confirmUrl = links.GetUriByName("ConfirmEmail",
+        new { userId = user.Id, token = Uri.EscapeDataString(token) })!;
+
+    await emailService.SendAsync(email, "Confirm your email",
+        $"Click here to confirm: {confirmUrl}");
+
+    return Results.Ok();
+});
+
+app.MapGet("/api/auth/confirm-email", async (
+    string userId, string token,
+    UserManager<AppUser> userManager) =>
+{
+    var user = await userManager.FindByIdAsync(userId);
+    if (user is null) return Results.BadRequest();
+
+    var result = await userManager.ConfirmEmailAsync(user, Uri.UnescapeDataString(token));
+    return result.Succeeded ? Results.Ok("Email confirmed") : Results.BadRequest(result.Errors);
+}).WithName("ConfirmEmail");
+```
+
+<ConceptCallout type="tip" title="Identity vs Firebase Auth">
+Firebase Auth (common in Flutter) is a hosted identity service — you pay Firebase, and they handle storage. ASP.NET Core Identity is a library you embed in your own app, storing users in your own database. Identity gives more control (custom fields, rules, storage), while Firebase is faster to set up. For the Flutter + .NET full-stack app you'll build at day 130, you'll implement Identity in the backend and have your Flutter app call your JWT endpoints directly.
+</ConceptCallout>
+
+<ExerciseBlock>
+1. Set up ASP.NET Core Identity with a custom `AppUser` (add `DisplayName`, `ProfilePicture`, `LastLoginAt`). Create registration, login, and "get my profile" endpoints. Verify password hashing by inspecting the stored hash in the database.
+2. Implement the password reset flow: `POST /api/auth/forgot-password` generates a token and logs it (simulating email), `POST /api/auth/reset-password` accepts token + new password. Write a test that completes the full flow.
+3. Add role-based access: seed "Admin", "Author", and "Reader" roles. Create an admin endpoint that lists all users with their roles. Test that non-admin users receive 403 when accessing it.
+</ExerciseBlock>

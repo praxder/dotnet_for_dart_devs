@@ -1,0 +1,236 @@
+---
+title: "Async/Await Deep Dive: The State Machine"
+day: 52
+week: 11
+module: 5
+moduleName: "Async, Delegates & Advanced C#"
+phase: "csharp"
+dartConcept: "Dart async/await, Future, microtask queue"
+csharpConcept: "async state machine, Task, ValueTask, ConfigureAwait, SynchronizationContext"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+You already know the async/await syntax. This lesson goes deeper: how C# compiles async methods into state machines, when to use `ValueTask` over `Task`, and the role of `SynchronizationContext` — concepts that explain the "why" behind async patterns you'll see in production code.
+
+## The State Machine Under the Hood
+
+```csharp
+// What you write:
+public async Task<int> FetchCountAsync()
+{
+    var data = await GetDataAsync();
+    return data.Count;
+}
+
+// What the compiler generates (simplified):
+public Task<int> FetchCountAsync()
+{
+    var stateMachine = new FetchCountAsyncStateMachine { _this = this };
+    stateMachine.MoveNext();
+    return stateMachine._builder.Task;
+}
+
+private struct FetchCountAsyncStateMachine : IAsyncStateMachine
+{
+    public FetchCountAsyncSomeThing _this;
+    private int _state;
+    private AsyncTaskMethodBuilder<int> _builder;
+    private Task<Data> _awaiter;
+
+    public void MoveNext()
+    {
+        switch (_state)
+        {
+            case 0:
+                // Start GetDataAsync
+                var task = _this.GetDataAsync();
+                if (task.IsCompleted)
+                    goto case 1;  // Already done — no thread switch!
+                _state = 1;
+                _builder.AwaitUnsafeOnCompleted(ref task, ref this);
+                return;  // Suspend — scheduler will call MoveNext() later
+
+            case 1:
+                // Resumed — GetDataAsync completed
+                var data = _awaiter.GetResult();
+                _builder.SetResult(data.Count);
+                break;
+        }
+    }
+}
+```
+
+<ConceptCallout type="new" title="Key Insight: Await Is a Checkpoint, Not a Thread Block">
+`await` suspends the *current method* and returns control to the caller. No thread is blocked. When the awaited task completes, the state machine's `MoveNext()` is called again (possibly on a different thread). This is why `async` is more efficient than `Thread.Sleep()` or blocking `.Result`.
+</ConceptCallout>
+
+## ValueTask vs Task
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart: Future is always a heap object
+  Future<int> getValue() async {
+    return 42;  // Always allocates a Future
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // Task — always allocates a heap object (like Dart's Future)
+  async Task<int> GetValueTask()
+  {
+      return 42;  // Allocates a Task<int> object
+  }
+
+  // ValueTask — a struct, zero-allocation when result is synchronous
+  async ValueTask<int> GetValueFast()
+  {
+      return 42;  // No allocation if result already available!
+  }
+
+  // The real win: hot paths that often complete synchronously
+  private readonly Dictionary<string, Data> _cache = new();
+
+  async ValueTask<Data> GetDataAsync(string key)
+  {
+      // Cache hit — synchronous, no allocation
+      if (_cache.TryGetValue(key, out var cached))
+          return cached;  // ValueTask wraps the value directly
+
+      // Cache miss — actually async
+      var data = await FetchFromDatabaseAsync(key);
+      _cache[key] = data;
+      return data;
+  }
+  ```
+  </div>
+</CodeComparison>
+
+```csharp
+// ValueTask rules:
+// ✓ Use when the method often returns synchronously (cached results, simple checks)
+// ✓ Use in high-throughput scenarios where allocation matters
+// ✗ Do NOT await a ValueTask more than once
+// ✗ Do NOT store a ValueTask in a field and await later
+// ✗ Do NOT await the same ValueTask concurrently
+
+// Correct — await immediately:
+var result = await GetDataAsync("key");
+
+// WRONG — storing and awaiting twice:
+var vt = GetDataAsync("key");
+var r1 = await vt;  // OK
+var r2 = await vt;  // UNDEFINED BEHAVIOR — undefined behavior!
+```
+
+## ConfigureAwait(false)
+
+```csharp
+// In UI frameworks (WPF, WinForms, Xamarin/MAUI):
+// After await, the code resumes on the UI thread (via SynchronizationContext)
+// This is correct for code that updates the UI
+
+// In ASP.NET Core and libraries:
+// There's no UI thread to return to — resuming on ANY thread is fine
+// ConfigureAwait(false) skips the context capture → faster
+
+public async Task<Data> FetchDataAsync()
+{
+    // .ConfigureAwait(false) = "I don't care which thread I resume on"
+    var response = await httpClient.GetAsync(url).ConfigureAwait(false);
+    var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+    return ParseData(content);  // This runs on a thread pool thread — fine
+}
+
+// Rule: Library code → always ConfigureAwait(false)
+// Rule: App code (controllers, event handlers) → don't need it (ASP.NET Core has no context)
+// Rule: UI event handlers → omit it (need to return to UI thread)
+```
+
+## Parallel Async with Task.WhenAll
+
+```csharp
+// Sequential — each waits for the previous
+var user = await GetUserAsync(userId);
+var orders = await GetOrdersAsync(userId);
+var profile = await GetProfileAsync(userId);
+// Total time: time(user) + time(orders) + time(profile)
+
+// Parallel — all run simultaneously
+var userTask = GetUserAsync(userId);
+var ordersTask = GetOrdersAsync(userId);
+var profileTask = GetProfileAsync(userId);
+await Task.WhenAll(userTask, ordersTask, profileTask);
+// Total time: max(time(user), time(orders), time(profile))
+
+var user = userTask.Result;     // OK — already completed
+var orders = ordersTask.Result;
+var profile = profileTask.Result;
+
+// Cleaner with deconstruction (if all same type)
+var (a, b, c) = await (Task.WhenAll(taskA, taskB, taskC));
+// Not built-in — but easy to add as extension method
+
+// WhenAny — first to complete wins (race/timeout pattern)
+var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+var fetchTask = FetchSlowDataAsync(cts.Token);
+var timeoutTask = Task.Delay(5000, cts.Token);
+
+var winner = await Task.WhenAny(fetchTask, timeoutTask);
+if (winner == fetchTask)
+    Console.WriteLine(await fetchTask);
+else
+    Console.WriteLine("Timed out");
+```
+
+## Cancellation
+
+```csharp
+// CancellationToken is the standard way to cancel async operations
+public async Task<List<Result>> SearchAsync(
+    string query,
+    CancellationToken cancellationToken = default)
+{
+    var results = new List<Result>();
+
+    await foreach (var result in GetResultsAsync(query, cancellationToken))
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        results.Add(result);
+    }
+
+    return results;
+}
+
+// Caller creates and manages the CancellationTokenSource
+var cts = new CancellationTokenSource();
+
+// Cancel after 10 seconds
+cts.CancelAfter(TimeSpan.FromSeconds(10));
+
+try
+{
+    var results = await SearchAsync("query", cts.Token);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Search was cancelled");
+}
+finally
+{
+    cts.Dispose();
+}
+```
+
+<ExerciseBlock>
+1. Write a `RetryAsync<T>(Func<CancellationToken, Task<T>> operation, int maxAttempts, TimeSpan delay, CancellationToken ct)` method that retries on failure up to `maxAttempts` times, waiting `delay` between attempts.
+2. Implement a `Task.WhenAll` variation called `WhenAllSettled<T>(IEnumerable<Task<T>> tasks)` that returns ALL results (including exceptions), without throwing if any task fails. Return `(T? Result, Exception? Error)[]`.
+3. Write a `Throttle<T>(IEnumerable<Func<Task<T>>> tasks, int maxConcurrent)` method using `SemaphoreSlim` that runs tasks with at most `maxConcurrent` running at once.
+</ExerciseBlock>

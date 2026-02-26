@@ -1,0 +1,413 @@
+---
+title: "Constructors: Primary, Named, and Constructor Chaining"
+day: 23
+week: 5
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart this.field shorthand, named constructors, initializer lists"
+csharpConcept: "C# primary constructors (C# 12), constructor overloading, : this() chaining, : base()"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart has some of the most ergonomic constructor syntax in any language — `this.field` shorthand, named constructors, and initializer lists. C# has historically been more verbose, but C# 12 introduced primary constructors that bring it much closer to the Dart experience. There are still important differences to understand.
+
+## Dart Constructors: A Quick Recap
+
+Dart gives you several powerful constructor forms:
+
+```dart
+class Point {
+  final double x;
+  final double y;
+
+  // Primary constructor shorthand — assigns directly to fields
+  Point(this.x, this.y);
+
+  // Named constructor
+  Point.origin() : x = 0, y = 0;
+
+  // Named constructor with factory-like logic
+  Point.fromList(List<double> list) : x = list[0], y = list[1];
+
+  // Named constructor delegating to another
+  Point.unit() : this(1.0, 0.0);
+}
+```
+
+## Traditional C# Constructors
+
+Before C# 12, every constructor had to explicitly assign each field or property:
+
+```csharp
+public class Point
+{
+    public double X { get; }
+    public double Y { get; }
+
+    // Traditional constructor — explicit assignment
+    public Point(double x, double y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+```
+
+This is verbose but explicit. Every parameter has to be manually assigned. For a class with 10 properties, that is 10 lines of boilerplate.
+
+## Primary Constructors (C# 12)
+
+C# 12 introduced primary constructors, finally giving us something close to Dart's `this.field` shorthand. The parameters are declared on the class declaration line and are available throughout the class body.
+
+```csharp
+// C# 12 primary constructor
+public class Point(double x, double y)
+{
+    public double X { get; } = x;  // initialized from primary constructor param
+    public double Y { get; } = y;
+
+    // Parameters are in scope throughout the class
+    public double DistanceTo(Point other) =>
+        Math.Sqrt(Math.Pow(X - other.X, 2) + Math.Pow(Y - other.Y, 2));
+}
+```
+
+<ConceptCallout type="gotcha">
+C# primary constructor parameters are NOT automatically properties. In Dart, `this.x` both declares the field AND assigns the parameter. In C#, you still need to declare the property separately and initialize it from the parameter. The primary constructor just removes the constructor body assignment boilerplate. If you do NOT create a property from the parameter, the parameter is still accessible in field initializers and method bodies — but it is captured as a hidden field, which can be confusing. Be explicit: always create a property.
+</ConceptCallout>
+
+<CodeComparison>
+  <div slot="dart">```dart
+class HttpClient {
+  final String baseUrl;
+  final Duration timeout;
+  final Map<String, String> headers;
+
+  // this.field shorthand — concise and explicit
+  HttpClient(
+    this.baseUrl, {
+    this.timeout = const Duration(seconds: 30),
+    this.headers = const {},
+  });
+}
+
+// Usage:
+final client = HttpClient(
+  'https://api.example.com',
+  timeout: Duration(seconds: 60),
+);
+```</div>
+  <div slot="csharp">```csharp
+// C# 12 primary constructor
+public class HttpClient(
+    string baseUrl,
+    TimeSpan? timeout = null,
+    Dictionary<string, string>? headers = null)
+{
+    public string BaseUrl { get; } = baseUrl;
+    public TimeSpan Timeout { get; } = timeout ?? TimeSpan.FromSeconds(30);
+    public Dictionary<string, string> Headers { get; } =
+        headers ?? new Dictionary<string, string>();
+}
+
+// Usage:
+var client = new HttpClient(
+    "https://api.example.com",
+    timeout: TimeSpan.FromSeconds(60)
+);
+```</div>
+</CodeComparison>
+
+## Constructor Overloading
+
+C# has no named constructors. Instead, you overload — multiple constructors with different parameter lists:
+
+```csharp
+public class Connection
+{
+    public string Host { get; }
+    public int Port { get; }
+    public bool UseSsl { get; }
+
+    // Full constructor
+    public Connection(string host, int port, bool useSsl)
+    {
+        Host = host;
+        Port = port;
+        UseSsl = useSsl;
+    }
+
+    // Overload — delegates to full constructor
+    public Connection(string host, int port) : this(host, port, useSsl: true)
+    {
+    }
+
+    // Overload — defaults to standard HTTPS port
+    public Connection(string host) : this(host, 443)
+    {
+    }
+}
+
+// All of these work:
+var c1 = new Connection("db.example.com", 5432, false);
+var c2 = new Connection("db.example.com", 5432);
+var c3 = new Connection("api.example.com");
+```
+
+## Constructor Chaining with `: this(...)`
+
+The `: this(...)` syntax calls another constructor in the same class. This is the C# equivalent of Dart's `: this(...)` delegation in named constructors. All the real initialization logic lives in one constructor, others delegate to it.
+
+```csharp
+public class Logger
+{
+    public string Name { get; }
+    public LogLevel MinLevel { get; }
+    public bool TimestampEnabled { get; }
+
+    // The "canonical" constructor — all initialization here
+    public Logger(string name, LogLevel minLevel, bool timestampEnabled)
+    {
+        Name = name;
+        MinLevel = minLevel;
+        TimestampEnabled = timestampEnabled;
+    }
+
+    // Convenience overloads chain to the canonical constructor
+    public Logger(string name, LogLevel minLevel)
+        : this(name, minLevel, timestampEnabled: true)
+    {
+    }
+
+    public Logger(string name)
+        : this(name, LogLevel.Information)
+    {
+    }
+
+    // Static factory method — the C# replacement for Dart's named constructors
+    public static Logger ForType<T>() => new Logger(typeof(T).Name);
+}
+```
+
+<ConceptCallout type="different">
+Dart has named constructors: `Logger.forType()`, `Logger.silent()`, `Logger.verbose()`. C# does NOT have named constructors. The two replacements are: constructor overloading (when parameter types/counts differ) and static factory methods (when you need descriptive names or complex logic). Static factory methods are preferred in most cases because they are self-documenting.
+</ConceptCallout>
+
+## Calling Base Constructors with `: base(...)`
+
+When a class inherits from another, you call the parent's constructor with `: base(...)`:
+
+```csharp
+public class Animal
+{
+    public string Name { get; }
+    public int Age { get; }
+
+    public Animal(string name, int age)
+    {
+        Name = name;
+        Age = age;
+    }
+}
+
+public class Dog : Animal
+{
+    public string Breed { get; }
+
+    public Dog(string name, int age, string breed)
+        : base(name, age)   // call Animal's constructor
+    {
+        Breed = breed;
+    }
+
+    // Convenience overload
+    public Dog(string name, string breed)
+        : this(name, 0, breed)  // chain to full Dog constructor
+    {
+    }
+}
+```
+
+<DartEquivalent>
+In Dart you call the superclass constructor with `: super(name, age)` or using `super.name` parameter forwarding (Dart 2.17+). C# uses `: base(...)`. Both work the same way. In C#, if you do not call `: base(...)` and the parent has no parameterless constructor, you get a compile error.
+</DartEquivalent>
+
+## Static Factory Methods — The Named Constructor Replacement
+
+This is the idiomatic C# replacement for Dart's named constructors. Static methods that create and return instances are just as expressive and provide more flexibility:
+
+```csharp
+public class Color
+{
+    public byte R { get; }
+    public byte G { get; }
+    public byte B { get; }
+
+    private Color(byte r, byte g, byte b)   // private constructor
+    {
+        R = r; G = g; B = b;
+    }
+
+    // Dart equivalent: Color.fromRgb(r, g, b)
+    public static Color FromRgb(byte r, byte g, byte b) => new(r, g, b);
+
+    // Dart equivalent: Color.fromHex('#FF5733')
+    public static Color FromHex(string hex)
+    {
+        hex = hex.TrimStart('#');
+        return new Color(
+            Convert.ToByte(hex[..2], 16),
+            Convert.ToByte(hex[2..4], 16),
+            Convert.ToByte(hex[4..6], 16)
+        );
+    }
+
+    // Dart equivalent: Color.red()
+    public static Color Red => new(255, 0, 0);
+    public static Color Green => new(0, 255, 0);
+    public static Color Blue => new(0, 0, 255);
+    public static Color Black => new(0, 0, 0);
+    public static Color White => new(255, 255, 255);
+}
+
+// Usage:
+var red = Color.FromRgb(255, 0, 0);
+var coral = Color.FromHex("#FF7F50");
+var white = Color.White;
+```
+
+<ConceptCallout type="tip">
+Making the constructor `private` and forcing all creation through static factory methods is a clean pattern. It gives you: descriptive names, ability to return cached instances, ability to return subtypes, and easy future extensibility. ASP.NET Core and .NET standard library use this pattern extensively — look at `Task.FromResult()`, `HttpContent.ReadFromJsonAsync()`, `JsonSerializer.Deserialize()`.
+</ConceptCallout>
+
+## Initializer Lists and Field Initializers
+
+Dart has initializer lists (`: field = value` before the body). C# handles the same scenarios differently:
+
+```dart
+// Dart initializer list
+class Config {
+  final String host;
+  final int port;
+  final bool secure;
+
+  Config(String rawUrl)
+      : host = Uri.parse(rawUrl).host,
+        port = Uri.parse(rawUrl).port,
+        secure = rawUrl.startsWith('https');
+}
+```
+
+In C#, you either do it in the constructor body or use a helper method:
+
+```csharp
+public class Config
+{
+    public string Host { get; }
+    public int Port { get; }
+    public bool Secure { get; }
+
+    public Config(string rawUrl)
+    {
+        var uri = new Uri(rawUrl);
+        Host = uri.Host;
+        Port = uri.Port;
+        Secure = rawUrl.StartsWith("https", StringComparison.OrdinalIgnoreCase);
+    }
+}
+```
+
+## Object Initializers Preview
+
+You will also see classes initialized without any constructor parameters using object initializer syntax. This is covered in depth in Day 25, but it is good to know the full picture:
+
+```csharp
+// No custom constructor needed when using object initializers
+public class UserSettings
+{
+    public string Theme { get; set; } = "Light";
+    public int FontSize { get; set; } = 14;
+    public bool NotificationsEnabled { get; set; } = true;
+}
+
+var settings = new UserSettings
+{
+    Theme = "Dark",
+    FontSize = 16,
+    // NotificationsEnabled left at default: true
+};
+```
+
+<ExerciseBlock>
+**Exercise: Build a Money Type**
+
+Create a `Money` class with the following requirements:
+
+1. Private constructor taking `decimal amount` and `string currency`.
+2. `Amount` and `Currency` as read-only properties.
+3. Static factory methods: `Money.FromUsd(decimal amount)`, `Money.FromEur(decimal amount)`, `Money.FromGbp(decimal amount)`, and `Money.From(decimal amount, string currency)`.
+4. A constructor overload (using `: this(...)`) for `Money(decimal amount)` that defaults to USD.
+5. A static property `Money.Zero` that returns a $0.00 USD instance.
+6. `Add(Money other)` method that throws if currencies differ, otherwise returns a new `Money`.
+7. An override of `ToString()` that returns `"$10.50 USD"` style formatting.
+
+Write the full class, then demonstrate all factory methods and the `Add` method.
+</ExerciseBlock>
+
+## Full Example: Putting It Together
+
+```csharp
+public class DatabaseConnection(string host, int port, string database)
+{
+    public string Host { get; } = host;
+    public int Port { get; } = port;
+    public string Database { get; } = database;
+    public bool IsConnected { get; private set; }
+
+    // Constructor chaining
+    public DatabaseConnection(string host, string database)
+        : this(host, 5432, database)
+    {
+    }
+
+    // Static factory methods (Dart named constructor equivalents)
+    public static DatabaseConnection Local(string database) =>
+        new DatabaseConnection("localhost", database);
+
+    public static DatabaseConnection FromConnectionString(string connectionString)
+    {
+        // Parse and extract host, port, database
+        var parts = ParseConnectionString(connectionString);
+        return new DatabaseConnection(parts.Host, parts.Port, parts.Database);
+    }
+
+    public async Task ConnectAsync()
+    {
+        // ... connection logic
+        IsConnected = true;
+    }
+
+    private static (string Host, int Port, string Database) ParseConnectionString(string cs)
+    {
+        // parsing logic
+        return ("localhost", 5432, "mydb");
+    }
+
+    public override string ToString() => $"{Host}:{Port}/{Database}";
+}
+```
+
+## Key Takeaways
+
+- C# 12 primary constructors reduce boilerplate but still require explicit property declarations.
+- C# has no named constructors — use static factory methods instead for descriptive creation.
+- Constructor overloading + `: this(...)` chaining replaces Dart's multiple named constructors.
+- `: base(...)` calls the parent constructor, same concept as Dart's `: super(...)`.
+- Static factory methods with private constructors are idiomatic C# and widely used in .NET.

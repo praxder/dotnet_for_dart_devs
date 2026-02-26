@@ -1,0 +1,341 @@
+---
+title: "Classes and Access Modifiers"
+day: 21
+week: 5
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart _ private convention, no access keywords"
+csharpConcept: "public, private, protected, internal, protected internal"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Access control is one of the first places C# feels meaningfully different from Dart. Where Dart uses a naming convention to signal privacy, C# uses explicit keywords that the compiler enforces. This is a more rigorous system — and once you understand it, you'll appreciate the clarity it provides in large codebases.
+
+## Dart's Convention-Based Privacy
+
+In Dart, visibility is tied to the library boundary. A member prefixed with `_` is private to the *library* (the file), not just the class. There are no keywords — the underscore is simply a convention that the compiler understands.
+
+```dart
+class BankAccount {
+  String owner;       // public — accessible anywhere
+  double _balance;    // private — accessible only within this library
+
+  BankAccount(this.owner, this._balance);
+
+  void deposit(double amount) => _balance += amount;
+}
+```
+
+This works well for small projects but becomes limiting when you need finer-grained control — for example, allowing a subclass to access a field but keeping it hidden from the rest of the world.
+
+## C#'s Explicit Access Keywords
+
+C# uses dedicated keywords placed before type or member declarations. The compiler enforces these at compile time with no ambiguity.
+
+```csharp
+public class BankAccount
+{
+    public string Owner { get; }
+    private double _balance;
+
+    public BankAccount(string owner, double balance)
+    {
+        Owner = owner;
+        _balance = balance;
+    }
+
+    public void Deposit(double amount) => _balance += amount;
+}
+```
+
+<ConceptCallout type="gotcha">
+In C#, if you omit an access modifier, the default is NOT public. For class members, the default is `private`. For top-level types (classes, interfaces), the default is `internal`. Always be explicit until this is muscle memory.
+</ConceptCallout>
+
+## The Five Access Levels
+
+### `private` — Class Scope Only
+
+The most restrictive level. Only accessible within the declaring class itself. This is the default for members.
+
+```csharp
+public class Engine
+{
+    private int _rpm;           // Only Engine can read/write this
+    private void FireCylinder() { } // Only Engine can call this
+
+    public void Accelerate()
+    {
+        _rpm += 100;
+        FireCylinder();
+    }
+}
+```
+
+### `protected` — Class and Subclasses
+
+Accessible within the declaring class AND any class that inherits from it. This has no direct Dart equivalent (Dart's `_` cuts off subclasses in other files).
+
+```csharp
+public class Vehicle
+{
+    protected int _fuelLevel = 100;  // Accessible to Vehicle and subclasses
+
+    public void Refuel() => _fuelLevel = 100;
+}
+
+public class Car : Vehicle
+{
+    public void Drive()
+    {
+        _fuelLevel -= 10;  // Works — Car inherits from Vehicle
+    }
+}
+
+public class Mechanic
+{
+    public void Check(Vehicle v)
+    {
+        // v._fuelLevel = 50; // ERROR — Mechanic is not a Vehicle subclass
+    }
+}
+```
+
+### `internal` — Assembly Scope
+
+This has **no Dart equivalent** and is a genuinely new concept. An `internal` member is accessible anywhere within the same *assembly* (compiled `.dll` or `.exe`), but not from other assemblies.
+
+Think of an assembly as a compiled project. In a solution with multiple projects, `internal` means "visible to my project, hidden from others."
+
+```csharp
+// In MyApp.Core project:
+internal class ConfigurationLoader
+{
+    internal string LoadConfig(string path) { ... }
+}
+
+// In MyApp.Api project (a different assembly):
+// var loader = new ConfigurationLoader(); // ERROR — not accessible
+```
+
+<ConceptCallout type="new">
+`internal` is extremely common in real C# codebases. Library authors use it to expose a clean public API while hiding implementation details from consumers. You will see it constantly in NuGet packages and ASP.NET Core internals.
+</ConceptCallout>
+
+### `public` — No Restrictions
+
+Accessible from anywhere — same class, subclasses, same assembly, other assemblies. This is what you want for your public API surface.
+
+```csharp
+public class Calculator
+{
+    public double Add(double a, double b) => a + b;
+    public double Subtract(double a, double b) => a - b;
+}
+```
+
+### `protected internal` — The Combination
+
+This modifier means `protected` OR `internal` — accessible from subclasses anywhere, OR from any code in the same assembly. It's the union of the two.
+
+```csharp
+public class BaseRepository
+{
+    protected internal void LogQuery(string sql)
+    {
+        // Accessible to: subclasses (in any assembly)
+        //                + anyone in the same assembly
+    }
+}
+```
+
+There is also `private protected` (C# 7.2) which means `protected` AND `internal` — only accessible from subclasses within the same assembly. This is the intersection.
+
+## Full Access Level Summary
+
+| Modifier | Same Class | Same Assembly | Subclass (any assembly) | Other Assemblies |
+|---|---|---|---|---|
+| `private` | Yes | No | No | No |
+| `private protected` | Yes | No | Same assembly only | No |
+| `protected` | Yes | No | Yes | No |
+| `internal` | Yes | Yes | No | No |
+| `protected internal` | Yes | Yes | Yes | No |
+| `public` | Yes | Yes | Yes | Yes |
+
+<DartEquivalent>
+Dart has two visibility levels: public (no underscore) and library-private (underscore prefix). C# has six levels with explicit keywords. Dart's `_prefix` is convention; C# keywords are compiler-enforced. Dart's `_` prevents access even from subclasses in other files — a stricter default. The concept closest to Dart's library-private is C#'s `internal`, but even that is broader (whole assembly, not just one file).
+</DartEquivalent>
+
+## Practical Class Design
+
+Here is how you apply these modifiers to a realistic class:
+
+```csharp
+public class UserService
+{
+    private readonly IUserRepository _repository;   // implementation detail
+    private readonly ILogger _logger;               // implementation detail
+
+    protected virtual string DefaultRole => "User"; // subclasses may need this
+
+    internal UserService(IUserRepository repository, ILogger logger)
+    {
+        // internal constructor — created only within this assembly (e.g., by DI container)
+        _repository = repository;
+        _logger = logger;
+    }
+
+    public async Task<User?> GetByIdAsync(int id)   // public API
+    {
+        _logger.LogInformation("Fetching user {Id}", id);
+        return await _repository.FindAsync(id);
+    }
+
+    private void ValidateId(int id)                 // private helper
+    {
+        if (id <= 0) throw new ArgumentException("ID must be positive.");
+    }
+}
+```
+
+<CodeComparison>
+  <div slot="dart">```dart
+class UserService {
+  final UserRepository _repository; // library-private
+  final Logger _logger;             // library-private
+
+  // No 'protected' concept — subclasses in other files can't see _repository
+  String get _defaultRole => 'User';
+
+  UserService(this._repository, this._logger);
+
+  Future<User?> getById(int id) async {
+    _logger.info('Fetching user $id');
+    return await _repository.find(id);
+  }
+
+  void _validateId(int id) {
+    if (id <= 0) throw ArgumentError('ID must be positive.');
+  }
+}
+```</div>
+  <div slot="csharp">```csharp
+public class UserService
+{
+    private readonly IUserRepository _repository;
+    private readonly ILogger _logger;
+
+    protected virtual string DefaultRole => "User";
+    // ^ subclasses in ANY file can access this
+
+    internal UserService(IUserRepository repository, ILogger logger)
+    {
+        _repository = repository;
+        _logger = logger;
+    }
+
+    public async Task<User?> GetByIdAsync(int id)
+    {
+        _logger.LogInformation("Fetching user {Id}", id);
+        return await _repository.FindAsync(id);
+    }
+
+    private void ValidateId(int id)
+    {
+        if (id <= 0) throw new ArgumentException("ID must be positive.");
+    }
+}
+```</div>
+</CodeComparison>
+
+## Access Modifiers on Types
+
+Access modifiers apply to top-level types too, not just members:
+
+```csharp
+public class PublicApi { }          // visible everywhere
+internal class HelperService { }    // visible only in this assembly
+// private class X { }             // ERROR — top-level classes can't be private
+
+public class Outer
+{
+    private class Inner { }         // nested classes CAN be private
+    protected class ProtectedHelper { }
+}
+```
+
+<ConceptCallout type="tip">
+Follow this rule of thumb: start with the most restrictive modifier that works, then loosen as needed. Default to `private`, use `internal` for assembly-wide helpers, `protected` for inheritance hooks, and `public` only for intentional API surface. This is the principle of least privilege applied to code.
+</ConceptCallout>
+
+## Naming Conventions
+
+C# has strong community conventions for naming private members:
+
+```csharp
+public class OrderProcessor
+{
+    private readonly IOrderRepository _orderRepository;  // _camelCase for private fields
+    private int _processedCount;
+
+    protected ILogger Logger { get; }  // PascalCase for protected/public
+
+    private const string DefaultStatus = "Pending";  // PascalCase for constants
+}
+```
+
+The `_camelCase` prefix for private fields is enforced by most C# style guides (including Microsoft's) and the default Roslyn analyzer rules.
+
+<ExerciseBlock>
+**Exercise: Refactor for Correct Access**
+
+Take this poorly-designed class and apply correct access modifiers:
+
+```csharp
+class OrderService
+{
+    IOrderRepository repository;
+    string connectionString;
+    int maxRetries = 3;
+
+    OrderService(IOrderRepository repository, string connectionString)
+    {
+        this.repository = repository;
+        this.connectionString = connectionString;
+    }
+
+    void RetryLogic() { }
+
+    Task SaveOrder(Order order) => repository.SaveAsync(order);
+
+    string BuildConnectionString(string host, int port) =>
+        $"Server={host};Port={port}";
+}
+```
+
+Tasks:
+1. The class should be usable from other assemblies.
+2. `repository` and `connectionString` are implementation details — hide them completely.
+3. `maxRetries` should be configurable by subclasses but not external code.
+4. `RetryLogic()` is only for internal use.
+5. `SaveOrder()` is the public API.
+6. `BuildConnectionString()` is a helper only used within the same assembly.
+
+Write the refactored class with correct access modifiers on every declaration.
+</ExerciseBlock>
+
+## Key Takeaways
+
+- Dart uses `_prefix` convention for library-private. C# uses explicit keywords enforced by the compiler.
+- `private` is C#'s strictest — class-scope only (similar to Dart's `_` but per-class, not per-file).
+- `protected` is new to you — accessible to subclasses across files/assemblies.
+- `internal` is a genuinely new concept — assembly-scope visibility, widely used in multi-project solutions.
+- Default for class members is `private`. Default for top-level types is `internal`.
+- Use `_camelCase` for private fields. Use `PascalCase` for everything else.

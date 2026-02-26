@@ -1,0 +1,207 @@
+---
+title: "Object Equality, GetHashCode, and IEquatable<T>"
+day: 35
+week: 7
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart == operator override, hashCode getter override"
+csharpConcept: "Equals(object?), GetHashCode(), IEquatable<T>, == operator overload"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+C# equality is more explicit and more complex than Dart's. Where Dart has you override `==` and `hashCode`, C# has you implement multiple methods, an interface, and optionally an operator. Records handle all this automatically — which is one of the main reasons to use them.
+
+## The Equality Contract
+
+In C#, three things must stay in sync:
+
+1. `Equals(object?)` — virtual method inherited from `object`
+2. `GetHashCode()` — virtual method inherited from `object`
+3. `==` operator — optional but expected by callers
+
+**The contract**: if `a.Equals(b)` is `true`, then `a.GetHashCode() == b.GetHashCode()` must also be `true`.
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  class Product {
+    final String id;
+    final String name;
+    final double price;
+
+    const Product({required this.id, required this.name, required this.price});
+
+    @override
+    bool operator ==(Object other) =>
+        other is Product && id == other.id;
+
+    @override
+    int get hashCode => id.hashCode;
+  }
+
+  // Usage
+  var a = Product(id: '1', name: 'Widget', price: 9.99);
+  var b = Product(id: '1', name: 'Widget', price: 9.99);
+  print(a == b); // true
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  public class Product : IEquatable<Product>
+  {
+      public string Id { get; init; }
+      public string Name { get; init; }
+      public decimal Price { get; init; }
+
+      // IEquatable<T> — type-safe, avoids boxing
+      public bool Equals(Product? other)
+          => other is not null && Id == other.Id;
+
+      // object.Equals — required override
+      public override bool Equals(object? obj)
+          => Equals(obj as Product);
+
+      // Must override when overriding Equals
+      public override int GetHashCode() => Id.GetHashCode();
+
+      // Optional — but expected by callers
+      public static bool operator ==(Product? a, Product? b)
+          => a is null ? b is null : a.Equals(b);
+      public static bool operator !=(Product? a, Product? b)
+          => !(a == b);
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="tip" title="Records Do All of This Automatically">
+`public record Product(string Id, string Name, decimal Price)` generates all four equality methods automatically, using ALL properties. If you only want equality by Id, use a regular class with `IEquatable<T>`. Records are for value equality across all fields.
+</ConceptCallout>
+
+## The Full Manual Implementation
+
+```csharp
+public class Customer : IEquatable<Customer>
+{
+    public Guid Id { get; init; }
+    public string Name { get; init; }
+    public string Email { get; init; }
+
+    public Customer(string name, string email)
+    {
+        Id = Guid.NewGuid();
+        Name = name;
+        Email = email;
+    }
+
+    // IEquatable<T> — primary implementation
+    // Use this signature to avoid boxing value types
+    public bool Equals(Customer? other)
+    {
+        if (other is null) return false;
+        if (ReferenceEquals(this, other)) return true;  // same object
+        return Id == other.Id;
+    }
+
+    // Required when overriding Equals
+    public override bool Equals(object? obj) => Equals(obj as Customer);
+
+    // Must be consistent with Equals
+    public override int GetHashCode() => Id.GetHashCode();
+
+    // Operators — consistent with Equals
+    public static bool operator ==(Customer? left, Customer? right)
+        => EqualityComparer<Customer>.Default.Equals(left, right);
+    public static bool operator !=(Customer? left, Customer? right)
+        => !(left == right);
+}
+```
+
+## Multi-Property Equality
+
+When equality depends on multiple properties:
+
+```csharp
+public class Address : IEquatable<Address>
+{
+    public string Street { get; init; }
+    public string City { get; init; }
+    public string PostalCode { get; init; }
+    public string Country { get; init; }
+
+    public bool Equals(Address? other)
+    {
+        if (other is null) return false;
+        if (ReferenceEquals(this, other)) return true;
+        return Street == other.Street
+            && City == other.City
+            && PostalCode == other.PostalCode
+            && Country == other.Country;
+    }
+
+    public override bool Equals(object? obj) => Equals(obj as Address);
+
+    // HashCode.Combine — the idiomatic way to combine multiple hash codes
+    public override int GetHashCode()
+        => HashCode.Combine(Street, City, PostalCode, Country);
+}
+```
+
+<ConceptCallout type="tip" title="Always Use HashCode.Combine">
+`HashCode.Combine(a, b, c, d)` is the .NET 6+ way to combine multiple hash codes correctly. Don't roll your own `^ << +` combinations — they usually have poor distribution. This is the equivalent of Dart's `Object.hash(a, b, c, d)`.
+</ConceptCallout>
+
+## Structural Equality for Collections
+
+Comparing collections by content (not reference) requires special handling:
+
+```csharp
+var a = new[] { 1, 2, 3 };
+var b = new[] { 1, 2, 3 };
+
+Console.WriteLine(a == b);                           // False (reference equality)
+Console.WriteLine(a.SequenceEqual(b));               // True (content equality)
+Console.WriteLine(Enumerable.SequenceEqual(a, b));  // True
+
+// For sets:
+var setA = new HashSet<int> { 1, 2, 3 };
+var setB = new HashSet<int> { 3, 1, 2 };
+Console.WriteLine(setA.SetEquals(setB));  // True (order doesn't matter)
+
+// For dictionaries — no built-in, write your own:
+bool DictionariesEqual<K, V>(Dictionary<K, V> a, Dictionary<K, V> b)
+    => a.Count == b.Count && a.All(kvp => b.TryGetValue(kvp.Key, out var v) && Equals(v, kvp.Value));
+```
+
+## `EqualityComparer<T>` — Custom Comparison Logic
+
+For cases where you need different equality semantics without modifying the class:
+
+```csharp
+// Case-insensitive string comparison for a HashSet
+var caseInsensitive = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+caseInsensitive.Add("Hello");
+Console.WriteLine(caseInsensitive.Contains("hello"));  // True
+
+// Custom comparer
+var byName = Comparer<Product>.Create((a, b) => string.Compare(a.Name, b.Name));
+products.Sort(byName);
+
+// EqualityComparer for LINQ GroupBy
+var byCity = EqualityComparer<Address>.Create(
+    (a, b) => a?.City == b?.City,
+    a => a?.City?.GetHashCode() ?? 0);
+```
+
+<ExerciseBlock>
+1. Implement `IEquatable<Version>` on a `Version(int Major, int Minor, int Patch)` class. Two versions are equal if all three components match. Overload `==`, `!=`, `<`, `>`, `<=`, `>=` operators.
+2. Create a `CaseInsensitiveKey` struct that wraps a `string` and implements `IEquatable<CaseInsensitiveKey>` with case-insensitive comparison. Use it as the key in a `Dictionary<CaseInsensitiveKey, int>` and verify case-insensitive lookup works.
+3. Demonstrate why records should be used instead of manual equality: create the same `Money(decimal Amount, string Currency)` type as both a `class` (with full IEquatable implementation) and a `record`. Count the lines of code for each approach.
+</ExerciseBlock>

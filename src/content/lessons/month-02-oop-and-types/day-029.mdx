@@ -1,0 +1,254 @@
+---
+title: "Mixins and Default Interface Methods"
+day: 29
+week: 6
+module: 3
+moduleName: "OOP — Classes, Structs & Records"
+phase: "csharp"
+dartConcept: "Dart mixin keyword, mixin on restriction, with keyword"
+csharpConcept: "No native mixins; default interface methods and abstract classes as workarounds"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Dart's `mixin` system is one of its strongest features. C# has no native equivalent — this is a genuine gap. However, default interface methods (C# 8+) and abstract base classes can cover most use cases with more verbosity.
+
+## The Problem Mixins Solve
+
+Mixins let you compose behavior across unrelated class hierarchies:
+
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Dart mixin — composable behavior
+  mixin Serializable {
+    Map<String, dynamic> toJson();  // must implement
+
+    String toJsonString() => jsonEncode(toJson());
+
+    static T fromJsonString<T>(String s, T Function(Map) factory)
+        => factory(jsonDecode(s));
+  }
+
+  mixin Timestamped {
+    DateTime get createdAt;
+    DateTime get updatedAt;
+
+    bool get isRecent =>
+        DateTime.now().difference(updatedAt).inHours < 24;
+  }
+
+  // Compose freely with any class
+  class User with Serializable, Timestamped {
+    final String name;
+    @override final DateTime createdAt;
+    @override final DateTime updatedAt;
+
+    User(this.name, this.createdAt, this.updatedAt);
+
+    @override
+    Map<String, dynamic> toJson() => {
+      'name': name,
+      'createdAt': createdAt.toIso8601String(),
+    };
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // C# approach 1: default interface methods
+  public interface ISerializable
+  {
+      // Must implement
+      object ToJsonObject();
+
+      // Provided for free via default implementation
+      string ToJsonString()
+          => JsonSerializer.Serialize(ToJsonObject());
+  }
+
+  public interface ITimestamped
+  {
+      DateTime CreatedAt { get; }
+      DateTime UpdatedAt { get; }
+
+      // Default implementation
+      bool IsRecent => (DateTime.UtcNow - UpdatedAt).TotalHours < 24;
+  }
+
+  // Implement both interfaces
+  public class User : ISerializable, ITimestamped
+  {
+      public string Name { get; init; }
+      public DateTime CreatedAt { get; init; }
+      public DateTime UpdatedAt { get; init; }
+
+      // Must implement abstract part
+      public object ToJsonObject() => new { Name, CreatedAt };
+
+      // Gets ToJsonString() and IsRecent for free
+  }
+  ```
+  </div>
+</CodeComparison>
+
+<ConceptCallout type="different" title="C# Has No Mixin Keyword">
+C# doesn't have mixins. The closest approximations are: (1) default interface methods, (2) abstract base classes with partial implementations, (3) composition through helper classes. Each has tradeoffs. Dart's mixin system is genuinely more elegant for this pattern.
+</ConceptCallout>
+
+## Approach 1: Default Interface Methods
+
+```csharp
+// Mixin-like interface with default behavior
+public interface ILoggable
+{
+    string LogName { get; }
+
+    // "mixin method" — provided automatically
+    void LogInfo(string message)
+        => Console.WriteLine($"[{LogName}] INFO: {message}");
+
+    void LogError(string message)
+        => Console.WriteLine($"[{LogName}] ERROR: {message}");
+}
+
+public interface IHealthCheckable
+{
+    bool IsHealthy();
+
+    // Default health check reporting
+    string GetHealthReport()
+    {
+        var status = IsHealthy() ? "Healthy" : "Unhealthy";
+        return $"[{GetType().Name}] Status: {status}";
+    }
+}
+
+// Any class can get both behaviors
+public class ApiService : ILoggable, IHealthCheckable
+{
+    public string LogName => "ApiService";
+
+    private bool _connected = false;
+    public bool IsHealthy() => _connected;
+
+    public async Task StartAsync()
+    {
+        LogInfo("Starting...");
+        _connected = true;
+        LogInfo("Started");
+    }
+}
+
+var svc = new ApiService();
+svc.LogInfo("Hello");
+Console.WriteLine(svc.GetHealthReport());
+```
+
+## Approach 2: Abstract Base Class as Mixin
+
+When you need fields (which interfaces can't have), use an abstract class:
+
+```csharp
+// Abstract "mixin" base — provides state + behavior
+public abstract class AuditableBase
+{
+    public DateTime CreatedAt { get; private set; }
+    public DateTime UpdatedAt { get; private set; }
+    public string? CreatedBy { get; private set; }
+
+    protected AuditableBase()
+    {
+        CreatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    public void Touch(string? actor = null)
+    {
+        UpdatedAt = DateTime.UtcNow;
+        CreatedBy ??= actor;
+    }
+}
+
+// Inherit the audit behavior
+public class Article : AuditableBase
+{
+    public string Title { get; set; } = "";
+    public string Body { get; set; } = "";
+}
+
+var article = new Article { Title = "Hello" };
+article.Touch("admin");
+Console.WriteLine(article.UpdatedAt);
+```
+
+**Limitation**: C# has single inheritance — `Article` can only inherit from one abstract base. If you need multiple "mixins", use interfaces + composition.
+
+## Approach 3: Composition Helper
+
+When you truly need multiple behaviors with state, composition is cleaner than fighting the type system:
+
+```csharp
+// Instead of mixins, compose helper objects
+public class Entity
+{
+    private readonly AuditInfo _audit = new();
+    private readonly ValidationInfo _validation = new();
+
+    public AuditInfo Audit => _audit;
+    public ValidationInfo Validation => _validation;
+
+    public string Name { get; set; } = "";
+}
+
+public class AuditInfo
+{
+    public DateTime CreatedAt { get; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; private set; } = DateTime.UtcNow;
+    public void Touch() => UpdatedAt = DateTime.UtcNow;
+}
+
+// Usage
+var entity = new Entity();
+entity.Audit.Touch();
+```
+
+## What the .NET Ecosystem Actually Does
+
+Rather than mixin patterns, .NET code typically uses:
+
+1. **Extension methods** for stateless behavior
+2. **Interfaces** for contracts
+3. **Abstract base classes** for shared state/behavior within a hierarchy
+4. **`IDisposable`, `IComparable<T>`, `IEquatable<T>`** — the "standard mixins" built into .NET
+
+```csharp
+// The "mixin" pattern in .NET: implement standard interfaces
+public class Product : IComparable<Product>, IEquatable<Product>, IDisposable
+{
+    public string Name { get; init; }
+    public decimal Price { get; init; }
+
+    // Comparable — enables sorting
+    public int CompareTo(Product? other) => Price.CompareTo(other?.Price ?? 0);
+
+    // Equatable — value-based equality
+    public bool Equals(Product? other) => Name == other?.Name;
+    public override bool Equals(object? obj) => Equals(obj as Product);
+    public override int GetHashCode() => Name.GetHashCode();
+
+    // Disposable — cleanup
+    public void Dispose() { /* cleanup */ }
+}
+```
+
+<ExerciseBlock>
+1. Replicate a Dart mixin `JsonSerializable` using a default interface method. The interface requires `Dictionary<string, object> GetFields()` and provides `string ToJson()` and `void PrintJson()` as default methods. Implement it on `User` and `Product` classes.
+2. Create an abstract base class `ObservableBase` with a protected `OnPropertyChanged(string name)` method and a `PropertyChanged` event. Inherit from it in a `ViewModel` class and call `OnPropertyChanged` from a property setter — the WPF data binding pattern.
+3. Build a composition-based "mixin": a `Cacheable<T>` wrapper class that adds caching behavior to any `T` without inheritance. It caches the last result of `T.Compute()` and exposes `GetCached()`.
+</ExerciseBlock>

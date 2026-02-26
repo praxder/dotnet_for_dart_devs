@@ -1,0 +1,305 @@
+---
+title: ".NET Runtime: CLR, JIT, and Native AOT"
+day: 66
+week: 14
+module: 6
+moduleName: ".NET Ecosystem & Tooling"
+phase: "dotnet"
+dartConcept: "Dart VM, dart2native AOT compilation"
+csharpConcept: "CLR, JIT compilation, Native AOT, .NET versions"
+estimatedMinutes: 30
+isProject: false
+---
+
+import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
+import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
+import CodeComparison from '../../../components/lesson/CodeComparison.astro';
+import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
+
+Welcome to Module 6. You've spent three months learning the C# language itself — now it's time to understand the ecosystem that runs it. This module covers the tools, runtime, and infrastructure that make .NET applications work in the real world.
+
+We start where everything starts: the runtime itself.
+
+## The Mental Model: Dart VM vs CLR
+
+As a Dart developer, you already understand the concept of a managed runtime. When you run a Flutter app in debug mode, the **Dart VM** executes your code, handles garbage collection, and provides hot reload. The .NET equivalent is the **Common Language Runtime (CLR)**.
+
+<DartEquivalent>
+**Dart VM** manages Dart code execution: JIT compilation in debug mode, garbage collection, isolate scheduling, and the runtime type system.
+
+**CLR** manages .NET code execution: JIT compilation, garbage collection, thread management, type safety enforcement, and interop with native code.
+
+The mental model maps almost directly. If you understand what the Dart VM does, you understand what the CLR does.
+</DartEquivalent>
+
+## What the CLR Actually Does
+
+When you ship a .NET app, your C# source code is **not** compiled directly to machine code (in the default case). Instead, it compiles to **Intermediate Language (IL)**, also called CIL or MSIL. This is analogous to Dart's kernel bytecode — a platform-neutral representation of your program.
+
+```
+C# Source (.cs)
+      ↓  dotnet build / Roslyn compiler
+Intermediate Language (.dll assembly)
+      ↓  CLR loads it at runtime
+JIT Compiler (RyuJIT)
+      ↓  first time each method is called
+Native Machine Code (x64, ARM64, etc.)
+      ↓
+Execution
+```
+
+The CLR's key responsibilities:
+
+- **JIT Compilation** — Translating IL to native code on the fly
+- **Garbage Collection** — Automatic memory management (generational GC, similar to Dart's)
+- **Type Safety** — Enforcing the type system at runtime
+- **Exception Handling** — The structured try/catch/finally mechanism
+- **Thread Management** — The thread pool that powers `async`/`await`
+- **Security** — Code access security and verification
+
+## JIT Compilation: Just-In-Time
+
+In the default .NET execution model, methods are JIT-compiled the **first time they are called**. Subsequent calls use the cached native code. This is identical to how Dart's VM works in JIT mode.
+
+<ConceptCallout type="same">
+**Dart JIT and .NET JIT work the same way.** Both compile methods on first use, cache the result, and can perform speculative optimizations based on runtime profile data. Both are why "warmup time" matters for benchmarking — the first few calls to a method are slower.
+</ConceptCallout>
+
+The .NET JIT compiler is called **RyuJIT**. It's highly optimized and supports:
+
+- Tiered compilation (starts fast, re-optimizes hot methods)
+- SIMD vectorization
+- Inlining, loop unrolling, and other standard optimizations
+- Profile-guided optimization in the runtime
+
+## Assemblies: The .dll Files
+
+When you run `dotnet build`, you get `.dll` files. These are **assemblies** — the unit of deployment and versioning in .NET.
+
+<ConceptCallout type="different">
+In Dart, `dart compile` produces either a self-contained native binary or kernel snapshots. In .NET, `dotnet build` produces `.dll` files containing IL, which still need the .NET runtime installed on the target machine. A `.dll` is not a native executable — it's managed bytecode.
+
+The exception is **self-contained** and **Native AOT** deployments, covered below.
+</ConceptCallout>
+
+An assembly (`.dll`) contains:
+- **IL code** — The compiled bytecode
+- **Metadata** — Type information, method signatures, attributes (this enables reflection)
+- **Manifest** — Assembly name, version, dependencies
+- **Resources** — Embedded files, strings, etc.
+
+When you reference a NuGet package, you're getting its `.dll` assembly. Your app's `.dll` plus all its dependencies are what actually run.
+
+```bash
+# After dotnet build, your output directory contains:
+bin/Release/net9.0/
+  MyApp.dll          # Your app's IL code
+  MyApp.runtimeconfig.json   # Which .NET version to use
+  MyApp.deps.json    # Dependency graph
+  Newtonsoft.Json.dll  # NuGet dependency assemblies
+  # etc.
+
+# Run it:
+dotnet MyApp.dll
+```
+
+## Native AOT: Skip the JIT Entirely
+
+.NET 7 introduced production-ready **Native AOT** (Ahead-of-Time) compilation. This is the direct equivalent of `dart compile exe`.
+
+<CodeComparison>
+<Fragment slot="dart">
+```bash
+# Dart AOT compilation
+dart compile exe bin/main.dart -o myapp
+
+# Result: single native binary, no Dart VM needed
+./myapp
+```
+</Fragment>
+<Fragment slot="csharp">
+```xml
+<!-- In .csproj, enable Native AOT -->
+<PropertyGroup>
+  <PublishAot>true</PublishAot>
+</PropertyGroup>
+```
+
+```bash
+# Publish as native AOT
+dotnet publish -r linux-x64 -c Release
+
+# Result: single native binary, no .NET runtime needed
+./bin/Release/net9.0/linux-x64/publish/MyApp
+```
+</Fragment>
+</CodeComparison>
+
+**Native AOT trade-offs:**
+
+| Feature | JIT (.dll) | Native AOT |
+|---------|-----------|------------|
+| Startup time | Slower (JIT warmup) | Very fast |
+| Binary size | Small .dll, needs runtime | Larger self-contained binary |
+| Peak throughput | Higher (runtime optimization) | Slightly lower |
+| Reflection | Full support | Limited (trimming required) |
+| Deployment | Needs .NET runtime installed | Zero dependencies |
+| Build time | Fast | Slower (full compilation) |
+
+<ConceptCallout type="tip">
+Native AOT shines for **serverless functions** (AWS Lambda, Azure Functions), **CLI tools**, and **containers** where cold start time matters. For long-running ASP.NET Core servers, JIT with tiered compilation usually wins on throughput.
+</ConceptCallout>
+
+## Self-Contained Deployments (Middle Ground)
+
+Between "needs runtime installed" and "fully native AOT," there's a middle option:
+
+```bash
+# Self-contained: includes the .NET runtime in the output
+dotnet publish -r linux-x64 --self-contained true
+
+# Output includes your app + the entire .NET runtime (~70MB)
+# No .NET runtime installation needed on target machine
+# Still JIT-compiled at runtime, but from IL in the package
+```
+
+This is like shipping a Flutter app with the Dart VM embedded — bigger package, but no external dependency.
+
+## The Confusing History: .NET Framework, .NET Core, .NET Standard
+
+You'll encounter these terms in Stack Overflow answers, legacy codebases, and NuGet package descriptions. Here's the quick history:
+
+<ConceptCallout type="info">
+**The naming is genuinely confusing. Here's the cheat sheet:**
+
+- **.NET Framework** (1.0–4.8, 2002–2019) — Windows-only, legacy, still maintained but no new features. You probably won't write new code for it.
+- **.NET Core** (1.0–3.1, 2016–2020) — The cross-platform reboot. Fast, open source, Linux/Mac/Windows.
+- **.NET Standard** — Not a runtime, but a *specification*. A library targeting .NET Standard 2.0 works on both .NET Framework 4.6.1+ and .NET Core 2.0+. Used for shared libraries.
+- **.NET 5+** (2020–present) — Microsoft unified everything. ".NET 5" replaced ".NET Core 4" (they skipped "4" to avoid confusion with .NET Framework 4.x). Now just called ".NET."
+
+**Today: use the latest .NET LTS version.** Currently .NET 8 (LTS) or .NET 9. Ignore the Framework/Core/Standard distinction unless maintaining legacy code.
+</ConceptCallout>
+
+### Version Support Policy
+
+| Version | Type | End of Support |
+|---------|------|----------------|
+| .NET 6 | LTS | November 2024 |
+| .NET 8 | LTS | November 2026 |
+| .NET 9 | STS | May 2026 |
+| .NET 10 | LTS | November 2027 (expected) |
+
+**LTS** = Long-Term Support (3 years). **STS** = Standard-Term Support (18 months). For production, use LTS unless you need features from the latest STS.
+
+This mirrors Dart's own LTS/stable channel distinction, though .NET's cadence is annual releases.
+
+## Why .NET Is Cross-Platform Today
+
+The original .NET Framework was Windows-only. .NET Core (now just ".NET") was rebuilt from scratch to be cross-platform. The CLR itself runs on:
+
+- **Windows** — x64, x86, ARM64
+- **Linux** — x64, ARM64, ARM32 (perfect for containers and Raspberry Pi)
+- **macOS** — x64, ARM64 (Apple Silicon native)
+
+The same `.dll` assembly runs on all platforms without recompilation. This is the same promise as the Dart VM, but for server-side workloads. A Docker container running your ASP.NET Core app on Linux uses the exact same `.dll` you built on your Mac.
+
+```bash
+# Check your installed .NET SDKs
+dotnet --list-sdks
+
+# Check your installed runtimes
+dotnet --list-runtimes
+
+# Check active version
+dotnet --version
+```
+
+## The global.json File
+
+If you need to pin a project to a specific SDK version (useful in teams), use `global.json` at the solution root:
+
+```json
+{
+  "sdk": {
+    "version": "9.0.100",
+    "rollForward": "latestMinor"
+  }
+}
+```
+
+<ConceptCallout type="tip">
+`rollForward: "latestMinor"` means "use 9.0.x if 9.0.100 isn't installed, but don't roll to 9.1+." This is the most practical setting for teams — everyone uses the same major/minor, but patch versions are flexible.
+</ConceptCallout>
+
+## How This All Fits Together
+
+```
+Your C# Code
+     ↓ Roslyn Compiler (dotnet build)
+  IL Assembly (.dll)
+     ↓ CLR loads
+  RyuJIT compiles to native code
+     ↓
+  Your app runs with:
+  - GC managing memory
+  - Thread pool handling async
+  - Type system enforced
+  - Exceptions handled
+```
+
+For Native AOT:
+```
+Your C# Code
+     ↓ Roslyn + AOT Compiler (dotnet publish -aot)
+  Native Binary (no IL, no JIT needed)
+     ↓
+  Your app runs directly, fast startup
+```
+
+<ExerciseBlock>
+**Exercise 1: Explore your .NET installation**
+
+Run these commands and understand each output:
+
+```bash
+# 1. Check installed SDKs and runtimes
+dotnet --list-sdks
+dotnet --list-runtimes
+
+# 2. Create a minimal console app and inspect the build output
+dotnet new console -n RuntimeExplorer
+cd RuntimeExplorer
+dotnet build
+
+# 3. Look at what was built
+ls -la bin/Debug/net9.0/
+
+# 4. Examine the IL with dotnet-ildasm (if installed) or just inspect file sizes
+# The .dll is your app's IL assembly
+# The .runtimeconfig.json tells dotnet which runtime to use
+
+# 5. Run it both ways
+dotnet run
+dotnet bin/Debug/net9.0/RuntimeExplorer.dll
+```
+
+**Questions to answer:**
+- What files are in the build output directory?
+- How large is the `.dll` compared to a native AOT output?
+- Run `dotnet publish -r osx-arm64 --self-contained` and compare sizes
+
+**Bonus:** Try `dotnet publish -r osx-arm64 -c Release -p:PublishAot=true` and time the startup difference.
+</ExerciseBlock>
+
+## Summary
+
+| Concept | Dart Equivalent | .NET Term |
+|---------|----------------|-----------|
+| Dart VM | CLR | Common Language Runtime |
+| Kernel bytecode | IL / CIL | Intermediate Language |
+| dart2native / JIT mode | RyuJIT | Just-In-Time compiler |
+| `dart compile exe` | Native AOT | PublishAot |
+| `.dart_snapshot` | `.dll` assembly | Assembly |
+| `pubspec.yaml` sdk constraint | `global.json` | SDK version pinning |
+
+The CLR is a mature, highly optimized runtime with 20+ years of tuning behind it. As a Dart developer, you're already thinking in terms of managed runtimes — you just need to learn the .NET-specific names and behaviors. Next up: how to bring external code into your project with NuGet.
