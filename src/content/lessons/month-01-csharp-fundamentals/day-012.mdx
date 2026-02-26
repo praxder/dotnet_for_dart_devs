@@ -305,8 +305,8 @@ This single switch expression uses: type patterns, property patterns, positional
 Create a record `HttpResponse(int StatusCode, string Body, bool HasContent)`. Write a method `ClassifyResponse(HttpResponse response)` using a switch expression with property patterns that:
 - Matches `{ StatusCode: 200, HasContent: true }` → "Success with data"
 - Matches `{ StatusCode: 200, HasContent: false }` → "Success, no data"
-- Matches `{ StatusCode: >= 400 and < 500 }` → "Client error: {code}"
-- Matches `{ StatusCode: >= 500 }` → "Server error: {code}"
+- Matches `{ StatusCode: >= 400 and < 500 }` → "Client error: \{code\}"
+- Matches `{ StatusCode: >= 500 }` → "Server error: \{code\}"
 - Default → "Unexpected response"
 
 **Exercise 2: Expression Tree Evaluator**
@@ -326,12 +326,12 @@ Write a recursive `double Evaluate(Expr expr)` method using switch expression wi
 
 Write a method `DescribeSequence(int[] arr)` that uses list patterns to detect:
 - Empty array → "empty"
-- Single element → "singleton: {n}"
-- Two identical elements `[n, n]` → "pair of {n}"
+- Single element → "singleton: \{n\}"
+- Two identical elements `[n, n]` → "pair of \{n\}"
 - Starts with 0 → "zero-prefixed sequence"
 - Ends with 0 → "zero-terminated sequence"
 - Strictly increasing first three `[a, b, c, ..]` where `b > a && c > b` — use a `when` guard → "increasing start"
-- Everything else → "general sequence of length {n}"
+- Everything else → "general sequence of length \{n\}"
 </ExerciseBlock>
 
 ## Key Takeaways

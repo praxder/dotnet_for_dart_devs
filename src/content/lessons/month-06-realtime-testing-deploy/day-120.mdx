@@ -232,6 +232,6 @@ public class DailyReportJob(AppDbContext db, ILogger<DailyReportJob> logger) : I
 
 <ExerciseBlock>
 1. Add Hangfire to your blog API with PostgreSQL storage. Schedule recurring jobs: (a) "send daily post digest" at 8 AM, (b) "cleanup expired sessions" every hour, (c) "regenerate search index" every night. View them in the Hangfire dashboard.
-2. Implement "async email sending": instead of sending emails synchronously in your auth endpoints, enqueue Hangfire jobs. Verify that: registration still responds in <50ms, the email job runs in the background, and if the email fails it retries up to 3 times with increasing delays.
+2. Implement "async email sending": instead of sending emails synchronously in your auth endpoints, enqueue Hangfire jobs. Verify that: registration still responds in &lt;50ms, the email job runs in the background, and if the email fails it retries up to 3 times with increasing delays.
 3. Build a "batch import" endpoint: `POST /api/admin/import/posts` accepts a CSV file and enqueues a Hangfire job to process it. The endpoint returns a job ID immediately. Add `GET /api/admin/jobs/{jobId}` that returns the job's progress (pending/processing/succeeded/failed) by querying the Hangfire job state.
 </ExerciseBlock>

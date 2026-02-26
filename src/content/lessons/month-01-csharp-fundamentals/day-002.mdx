@@ -217,8 +217,8 @@ In Dart, `pubspec.yaml` uses caret syntax (`^1.1.0` means `>=1.1.0 <2.0.0`). NuG
 |----------|---------|
 | `13.0.3` | Minimum version 13.0.3 (no upper bound — floating) |
 | `[13.0.3]` | Exactly 13.0.3 |
-| `[13.0.0, 14.0.0)` | >= 13.0.0 and < 14.0.0 |
-| `[13.0.0, 14.0.0]` | >= 13.0.0 and <= 14.0.0 |
+| `[13.0.0, 14.0.0)` | &gt;= 13.0.0 and &lt; 14.0.0 |
+| `[13.0.0, 14.0.0]` | &gt;= 13.0.0 and &lt;= 14.0.0 |
 
 In practice, most teams just write the version number without brackets: `Version="13.0.3"`. NuGet will allow patch-level upgrades during restore.
 

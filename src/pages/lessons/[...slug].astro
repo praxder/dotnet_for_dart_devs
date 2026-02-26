@@ -1,13 +1,13 @@
 ---
 import { getCollection } from 'astro:content';
 import LessonLayout from '../../layouts/LessonLayout.astro';
-import { getAllLessons } from '../../lib/lessons';
+import { getAllLessons, getDaySlug } from '../../lib/lessons';
 import { getLessonNavigation } from '../../lib/navigation';
 
 export async function getStaticPaths() {
   const lessons = await getAllLessons();
   return lessons.map(lesson => ({
-    params: { slug: lesson.slug },
+    params: { slug: getDaySlug(lesson.data.day) },
     props: { lesson },
   }));
 }
