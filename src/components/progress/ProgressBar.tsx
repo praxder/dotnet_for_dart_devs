@@ -64,7 +64,7 @@ export default function ProgressBar({ compact = false }: Props) {
           return (
             <a
               key={mod.id}
-              href={`/modules/${mod.slug}`}
+              href={`${import.meta.env.BASE_URL}modules/${mod.slug}`}
               class="group flex items-center gap-3 p-3 rounded-lg bg-slate-800/50 hover:bg-slate-800 transition-colors"
             >
               <span class="text-xl">{mod.icon}</span>
