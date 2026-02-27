@@ -1,12 +1,12 @@
 ---
-title: "CQRS and MediatR"
+title: "Dapper: Repository Pattern"
 day: 97
 week: 20
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "BLoC pattern in Flutter, command/event separation"
-csharpConcept: "CQRS, MediatR, IRequest<T>, IRequestHandler<T>, pipeline behaviors, notifications"
+dartConcept: "repository pattern in Dart, data layer abstraction"
+csharpConcept: "IRepository<T>, IDbConnectionFactory, Unit of Work with Dapper, testability"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,275 +16,307 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-CQRS (Command Query Responsibility Segregation) separates reads from writes. In .NET, MediatR is the standard library that implements this — each operation becomes a self-contained class with a single handler, eliminating bloated service classes.
+The repository pattern abstracts data access behind an interface. With Dapper, repositories are simpler than with EF Core — no change tracking, no `SaveChanges`, just methods that run SQL. This makes them easy to write, test, and understand.
 
-## CQRS Concept
-
-<CodeComparison>
-  <div slot="dart">
-  ```dart
-  // Flutter BLoC — similar concept
-  // Events = Commands
-  abstract class OrderEvent {}
-  class PlaceOrderEvent extends OrderEvent {
-    final List<OrderItem> items;
-    PlaceOrderEvent(this.items);
-  }
-
-  // States = Query Results
-  class OrderBloc extends Bloc<OrderEvent, OrderState> {
-    OrderBloc() : super(OrderInitial()) {
-      on<PlaceOrderEvent>(_onPlaceOrder);
-    }
-    // Each event has a dedicated handler
-  }
-  ```
-  </div>
-  <div slot="csharp">
-  ```csharp
-  // CQRS: Commands change state, Queries return data
-  // MediatR routes requests to their handlers
-
-  // Command (write operation)
-  public record PlaceOrderCommand(
-      int CustomerId,
-      List<OrderItemDto> Items) : IRequest<int>;
-
-  // Query (read operation)
-  public record GetOrderQuery(int OrderId) : IRequest<OrderDto?>;
-
-  // Each has exactly one handler — no service bloat
-  ```
-  </div>
-</CodeComparison>
-
-## Setup
-
-```bash
-dotnet add package MediatR
-dotnet add package MediatR.Extensions.Microsoft.DependencyInjection
-```
+## IDbConnectionFactory — Injecting Connections Cleanly
 
 ```csharp
-// Register MediatR in Program.cs
-builder.Services.AddMediatR(cfg =>
-    cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
-```
+// Instead of injecting IConfiguration and creating connections manually everywhere,
+// register a connection factory in DI.
 
-## Commands — Write Operations
-
-```csharp
-// Command: intent to change state, returns result
-public record PlaceOrderCommand(
-    int CustomerId,
-    List<OrderItemDto> Items) : IRequest<PlaceOrderResult>;
-
-public record PlaceOrderResult(int OrderId, decimal Total);
-
-// Handler: all the business logic for this one operation
-public class PlaceOrderCommandHandler(AppDbContext db) : IRequestHandler<PlaceOrderCommand, PlaceOrderResult>
+public interface IDbConnectionFactory
 {
-    public async Task<PlaceOrderResult> Handle(
-        PlaceOrderCommand request,
-        CancellationToken cancellationToken)
-    {
-        // Validate inventory
-        var productIds = request.Items.Select(i => i.ProductId).ToList();
-        var products = await db.Products
-            .Where(p => productIds.Contains(p.Id))
-            .ToListAsync(cancellationToken);
+    IDbConnection CreateConnection();
+}
 
-        foreach (var item in request.Items)
+public class SqliteConnectionFactory(string connectionString) : IDbConnectionFactory
+{
+    public IDbConnection CreateConnection()
+        => new SqliteConnection(connectionString);
+}
+
+// SQL Server version:
+public class SqlServerConnectionFactory(string connectionString) : IDbConnectionFactory
+{
+    public IDbConnection CreateConnection()
+        => new SqlConnection(connectionString);
+}
+
+// Registration in Program.cs:
+builder.Services.AddSingleton<IDbConnectionFactory>(
+    new SqliteConnectionFactory(
+        builder.Configuration.GetConnectionString("Default")!));
+```
+
+## Generic Repository Interface
+
+```csharp
+// A simple generic interface — keep it minimal
+public interface IRepository<T, TKey> where T : class
+{
+    Task<T?> GetByIdAsync(TKey id);
+    Task<IEnumerable<T>> GetAllAsync();
+    Task<TKey> CreateAsync(T entity);
+    Task<bool> UpdateAsync(T entity);
+    Task<bool> DeleteAsync(TKey id);
+}
+```
+
+## Concrete Repository Implementation
+
+```csharp
+public interface IProductRepository : IRepository<Product, int>
+{
+    // Domain-specific queries beyond basic CRUD
+    Task<IEnumerable<Product>> GetActiveByCategoryAsync(int categoryId);
+    Task<IEnumerable<Product>> SearchAsync(string nameContains);
+    Task<bool> UpdateStockAsync(int id, int newQuantity);
+}
+
+public class ProductRepository(IDbConnectionFactory factory) : IProductRepository
+{
+    // ─── READ ───────────────────────────────────────────────────────
+
+    public async Task<Product?> GetByIdAsync(int id)
+    {
+        using var conn = factory.CreateConnection();
+        return await conn.QueryFirstOrDefaultAsync<Product>(
+            "SELECT id, name, price, category_id, stock_quantity, is_active FROM products WHERE id = @Id",
+            new { Id = id });
+    }
+
+    public async Task<IEnumerable<Product>> GetAllAsync()
+    {
+        using var conn = factory.CreateConnection();
+        return await conn.QueryAsync<Product>(
+            "SELECT id, name, price, category_id, stock_quantity, is_active FROM products ORDER BY name");
+    }
+
+    public async Task<IEnumerable<Product>> GetActiveByCategoryAsync(int categoryId)
+    {
+        using var conn = factory.CreateConnection();
+        return await conn.QueryAsync<Product>(
+            @"SELECT id, name, price, category_id, stock_quantity, is_active
+              FROM products
+              WHERE category_id = @CategoryId AND is_active = 1
+              ORDER BY name",
+            new { CategoryId = categoryId });
+    }
+
+    public async Task<IEnumerable<Product>> SearchAsync(string nameContains)
+    {
+        using var conn = factory.CreateConnection();
+        return await conn.QueryAsync<Product>(
+            "SELECT * FROM products WHERE name LIKE @Pattern AND is_active = 1",
+            new { Pattern = $"%{nameContains}%" });
+    }
+
+    // ─── WRITE ──────────────────────────────────────────────────────
+
+    public async Task<int> CreateAsync(Product product)
+    {
+        using var conn = factory.CreateConnection();
+        return await conn.QuerySingleAsync<int>(@"
+            INSERT INTO products (name, price, category_id, stock_quantity, is_active)
+            VALUES (@Name, @Price, @CategoryId, @StockQuantity, @IsActive);
+            SELECT last_insert_rowid();",
+            product);
+    }
+
+    public async Task<bool> UpdateAsync(Product product)
+    {
+        using var conn = factory.CreateConnection();
+        var affected = await conn.ExecuteAsync(@"
+            UPDATE products
+            SET name           = @Name,
+                price          = @Price,
+                category_id    = @CategoryId,
+                stock_quantity = @StockQuantity,
+                is_active      = @IsActive
+            WHERE id = @Id",
+            product);
+        return affected > 0;
+    }
+
+    public async Task<bool> UpdateStockAsync(int id, int newQuantity)
+    {
+        using var conn = factory.CreateConnection();
+        var affected = await conn.ExecuteAsync(
+            "UPDATE products SET stock_quantity = @Qty WHERE id = @Id",
+            new { Qty = newQuantity, Id = id });
+        return affected > 0;
+    }
+
+    public async Task<bool> DeleteAsync(int id)
+    {
+        using var conn = factory.CreateConnection();
+        var affected = await conn.ExecuteAsync(
+            "DELETE FROM products WHERE id = @Id",
+            new { Id = id });
+        return affected > 0;
+    }
+}
+
+// Registration:
+builder.Services.AddScoped<IProductRepository, ProductRepository>();
+```
+
+## Repository With Transactions — Unit of Work Pattern
+
+```csharp
+// When multiple repositories need to share a transaction,
+// use a Unit of Work that owns the connection and transaction.
+
+public interface IUnitOfWork : IAsyncDisposable
+{
+    IProductRepository Products { get; }
+    IOrderRepository Orders { get; }
+    Task BeginAsync();
+    Task CommitAsync();
+    Task RollbackAsync();
+}
+
+public class UnitOfWork : IUnitOfWork
+{
+    private readonly IDbConnection _conn;
+    private IDbTransaction? _tx;
+
+    public UnitOfWork(IDbConnectionFactory factory)
+    {
+        _conn = factory.CreateConnection();
+        _conn.Open();
+
+        // Repositories share the same open connection
+        Products = new ProductRepository(_conn);
+        Orders   = new OrderRepository(_conn);
+    }
+
+    public IProductRepository Products { get; }
+    public IOrderRepository Orders { get; }
+
+    public Task BeginAsync()
+    {
+        _tx = _conn.BeginTransaction();
+        // Pass transaction to repositories
+        ((ProductRepository)Products).SetTransaction(_tx);
+        ((OrderRepository)Orders).SetTransaction(_tx);
+        return Task.CompletedTask;
+    }
+
+    public async Task CommitAsync()
+    {
+        if (_tx is null) throw new InvalidOperationException("No active transaction");
+        await _tx.CommitAsync();
+        _tx = null;
+    }
+
+    public async Task RollbackAsync()
+    {
+        if (_tx is not null)
         {
-            var product = products.First(p => p.Id == item.ProductId);
-            if (product.StockQuantity < item.Quantity)
-                throw new InsufficientStockException(product.Name);
-            product.StockQuantity -= item.Quantity;
+            await _tx.RollbackAsync();
+            _tx = null;
         }
-
-        var order = new Order
-        {
-            CustomerId = request.CustomerId,
-            Lines = request.Items.Select(i => new OrderLine
-            {
-                ProductId = i.ProductId,
-                Quantity = i.Quantity,
-                UnitPrice = products.First(p => p.Id == i.ProductId).Price
-            }).ToList()
-        };
-        order.Total = order.Lines.Sum(l => l.Quantity * l.UnitPrice);
-
-        db.Orders.Add(order);
-        await db.SaveChangesAsync(cancellationToken);
-
-        return new PlaceOrderResult(order.Id, order.Total);
     }
-}
-```
 
-## Queries — Read Operations
-
-```csharp
-// Query: intent to read, never modifies state
-public record GetOrderQuery(int OrderId) : IRequest<OrderDto?>;
-
-public record OrderDto(
-    int Id,
-    string CustomerName,
-    decimal Total,
-    string Status,
-    List<OrderLineDto> Lines);
-
-public record OrderLineDto(string ProductName, int Quantity, decimal UnitPrice);
-
-public class GetOrderQueryHandler(AppDbContext db) : IRequestHandler<GetOrderQuery, OrderDto?>
-{
-    public async Task<OrderDto?> Handle(GetOrderQuery request, CancellationToken ct)
-        => await db.Orders
-            .AsNoTracking()
-            .Where(o => o.Id == request.OrderId)
-            .Select(o => new OrderDto(
-                o.Id,
-                o.Customer!.Name,
-                o.Total,
-                o.Status.ToString(),
-                o.Lines.Select(l => new OrderLineDto(
-                    l.Product!.Name,
-                    l.Quantity,
-                    l.UnitPrice)).ToList()))
-            .FirstOrDefaultAsync(ct);
-}
-```
-
-## Using MediatR in Controllers / Minimal APIs
-
-```csharp
-// Minimal API — inject IMediator, dispatch requests
-var orders = app.MapGroup("/api/orders");
-
-orders.MapPost("/", async (PlaceOrderCommand command, IMediator mediator) =>
-{
-    var result = await mediator.Send(command);
-    return Results.Created($"/api/orders/{result.OrderId}", result);
-});
-
-orders.MapGet("/{id:int}", async (int id, IMediator mediator) =>
-{
-    var order = await mediator.Send(new GetOrderQuery(id));
-    return order is null ? Results.NotFound() : Results.Ok(order);
-});
-
-// Controller:
-[ApiController, Route("api/[controller]")]
-public class OrdersController(IMediator mediator) : ControllerBase
-{
-    [HttpPost]
-    public async Task<IActionResult> Place(PlaceOrderCommand command)
+    public async ValueTask DisposeAsync()
     {
-        var result = await mediator.Send(command);
-        return CreatedAtAction(nameof(Get), new { id = result.OrderId }, result);
-    }
-
-    [HttpGet("{id}")]
-    public async Task<ActionResult<OrderDto>> Get(int id)
-    {
-        var order = await mediator.Send(new GetOrderQuery(id));
-        return order is null ? NotFound() : Ok(order);
+        if (_tx is not null) await _tx.DisposeAsync();
+        if (_conn.State == ConnectionState.Open) _conn.Close();
+        _conn.Dispose();
     }
 }
 ```
 
-## Pipeline Behaviors — Cross-Cutting Concerns
-
-```csharp
-// Behaviors wrap every request — like middleware for MediatR
-// Add validation, logging, timing, caching without touching handlers
-
-// Logging behavior:
-public class LoggingBehavior<TRequest, TResponse>(
-    ILogger<LoggingBehavior<TRequest, TResponse>> logger)
-    : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>
-{
-    public async Task<TResponse> Handle(
-        TRequest request,
-        RequestHandlerDelegate<TResponse> next,
-        CancellationToken ct)
-    {
-        logger.LogInformation("Handling {RequestType}: {@Request}", typeof(TRequest).Name, request);
-        var sw = Stopwatch.StartNew();
-        var response = await next();  // call the handler
-        logger.LogInformation("Handled in {Elapsed}ms", sw.ElapsedMilliseconds);
-        return response;
-    }
-}
-
-// Validation behavior (with FluentValidation):
-public class ValidationBehavior<TRequest, TResponse>(
-    IEnumerable<IValidator<TRequest>> validators)
-    : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>
-{
-    public async Task<TResponse> Handle(
-        TRequest request,
-        RequestHandlerDelegate<TResponse> next,
-        CancellationToken ct)
-    {
-        if (!validators.Any()) return await next();
-
-        var context = new ValidationContext<TRequest>(request);
-        var failures = validators
-            .Select(v => v.Validate(context))
-            .SelectMany(r => r.Errors)
-            .Where(e => e is not null)
-            .ToList();
-
-        if (failures.Count > 0)
-            throw new ValidationException(failures);
-
-        return await next();
-    }
-}
-
-// Register behaviors (order matters — outermost first):
-builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
-builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
-```
-
-## Notifications — Publish/Subscribe
-
-```csharp
-// Notifications are broadcast to all handlers (events)
-public record OrderPlacedNotification(int OrderId, int CustomerId, decimal Total)
-    : INotification;
-
-// Multiple handlers can respond to the same notification
-public class SendOrderConfirmationEmailHandler(IEmailService email)
-    : INotificationHandler<OrderPlacedNotification>
-{
-    public async Task Handle(OrderPlacedNotification notification, CancellationToken ct)
-        => await email.SendOrderConfirmationAsync(notification.CustomerId, notification.OrderId);
-}
-
-public class UpdateLoyaltyPointsHandler(ILoyaltyService loyalty)
-    : INotificationHandler<OrderPlacedNotification>
-{
-    public async Task Handle(OrderPlacedNotification notification, CancellationToken ct)
-        => await loyalty.AddPointsAsync(notification.CustomerId, notification.Total);
-}
-
-// In the command handler, publish after saving:
-await db.SaveChangesAsync(ct);
-await mediator.Publish(
-    new OrderPlacedNotification(order.Id, order.CustomerId, order.Total), ct);
-```
-
-<ConceptCallout type="tip" title="CQRS vs BLoC">
-Flutter's BLoC pattern is architecturally similar to CQRS: events are commands, states represent query results, and Bloc handlers are like MediatR handlers. The key difference is that MediatR is request/response (one handler per request) while BLoC is more event-driven. Both achieve the same goal: decoupling UI/API from business logic.
+<ConceptCallout type="tip" title="Simple Repositories vs Unit of Work">
+For most operations (single-repository calls), you don't need a Unit of Work — just `using var conn = factory.CreateConnection()` in each repository method. Use the Unit of Work pattern only when you need coordinated multi-repository transactions. Keep the default case simple.
 </ConceptCallout>
 
+## Testing Repositories
+
+```csharp
+// Option 1: Fake repository (pure in-memory, no database)
+public class FakeProductRepository : IProductRepository
+{
+    private readonly List<Product> _products = [];
+    private int _nextId = 1;
+
+    public Task<Product?> GetByIdAsync(int id)
+        => Task.FromResult(_products.FirstOrDefault(p => p.Id == id));
+
+    public Task<IEnumerable<Product>> GetAllAsync()
+        => Task.FromResult<IEnumerable<Product>>(_products.ToList());
+
+    public Task<IEnumerable<Product>> GetActiveByCategoryAsync(int categoryId)
+        => Task.FromResult<IEnumerable<Product>>(
+            _products.Where(p => p.CategoryId == categoryId && p.IsActive).ToList());
+
+    public Task<IEnumerable<Product>> SearchAsync(string nameContains)
+        => Task.FromResult<IEnumerable<Product>>(
+            _products.Where(p => p.Name.Contains(nameContains, StringComparison.OrdinalIgnoreCase)).ToList());
+
+    public Task<int> CreateAsync(Product product)
+    {
+        product.Id = _nextId++;
+        _products.Add(product);
+        return Task.FromResult(product.Id);
+    }
+
+    public Task<bool> UpdateAsync(Product product)
+    {
+        var index = _products.FindIndex(p => p.Id == product.Id);
+        if (index < 0) return Task.FromResult(false);
+        _products[index] = product;
+        return Task.FromResult(true);
+    }
+
+    public Task<bool> UpdateStockAsync(int id, int newQuantity)
+    {
+        var product = _products.FirstOrDefault(p => p.Id == id);
+        if (product is null) return Task.FromResult(false);
+        product.StockQuantity = newQuantity;
+        return Task.FromResult(true);
+    }
+
+    public Task<bool> DeleteAsync(int id)
+    {
+        var product = _products.FirstOrDefault(p => p.Id == id);
+        if (product is null) return Task.FromResult(false);
+        _products.Remove(product);
+        return Task.FromResult(true);
+    }
+
+    // Test helper: seed data
+    public void Seed(params Product[] products)
+    {
+        foreach (var p in products)
+        {
+            p.Id = _nextId++;
+            _products.Add(p);
+        }
+    }
+}
+
+// Unit test using fake (no database):
+[Fact]
+public async Task GetActiveByCategoryAsync_ReturnsOnlyActiveProducts()
+{
+    var repo = new FakeProductRepository();
+    repo.Seed(
+        new Product { Name = "Active Widget", CategoryId = 1, IsActive = true },
+        new Product { Name = "Inactive Gadget", CategoryId = 1, IsActive = false },
+        new Product { Name = "Other Category", CategoryId = 2, IsActive = true }
+    );
+
+    var results = await repo.GetActiveByCategoryAsync(1);
+
+    Assert.Single(results);
+    Assert.Equal("Active Widget", results.First().Name);
+}
+```
+
 <ExerciseBlock>
-1. Refactor a simple CRUD service into CQRS with MediatR: implement `CreateProductCommand`, `UpdateProductCommand`, `DeleteProductCommand`, and `GetProductQuery`, `ListProductsQuery`. Each as a separate handler class.
-2. Add a `ValidationBehavior` that validates commands using FluentValidation before they reach the handler. Add a validator for `PlaceOrderCommand` that checks: customer ID > 0, items list not empty, quantities > 0.
-3. Implement the Observer pattern with notifications: when an order is placed, publish `OrderPlacedNotification` and handle it in two separate handlers — one sends a confirmation email (log the email), one reserves warehouse stock. Show that both handlers run independently.
+1. Create an `IDbConnectionFactory`, register it in DI, and update `ProductRepository` and `CustomerRepository` to inject it instead of `IConfiguration`. Verify they still work end-to-end through your API.
+2. Build `IOrderRepository` and `OrderRepository` with: `GetByIdAsync`, `GetByCustomerAsync(int customerId)`, `GetByStatusAsync(string status)`, `CreateAsync(Order)` (returns new ID), `UpdateStatusAsync(int id, string newStatus)`. Register and wire it to your Minimal API order endpoints.
+3. Write a `FakeOrderRepository` and use it to unit-test an `OrderService.CancelOrderAsync(int orderId)` method that: fetches the order, checks it's in a cancellable state (Pending or Processing), updates status to Cancelled, and returns the cancelled order. No database required in the test.
 </ExerciseBlock>

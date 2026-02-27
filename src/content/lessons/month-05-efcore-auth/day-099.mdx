@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Owned Entities, Value Objects, and DDD"
+title: "Dapper: Dynamic Queries with SqlBuilder"
 day: 99
 week: 20
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "embedded objects in Dart classes, value equality"
-csharpConcept: "owned entities, value objects, table splitting, JSON columns, DDD tactical patterns"
+dartConcept: "building dynamic queries in Dart, filter objects"
+csharpConcept: "Dapper SqlBuilder, dynamic WHERE, optional filters, search, pagination"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,222 +16,257 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-Domain-Driven Design (DDD) distinguishes between Entities (have identity) and Value Objects (defined by their values). EF Core has first-class support for mapping Value Objects as Owned Entities — embedded in the parent's table or in separate tables.
+Dynamic queries — where filters, sorting, and pagination change based on user input — are common in any real API. Dapper's `SqlBuilder` class helps you compose these queries cleanly without string concatenation fragility.
 
-## Value Objects — Immutable, Equality by Value
+## The Problem with Manual String Building
 
 ```csharp
-// A Value Object: no identity, equal if all properties match
-// Perfect for: Money, Address, DateRange, Coordinate, EmailAddress
-
-public record Money(decimal Amount, string Currency)
+// Manual approach: works, but fragile and hard to read
+public async Task<IEnumerable<Product>> SearchAsync(ProductFilter f)
 {
-    public Money Add(Money other)
+    var sql = "SELECT * FROM products WHERE 1=1";
+    var parameters = new DynamicParameters();
+
+    if (!string.IsNullOrWhiteSpace(f.Name))
     {
-        if (Currency != other.Currency)
-            throw new InvalidOperationException("Currency mismatch");
-        return new Money(Amount + other.Amount, Currency);
+        sql += " AND name LIKE @Name";
+        parameters.Add("@Name", $"%{f.Name}%");
     }
+    if (f.CategoryId.HasValue)
+    {
+        sql += " AND category_id = @CategoryId";
+        parameters.Add("@CategoryId", f.CategoryId);
+    }
+    // ... more conditions ...
+    sql += " ORDER BY name LIMIT @Limit OFFSET @Offset";
+    parameters.Add("@Limit", f.PageSize);
+    parameters.Add("@Offset", (f.Page - 1) * f.PageSize);
 
-    public static Money Zero(string currency) => new(0, currency);
-
-    public override string ToString() => $"{Amount:F2} {Currency}";
+    using var conn = Open();
+    return await conn.QueryAsync<Product>(sql, parameters);
 }
-
-public record Address(
-    string Street,
-    string City,
-    string State,
-    string PostalCode,
-    string Country);
-
-// These are records — value equality built in:
-var a = new Money(10m, "USD");
-var b = new Money(10m, "USD");
-Console.WriteLine(a == b);  // true — value equality, not reference equality
+// This works but is fragile: extra spaces, wrong clause ordering, easy to mess up
 ```
 
-## Owned Entities — Storing Value Objects in EF Core
+## Dapper SqlBuilder
 
 ```csharp
-// Entity that contains value objects
-public class Order
+// SqlBuilder composes SQL clauses cleanly
+// Install: already included with Dapper
+// using Dapper;  ← SqlBuilder is in the Dapper namespace
+
+public async Task<IEnumerable<Product>> SearchAsync(ProductFilter filter)
 {
-    public int Id { get; set; }
-    public int CustomerId { get; set; }
-    public Money Total { get; set; } = Money.Zero("USD");
-    public Address ShippingAddress { get; set; } = null!;
-    public Address? BillingAddress { get; set; }
+    using var conn = factory.CreateConnection();
+
+    var builder = new SqlBuilder();
+
+    // Define the template — /**where**/ and /**orderby**/ are replaced by SqlBuilder
+    var selector = builder.AddTemplate(@"
+        SELECT id, name, price, category_id, stock_quantity, is_active
+        FROM products
+        /**where**/
+        /**orderby**/
+        LIMIT @PageSize OFFSET @Offset",
+        new { filter.PageSize, Offset = (filter.Page - 1) * filter.PageSize });
+
+    // Add clauses conditionally — SqlBuilder handles AND/WHERE automatically
+    if (!string.IsNullOrWhiteSpace(filter.Name))
+        builder.Where("name LIKE @Name", new { Name = $"%{filter.Name}%" });
+
+    if (filter.CategoryId.HasValue)
+        builder.Where("category_id = @CategoryId", new { filter.CategoryId });
+
+    if (filter.MinPrice.HasValue)
+        builder.Where("price >= @MinPrice", new { filter.MinPrice });
+
+    if (filter.MaxPrice.HasValue)
+        builder.Where("price <= @MaxPrice", new { filter.MaxPrice });
+
+    if (filter.IsActive.HasValue)
+        builder.Where("is_active = @IsActive", new { IsActive = filter.IsActive.Value ? 1 : 0 });
+
+    // Whitelist sort column before adding it
+    var allowedSorts = new HashSet<string> { "name", "price", "created_at" };
+    var sortColumn = allowedSorts.Contains(filter.SortBy ?? "") ? filter.SortBy : "name";
+    builder.OrderBy($"{sortColumn} {(filter.SortDescending ? "DESC" : "ASC")}");
+
+    return await conn.QueryAsync<Product>(selector.RawSql, selector.Parameters);
 }
-
-// Configuration — OwnsOne maps to columns in the same table
-modelBuilder.Entity<Order>(entity =>
-{
-    // Money → columns: Total_Amount, Total_Currency
-    entity.OwnsOne(o => o.Total, money =>
-    {
-        money.Property(m => m.Amount).HasColumnName("total_amount").HasPrecision(18, 2);
-        money.Property(m => m.Currency).HasColumnName("total_currency").HasMaxLength(3);
-    });
-
-    // Address → columns: shipping_street, shipping_city, etc.
-    entity.OwnsOne(o => o.ShippingAddress, addr =>
-    {
-        addr.Property(a => a.Street).HasColumnName("shipping_street").HasMaxLength(200);
-        addr.Property(a => a.City).HasColumnName("shipping_city").HasMaxLength(100);
-        addr.Property(a => a.State).HasColumnName("shipping_state").HasMaxLength(100);
-        addr.Property(a => a.PostalCode).HasColumnName("shipping_postal").HasMaxLength(20);
-        addr.Property(a => a.Country).HasColumnName("shipping_country").HasMaxLength(3);
-    });
-
-    // Optional billing address — same pattern
-    entity.OwnsOne(o => o.BillingAddress);
-});
 ```
 
-## OwnsMany — Collections of Value Objects
+## SqlBuilder — The Full API
 
 ```csharp
-// Order with line items as owned entities
-public class Order
+var builder = new SqlBuilder();
+
+// /**where**/ → becomes WHERE clause (with proper AND joining)
+builder.Where("status = @Status", new { Status = "Active" });
+builder.Where("price > @Min", new { Min = 10m });
+// Result: WHERE status = @Status AND price > @Min
+
+// /**select**/ → custom SELECT columns
+builder.Select("id, name, price");
+builder.Select("category_id AS CategoryId");
+
+// /**orderby**/ → ORDER BY clause
+builder.OrderBy("name ASC");
+builder.OrderBy("price DESC");
+// Result: ORDER BY name ASC, price DESC
+
+// /**join**/ → JOIN clauses
+builder.Join("categories c ON c.id = p.category_id");
+builder.LeftJoin("inventory i ON i.product_id = p.id");
+
+// /**groupby**/ → GROUP BY clause
+builder.GroupBy("category_id");
+
+// /**having**/ → HAVING clause
+builder.Having("COUNT(*) > @MinCount", new { MinCount = 5 });
+
+// /**set**/ → SET clause (for UPDATE templates)
+builder.Set("name = @Name", new { Name = "Updated" });
+builder.Set("updated_at = @Now", new { Now = DateTime.UtcNow });
+```
+
+## Count Query with Same Filters
+
+```csharp
+// For pagination: run the same filters but count total rows
+public async Task<(IEnumerable<Product> Items, int Total)> SearchWithCountAsync(ProductFilter filter)
 {
-    public int Id { get; set; }
-    public List<OrderLine> Lines { get; set; } = [];
-}
+    using var conn = factory.CreateConnection();
 
-public class OrderLine  // value object (no navigation back to Order)
+    var builder = new SqlBuilder();
+
+    // Data query template
+    var dataQuery = builder.AddTemplate(@"
+        SELECT id, name, price, category_id
+        FROM products
+        /**where**/
+        /**orderby**/
+        LIMIT @PageSize OFFSET @Offset",
+        new { filter.PageSize, Offset = (filter.Page - 1) * filter.PageSize });
+
+    // Count query template — same builder, different template
+    var countQuery = builder.AddTemplate(@"
+        SELECT COUNT(*)
+        FROM products
+        /**where**/");
+
+    // Add filters once — applied to both templates
+    if (!string.IsNullOrWhiteSpace(filter.Name))
+        builder.Where("name LIKE @Name", new { Name = $"%{filter.Name}%" });
+
+    if (filter.CategoryId.HasValue)
+        builder.Where("category_id = @CategoryId", new { filter.CategoryId });
+
+    builder.OrderBy("name ASC");
+
+    // Execute both in one QueryMultiple call:
+    using var multi = await conn.QueryMultipleAsync(
+        dataQuery.RawSql + "; " + countQuery.RawSql,
+        dataQuery.Parameters);
+
+    var items = await multi.ReadAsync<Product>();
+    var total = await multi.ReadSingleAsync<int>();
+
+    return (items, total);
+}
+```
+
+## Full-Text Search Pattern
+
+```csharp
+// Simple LIKE-based search (works in any database)
+public async Task<IEnumerable<Product>> FullTextSearchAsync(string searchTerm)
 {
-    public int ProductId { get; set; }
-    public string ProductName { get; set; } = "";  // denormalized
-    public int Quantity { get; set; }
-    public Money UnitPrice { get; set; } = null!;
-}
-
-// OwnsMany → stored in a separate table, but owned by Order
-modelBuilder.Entity<Order>()
-    .OwnsMany(o => o.Lines, line =>
-    {
-        line.WithOwner().HasForeignKey("OrderId");
-        line.Property<int>("Id");  // shadow key
-        line.HasKey("Id");
-
-        line.OwnsOne(l => l.UnitPrice, p =>
+    using var conn = factory.CreateConnection();
+    return await conn.QueryAsync<Product>(@"
+        SELECT id, name, price, category_id,
+               -- Relevance scoring: title match is more important
+               CASE
+                   WHEN name LIKE @ExactMatch THEN 3
+                   WHEN name LIKE @StartsWith THEN 2
+                   ELSE 1
+               END AS Relevance
+        FROM products
+        WHERE name LIKE @Contains
+           OR description LIKE @Contains
+        ORDER BY Relevance DESC, name ASC
+        LIMIT 50",
+        new
         {
-            p.Property(m => m.Amount).HasColumnName("unit_price");
-            p.Property(m => m.Currency).HasColumnName("currency");
+            ExactMatch = searchTerm,
+            StartsWith = $"{searchTerm}%",
+            Contains = $"%{searchTerm}%"
         });
-    });
+}
+
+// SQL Server FTS (Full-Text Search) via CONTAINS / FREETEXT:
+var ftsResults = await conn.QueryAsync<Product>(@"
+    SELECT id, name, price
+    FROM products
+    WHERE CONTAINS(name, @SearchTerm)
+       OR FREETEXT(description, @SearchTerm)
+    ORDER BY name",
+    new { SearchTerm = searchTerm });
 ```
 
-## JSON Columns — EF Core 7+
+## Sorting — Whitelist Pattern
 
 ```csharp
-// Store complex objects as JSON in a single column
-// Perfect for configuration, metadata, or rarely-queried nested data
-
-public class Product
+// Safe dynamic sorting — validate the column, parameterize the direction
+public static class SortableColumns
 {
-    public int Id { get; set; }
-    public string Name { get; set; } = "";
-    public ProductAttributes Attributes { get; set; } = new();
-}
-
-public class ProductAttributes  // NOT an entity — stored as JSON
-{
-    public Dictionary<string, string> Tags { get; set; } = [];
-    public List<string> Colors { get; set; } = [];
-    public Dimensions? Dimensions { get; set; }
-    public string? Brand { get; set; }
-}
-
-public record Dimensions(double Width, double Height, double Depth, string Unit);
-
-// Configuration — single JSON column
-modelBuilder.Entity<Product>()
-    .OwnsOne(p => p.Attributes, attr =>
+    // Map user-facing sort keys to actual SQL column expressions
+    public static readonly Dictionary<string, string> Products = new(StringComparer.OrdinalIgnoreCase)
     {
-        attr.ToJson();  // stored as JSON in the column "attributes"
-    });
+        ["name"]         = "name",
+        ["price"]        = "price",
+        ["price_asc"]    = "price ASC",
+        ["price_desc"]   = "price DESC",
+        ["newest"]       = "created_at DESC",
+        ["oldest"]       = "created_at ASC",
+        ["stock"]        = "stock_quantity DESC",
+    };
+}
 
-// EF Core can query into JSON with LINQ (SQL Server 2022+ / PostgreSQL):
-var products = await db.Products
-    .Where(p => p.Attributes.Brand == "Acme")
-    .ToListAsync();
-// SQL: WHERE JSON_VALUE(attributes, '$.Brand') = 'Acme'
+public async Task<IEnumerable<Product>> GetSortedAsync(string? sortKey, int limit)
+{
+    var orderExpr = SortableColumns.Products.GetValueOrDefault(sortKey ?? "", "name");
 
-var colorful = await db.Products
-    .Where(p => p.Attributes.Colors.Contains("Red"))
-    .ToListAsync();
+    using var conn = factory.CreateConnection();
+    return await conn.QueryAsync<Product>(
+        $"SELECT * FROM products WHERE is_active = 1 ORDER BY {orderExpr} LIMIT @Limit",
+        new { Limit = limit });
+    // orderExpr comes from your whitelist dictionary — not from user input directly
+}
 ```
 
-## Table Splitting — Multiple Entities, One Table
+## Pagination Helper
 
 ```csharp
-// Share one table between a "header" entity and a "detail" entity
-// Useful when you often query header without detail (avoid loading large blobs)
-
-public class Article
+public record PageRequest(int Page = 1, int PageSize = 20)
 {
-    public int Id { get; set; }
-    public string Title { get; set; } = "";
-    public string Summary { get; set; } = "";
-    public DateTime PublishedAt { get; set; }
-    public ArticleContent Content { get; set; } = null!;  // large — loaded separately
+    public int Offset => (Page - 1) * PageSize;
+    public int Limit  => PageSize;
 }
 
-public class ArticleContent
+public record PagedResult<T>(
+    IReadOnlyList<T> Items,
+    int TotalCount,
+    int Page,
+    int PageSize)
 {
-    public int Id { get; set; }
-    public string Body { get; set; } = "";  // potentially megabytes
-    public string HtmlRendered { get; set; } = "";
+    public int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+    public bool HasNextPage => Page < TotalPages;
+    public bool HasPrevPage => Page > 1;
 }
-
-// Both entities map to the SAME table
-modelBuilder.Entity<Article>().ToTable("articles");
-modelBuilder.Entity<ArticleContent>().ToTable("articles");  // same table!
-modelBuilder.Entity<Article>()
-    .HasOne(a => a.Content)
-    .WithOne()
-    .HasForeignKey<ArticleContent>(c => c.Id);
-
-// Query without body:
-var headers = await db.Articles.AsNoTracking().ToListAsync();  // no ArticleContent loaded
-
-// Query with body:
-var full = await db.Articles.Include(a => a.Content).FirstOrDefaultAsync(a => a.Id == id);
 ```
-
-## Complex Types — EF Core 8
-
-```csharp
-// EF Core 8 introduces ComplexType — like OwnsOne but simpler
-// No table splitting, no key, just embedded columns
-
-[ComplexType]
-public class Money
-{
-    public decimal Amount { get; set; }
-    public string Currency { get; set; } = "USD";
-}
-
-public class Invoice
-{
-    public int Id { get; set; }
-    public Money Subtotal { get; set; } = new();  // columns: Subtotal_Amount, Subtotal_Currency
-    public Money Tax { get; set; } = new();
-    public Money Total { get; set; } = new();
-}
-
-// No configuration needed with [ComplexType] attribute
-// Automatically mapped to columns with underscore naming
-```
-
-<ConceptCallout type="tip" title="DDD with EF Core">
-Use **Owned Entities** (`OwnsOne`/`OwnsMany`) to map Value Objects without a separate identity. Use **JSON columns** (`ToJson()`) for nested structures you rarely query against. Use **Complex Types** (EF 8) for the simplest embedding with no overhead. Keep Aggregates in sync through the Aggregate Root — don't let external code modify owned entities directly.
-</ConceptCallout>
 
 <ExerciseBlock>
-1. Model an e-commerce `Customer` aggregate with `Address` (shipping), `PaymentMethod` (card type, last 4 digits), and `Preferences` (notification settings as JSON column). Configure all as owned types.
-2. Implement a `Money` value object with `Amount` and `Currency`. Add `Add`, `Multiply`, and `Convert(decimal rate, string toCurrency)` methods. Map it as an owned entity in `Order`, `Invoice`, and `Product.Price`. Verify EF generates the right column names.
-3. Use table splitting to separate `Article` header (title, slug, published date, category) from `Article` body (markdown content, HTML, word count). Write queries showing that listing articles doesn't load the body, but fetching a single article does.
+1. Build a `CustomerSearchHandler` using `SqlBuilder` that supports: optional name search (LIKE), optional email search (LIKE), optional `isActive` filter, optional minimum order count filter (requires JOIN to orders), sortable by name or join date, and paginated. Return both the customer list and total count in one `QueryMultiple` call.
+2. Add a relevance-scored product search endpoint `GET /api/products/search?q=...` that returns up to 50 results ranked by: exact name match (3 pts), name starts with (2 pts), name contains (1 pts), description contains (1 pt). Map results to `ProductSearchResultDto` with a `Relevance` field.
+3. Write a test that verifies SQL injection is impossible with your `SearchAsync` method. Pass `"'; DROP TABLE products; --"` as the search name filter. Verify: no exception, products table still exists, the malicious string was treated as a literal search term.
 </ExerciseBlock>

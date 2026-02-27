@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Raw SQL and Database Views"
+title: "Dapper: Stored Procedures and Advanced Queries"
 day: 95
 week: 19
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "drift custom queries, raw SQL in sqflite"
-csharpConcept: "FromSql, ExecuteSql, DbFunction, database views, stored procedures, Dapper"
+dartConcept: "raw SQL custom queries in sqflite, calling database functions"
+csharpConcept: "CommandType.StoredProcedure, output parameters, table-valued functions, CTEs, window functions"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,205 +16,261 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-EF Core generates SQL for most queries, but sometimes you need raw SQL — for complex aggregations, vendor-specific features, stored procedures, or when LINQ generates inefficient queries. EF Core provides safe, parameterized raw SQL alongside full Dapper integration.
+One of Dapper's biggest advantages over EF Core is that you can use the full power of SQL: stored procedures, CTEs, window functions, table-valued functions, and vendor-specific features. Dapper executes what you give it — no translation layer to fight.
 
-## FromSql — Entity Queries with Raw SQL
+## Calling Stored Procedures
 
 ```csharp
-// Returns tracked entities — same as LINQ queries
-// IMPORTANT: Use $"" interpolation — EF Core treats it as safe parameterized SQL
-var minPrice = 10m;
-var products = await db.Products
-    .FromSql($"SELECT * FROM products WHERE price >= {minPrice}")
-    .ToListAsync();
-// Generates: SELECT * FROM products WHERE price >= @p0
-// Parameter value is NEVER interpolated into SQL — protected from injection
+// Stored procedure with parameters
+public async Task<IEnumerable<Order>> GetOrdersByCustomerAsync(int customerId)
+{
+    using var conn = Open();
+    return await conn.QueryAsync<Order>(
+        "sp_GetOrdersByCustomer",          // procedure name
+        new { CustomerId = customerId },   // input parameters
+        commandType: CommandType.StoredProcedure);
+}
 
-// Combine with LINQ after FromSql
-var filtered = await db.Products
-    .FromSql($"SELECT * FROM products WHERE is_active = 1")
-    .Where(p => p.CategoryId == 5)       // added as WHERE clause
-    .OrderBy(p => p.Price)               // added as ORDER BY
-    .Take(20)
-    .ToListAsync();
-// SQL: SELECT * FROM (SELECT * FROM products WHERE is_active = 1)
-//      WHERE CategoryId = 5 ORDER BY Price LIMIT 20
+// Stored procedure returning no rows (just executes an action)
+public async Task ArchiveOldOrdersAsync(DateTime olderThan)
+{
+    using var conn = Open();
+    await conn.ExecuteAsync(
+        "sp_ArchiveOrders",
+        new { OlderThan = olderThan },
+        commandType: CommandType.StoredProcedure);
+}
+
+// Stored procedure with output parameters
+public async Task<(int OrderCount, decimal TotalRevenue)> GetCustomerStatsAsync(int customerId)
+{
+    using var conn = Open();
+
+    var parameters = new DynamicParameters();
+    parameters.Add("@CustomerId", customerId, DbType.Int32);
+    parameters.Add("@OrderCount",    dbType: DbType.Int32,    direction: ParameterDirection.Output);
+    parameters.Add("@TotalRevenue",  dbType: DbType.Decimal,  direction: ParameterDirection.Output);
+
+    await conn.ExecuteAsync(
+        "sp_GetCustomerStats",
+        parameters,
+        commandType: CommandType.StoredProcedure);
+
+    return (
+        parameters.Get<int>("@OrderCount"),
+        parameters.Get<decimal>("@TotalRevenue")
+    );
+}
 ```
 
-<ConceptCallout type="gotcha" title="FromSqlRaw vs FromSql">
-EF Core 8+ prefers `FromSql()` with interpolated strings (automatically parameterized). Older code uses `FromSqlRaw()` with `SqlParameter` objects. Never use `FromSqlRaw($"... {userInput}")` — that concatenates directly and causes SQL injection. When using `FromSqlRaw`, always pass parameters explicitly: `FromSqlRaw("SELECT * FROM products WHERE name = {0}", name)`.
-</ConceptCallout>
-
-## ExecuteSql — Non-Query Commands
+## Stored Procedure with Multiple Result Sets
 
 ```csharp
-// For UPDATE, DELETE, INSERT that don't return entities
+// One stored procedure, multiple SELECT statements
+public async Task<OrderDetailResponse> GetOrderDetailAsync(int orderId)
+{
+    using var conn = Open();
 
-// Bulk update without loading entities
-var cutoffDate = DateTime.UtcNow.AddDays(-90);
-int rowsAffected = await db.Database.ExecuteSqlAsync(
-    $"UPDATE orders SET status = 'Archived' WHERE created_at < {cutoffDate}");
+    using var multi = await conn.QueryMultipleAsync(
+        "sp_GetOrderDetail",
+        new { OrderId = orderId },
+        commandType: CommandType.StoredProcedure);
 
-// Bulk delete (EF Core 7+ also has ExecuteDeleteAsync via LINQ)
-await db.Database.ExecuteSqlAsync(
-    $"DELETE FROM audit_logs WHERE created_at < {DateTime.UtcNow.AddYears(-1)}");
+    var order    = await multi.ReadSingleOrDefaultAsync<Order>();
+    var lines    = await multi.ReadAsync<OrderLine>();
+    var customer = await multi.ReadSingleOrDefaultAsync<Customer>();
 
-// EF Core 7+ — LINQ-based bulk operations (no SQL needed):
-await db.AuditLogs
-    .Where(a => a.CreatedAt < DateTime.UtcNow.AddYears(-1))
-    .ExecuteDeleteAsync();  // single DELETE SQL, no entity loading
+    if (order is null) return OrderDetailResponse.NotFound;
 
-await db.Products
-    .Where(p => p.CategoryId == 5)
-    .ExecuteUpdateAsync(setters => setters
-        .SetProperty(p => p.IsActive, false)
-        .SetProperty(p => p.UpdatedAt, DateTime.UtcNow));
-// Single UPDATE SQL: UPDATE products SET is_active=0, updated_at=@p WHERE category_id=5
+    return new OrderDetailResponse(order, lines.ToList(), customer);
+}
 ```
 
-## Stored Procedures
+## Common Table Expressions (CTEs)
 
 ```csharp
-// Call a stored procedure that returns entities
-var customerId = 42;
-var orders = await db.Orders
-    .FromSql($"EXEC sp_GetOrdersByCustomer {customerId}")
-    .ToListAsync();
+// CTEs make complex queries readable — Dapper just sends the SQL
+public async Task<IEnumerable<CustomerRanking>> GetTopCustomersAsync(int topN)
+{
+    using var conn = Open();
+    return await conn.QueryAsync<CustomerRanking>(@"
+        WITH CustomerStats AS (
+            SELECT
+                c.id           AS CustomerId,
+                c.name         AS CustomerName,
+                COUNT(o.id)    AS OrderCount,
+                SUM(o.total)   AS TotalSpent
+            FROM customers c
+            LEFT JOIN orders o ON o.customer_id = c.id
+              AND o.status != 'Cancelled'
+            GROUP BY c.id, c.name
+        ),
+        Ranked AS (
+            SELECT
+                *,
+                RANK() OVER (ORDER BY TotalSpent DESC) AS SpendingRank
+            FROM CustomerStats
+        )
+        SELECT *
+        FROM Ranked
+        WHERE SpendingRank <= @TopN
+        ORDER BY SpendingRank",
+        new { TopN = topN });
+}
 
-// For stored procedures that don't return entity shape — use keyless entity
-[Keyless]  // no primary key
-public class SalesReport
+public class CustomerRanking
+{
+    public int CustomerId { get; set; }
+    public string CustomerName { get; set; } = "";
+    public int OrderCount { get; set; }
+    public decimal TotalSpent { get; set; }
+    public int SpendingRank { get; set; }
+}
+```
+
+## Window Functions
+
+```csharp
+// Running totals, rankings, moving averages — all work in Dapper
+public async Task<IEnumerable<MonthlySalesRow>> GetMonthlySalesWithRunningTotalAsync()
+{
+    using var conn = Open();
+    return await conn.QueryAsync<MonthlySalesRow>(@"
+        SELECT
+            strftime('%Y-%m', ordered_at) AS Month,
+            COUNT(*)                       AS OrderCount,
+            SUM(total)                     AS MonthlyRevenue,
+            SUM(SUM(total)) OVER (
+                ORDER BY strftime('%Y-%m', ordered_at)
+            )                              AS RunningTotal,
+            AVG(SUM(total)) OVER (
+                ORDER BY strftime('%Y-%m', ordered_at)
+                ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+            )                              AS MovingAvg3Month
+        FROM orders
+        WHERE status = 'Completed'
+        GROUP BY strftime('%Y-%m', ordered_at)
+        ORDER BY Month");
+}
+
+public class MonthlySalesRow
 {
     public string Month { get; set; } = "";
-    public decimal Revenue { get; set; }
     public int OrderCount { get; set; }
+    public decimal MonthlyRevenue { get; set; }
+    public decimal RunningTotal { get; set; }
+    public decimal MovingAvg3Month { get; set; }
 }
-
-// Register in DbContext:
-public DbSet<SalesReport> SalesReports { get; set; }
-
-modelBuilder.Entity<SalesReport>().HasNoKey().ToView(null);  // no table/view mapped
-
-// Query:
-var report = await db.SalesReports
-    .FromSql($"EXEC sp_GetSalesReport {year}")
-    .ToListAsync();
-
-// Output parameters — use raw ADO.NET:
-var outputParam = new SqlParameter("@TotalCount", SqlDbType.Int)
-{
-    Direction = ParameterDirection.Output
-};
-await db.Database.ExecuteSqlRawAsync(
-    "EXEC sp_ProcessBatch @InputId, @TotalCount OUTPUT",
-    new SqlParameter("@InputId", batchId), outputParam);
-int totalCount = (int)outputParam.Value;
 ```
 
-## Database Views
+## Upsert — Insert or Update
 
 ```csharp
-// Map EF Core entity to a view (read-only)
-public class OrderSummaryView
+// SQL Server: MERGE statement
+public async Task UpsertProductAsync(Product product)
 {
-    public int OrderId { get; set; }
-    public string CustomerName { get; set; } = "";
-    public int ItemCount { get; set; }
-    public decimal Total { get; set; }
-    public DateTime OrderedAt { get; set; }
+    using var conn = Open();
+    await conn.ExecuteAsync(@"
+        MERGE INTO products AS target
+        USING (SELECT @Sku AS Sku) AS source ON target.sku = source.Sku
+        WHEN MATCHED THEN
+            UPDATE SET
+                name       = @Name,
+                price      = @Price,
+                updated_at = @UpdatedAt
+        WHEN NOT MATCHED THEN
+            INSERT (sku, name, price, created_at, updated_at)
+            VALUES (@Sku, @Name, @Price, @CreatedAt, @UpdatedAt);",
+        new
+        {
+            product.Sku,
+            product.Name,
+            product.Price,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        });
 }
 
-// Configure in OnModelCreating:
-modelBuilder.Entity<OrderSummaryView>(entity =>
-{
-    entity.HasNoKey();
-    entity.ToView("vw_order_summaries");  // maps to existing view
-});
-
-// Register in DbContext:
-public DbSet<OrderSummaryView> OrderSummaries { get; set; }
-
-// Query just like a table:
-var recent = await db.OrderSummaries
-    .Where(o => o.OrderedAt > DateTime.UtcNow.AddDays(-7))
-    .OrderByDescending(o => o.Total)
-    .Take(10)
-    .ToListAsync();
+// SQLite / PostgreSQL: INSERT OR REPLACE / ON CONFLICT
+await conn.ExecuteAsync(@"
+    INSERT INTO products (sku, name, price, created_at, updated_at)
+    VALUES (@Sku, @Name, @Price, @CreatedAt, @UpdatedAt)
+    ON CONFLICT (sku) DO UPDATE SET
+        name       = excluded.name,
+        price      = excluded.price,
+        updated_at = excluded.updated_at",
+    new { product.Sku, product.Name, product.Price,
+          CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
 ```
 
-## DbFunctions — SQL Functions in LINQ
+## Recursive CTEs — Hierarchical Data
 
 ```csharp
-// Map SQL functions so you can use them in LINQ queries
-public class AppDbContext : DbContext
+// Get all replies in a comment thread (arbitrarily deep)
+public async Task<IEnumerable<Comment>> GetCommentThreadAsync(int rootCommentId)
 {
-    // Map to SQL SOUNDEX function
-    [DbFunction("SOUNDEX", IsBuiltIn = true)]
-    public static string Soundex(string value) => throw new NotSupportedException();
+    using var conn = Open();
+    return await conn.QueryAsync<Comment>(@"
+        WITH RECURSIVE CommentTree AS (
+            -- Base case: the root comment
+            SELECT id, body, parent_id, author_name, created_at, 0 AS depth
+            FROM comments
+            WHERE id = @RootId
 
-    // Map to a custom SQL function
-    [DbFunction("fn_LevenshteinDistance")]
-    public static int LevenshteinDistance(string s1, string s2)
-        => throw new NotSupportedException();  // only called in SQL translation
+            UNION ALL
+
+            -- Recursive case: all replies
+            SELECT c.id, c.body, c.parent_id, c.author_name, c.created_at, ct.depth + 1
+            FROM comments c
+            INNER JOIN CommentTree ct ON c.parent_id = ct.id
+        )
+        SELECT * FROM CommentTree ORDER BY depth, created_at",
+        new { RootId = rootCommentId });
 }
-
-// Use in LINQ:
-var similar = await db.Customers
-    .Where(c => AppDbContext.Soundex(c.LastName) == AppDbContext.Soundex("Smith"))
-    .ToListAsync();
-// SQL: WHERE SOUNDEX(last_name) = SOUNDEX('Smith')
-
-// EF.Functions — built-in SQL function mappings:
-var recent = await db.Orders
-    .Where(o => EF.Functions.DateDiffDay(o.OrderedAt, DateTime.UtcNow) <= 30)
-    .ToListAsync();
-
-var textSearch = await db.Articles
-    .Where(a => EF.Functions.FreeText(a.Body, "machine learning"))
-    .ToListAsync();
 ```
 
-## Dapper — Micro ORM Alongside EF Core
+## Pagination with Keyset (Cursor) Pagination
 
 ```csharp
-// Install: dotnet add package Dapper
-// Use when: complex queries, maximum performance, or non-entity shapes
+// Offset pagination: slow at high page numbers (DB must skip N rows)
+// Keyset pagination: fast regardless of depth (uses an index)
 
-// Access the underlying connection:
-var connection = db.Database.GetDbConnection();
+public async Task<PagedResult<Order>> GetOrdersPageAsync(
+    DateTime? afterDate = null,
+    int? afterId = null,
+    int pageSize = 20)
+{
+    using var conn = Open();
 
-// Simple Dapper query
-var stats = await connection.QueryAsync<CustomerStats>(@"
-    SELECT
-        c.Id,
-        c.Name,
-        COUNT(o.Id) AS OrderCount,
-        SUM(o.Total) AS TotalSpent,
-        MAX(o.OrderedAt) AS LastOrder
-    FROM customers c
-    LEFT JOIN orders o ON o.customer_id = c.id
-    WHERE c.is_active = 1
-    GROUP BY c.Id, c.Name
-    ORDER BY TotalSpent DESC
-    LIMIT @Take",
-    new { Take = 100 });
+    var orders = await conn.QueryAsync<Order>(@"
+        SELECT id, total, status, ordered_at, customer_id
+        FROM orders
+        WHERE (@AfterDate IS NULL
+               OR (ordered_at < @AfterDate)
+               OR (ordered_at = @AfterDate AND id < @AfterId))
+          AND status != 'Cancelled'
+        ORDER BY ordered_at DESC, id DESC
+        LIMIT @PageSize",
+        new { AfterDate = afterDate, AfterId = afterId ?? int.MaxValue, PageSize = pageSize + 1 });
 
-// Within an EF Core transaction:
-await using var tx = await db.Database.BeginTransactionAsync();
-await connection.ExecuteAsync(
-    "UPDATE inventory SET reserved = reserved + @Qty WHERE product_id = @Id",
-    new { Qty = quantity, Id = productId },
-    transaction: tx.GetDbTransaction());  // share the transaction
-await db.SaveChangesAsync();
-await tx.CommitAsync();
+    var list = orders.ToList();
+    var hasMore = list.Count > pageSize;
+    if (hasMore) list.RemoveAt(list.Count - 1);
+
+    var nextCursor = hasMore
+        ? (list.Last().OrderedAt, list.Last().Id)
+        : ((DateTime?)null, (int?)null);
+
+    return new PagedResult<Order>(list, hasMore, nextCursor);
+}
 ```
 
-<ConceptCallout type="tip" title="EF Core + Dapper = Best of Both">
-Use EF Core for your standard CRUD and relationship management. Drop down to Dapper for reporting queries, complex aggregations, or bulk operations where you don't need entity tracking. They work perfectly together on the same connection and transaction.
+<ConceptCallout type="tip" title="Use the Full Power of SQL">
+With Dapper, complex SQL is a feature, not a workaround. CTEs, window functions, recursive queries, MERGE statements — write them directly. With EF Core, you'd need raw SQL fallbacks for these anyway. Dapper makes SQL first-class from day one.
 </ConceptCallout>
 
 <ExerciseBlock>
-1. Create a `ProductSearchService` that uses `FromSql` to call a full-text search stored procedure (or view), then applies LINQ `.Where()`, `.OrderBy()`, and `.Take()` on top of the raw SQL result.
-2. Use `ExecuteUpdateAsync` and `ExecuteDeleteAsync` (EF Core 7+) to implement "archive orders older than 90 days" — mark them as archived in a bulk update, then delete archived logs older than 1 year. Compare query count and performance against the loop-based approach.
-3. Map a `vw_monthly_revenue` view to a keyless entity and query it from a Minimal API endpoint. Include a Dapper query on the same connection that runs a more complex aggregation. Return both results in one response DTO.
+1. Create a stored procedure `sp_GetOrderSummary` (or use a CTE if your database doesn't support stored procs well) that accepts `@CustomerId` and returns: customer info, total order count, total spent, most recent order date, and most purchased product name. Call it from a Dapper repository method.
+2. Write a `GetSalesByMonthAsync(int year)` method using a GROUP BY with window functions to return monthly revenue, order count, and a running total for the year. Map the result to a `MonthlySalesDto` and return from a Minimal API endpoint.
+3. Implement keyset pagination for a `GetOrdersAsync` endpoint that accepts an optional cursor (last seen `ordered_at` + `id`). Verify with a large dataset (seed 10,000 orders) that fetching page 500 takes the same time as fetching page 1.
 </ExerciseBlock>

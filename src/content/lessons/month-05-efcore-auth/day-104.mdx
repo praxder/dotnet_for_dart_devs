@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Bulk Operations and Large Data"
+title: "Dapper: Testing — Integration Tests with Real Databases"
 day: 104
 week: 21
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "batch database operations in Dart, bulk inserts in sqflite"
-csharpConcept: "ExecuteUpdate, ExecuteDelete, BulkExtensions, SqlBulkCopy, chunked processing"
+dartConcept: "integration testing in Flutter, test databases in sqflite"
+csharpConcept: "TestContainers, SQLite in-memory, database fixtures, repository integration tests, xUnit"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,225 +16,319 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-Standard EF Core operations (Add/Update/Remove + SaveChanges) work great for single entities and small batches. For bulk operations — importing thousands of records, batch updates, or mass deletes — you need different tools to avoid performance cliffs.
+Since Dapper doesn't abstract the database as much as EF Core, integration tests against a real database are especially valuable. You want to verify that your SQL is correct, your type mappings work, and your repositories do what they claim.
 
-## EF Core 7+ Bulk Operations
+## Test Strategies with Dapper
 
-```csharp
-// ExecuteUpdateAsync — single SQL UPDATE, no entity loading
-// Much faster than Load → Modify → SaveChanges for many rows
+| Strategy | Speed | Fidelity | Use When |
+|---|---|---|---|
+| Fake repository | Fastest | None | Pure unit tests of service logic |
+| SQLite in-memory | Fast | Medium | Most integration tests |
+| Real DB via TestContainers | Slower | High | Critical paths, production parity |
 
-// Mark all expired discounts as inactive
-int updated = await db.Products
-    .Where(p => p.DiscountExpiry < DateTime.UtcNow && p.IsDiscounted)
-    .ExecuteUpdateAsync(s => s
-        .SetProperty(p => p.IsDiscounted, false)
-        .SetProperty(p => p.DiscountPercent, (decimal?)null)
-        .SetProperty(p => p.UpdatedAt, DateTime.UtcNow));
-
-Console.WriteLine($"Updated {updated} products");
-// SQL: UPDATE products SET is_discounted=0, discount_percent=NULL, updated_at=@p
-//      WHERE discount_expiry < @now AND is_discounted=1
-
-// ExecuteDeleteAsync — single SQL DELETE, no entity loading
-int deleted = await db.AuditLogs
-    .Where(a => a.CreatedAt < DateTime.UtcNow.AddYears(-2))
-    .ExecuteDeleteAsync();
-// SQL: DELETE FROM audit_logs WHERE created_at < @cutoff
-
-// Both bypass:
-// - Change tracker (no entity tracking)
-// - SaveChanges interceptors
-// - Soft delete interceptors (if you have them)
-// Use with caution when you have cross-cutting concerns in interceptors
-```
-
-<ConceptCallout type="gotcha" title="ExecuteUpdate/Delete Bypass Interceptors">
-`ExecuteUpdateAsync` and `ExecuteDeleteAsync` go directly to the database — they bypass EF Core's change tracker and interceptors. If you have soft delete, audit logging, or domain event interceptors, they won't fire. Use them for administrative/cleanup operations where bypassing those is acceptable. For business operations, load entities and use `SaveChangesAsync`.
-</ConceptCallout>
-
-## Efficient Bulk Import — AddRange and Batching
+## SQLite In-Memory Database
 
 ```csharp
-// For inserting 100–10,000 rows: AddRange + single SaveChanges
-var products = ImportCsv("products.csv").Select(row => new Product
+// SQLite in-memory: the fastest real database for tests
+// Create a shared connection — the in-memory DB lives as long as the connection is open
+
+public class SqliteTestDatabase : IAsyncDisposable
 {
-    Name = row.Name,
-    Price = row.Price,
-    CategoryId = row.CategoryId
-}).ToList();
+    private readonly SqliteConnection _conn;
 
-db.Products.AddRange(products);  // adds all to change tracker
-await db.SaveChangesAsync();     // batched INSERT (up to 42 per batch by default)
+    private SqliteTestDatabase(SqliteConnection conn) => _conn = conn;
 
-// For 10,000+ rows: chunk to avoid memory issues
-const int chunkSize = 1000;
-foreach (var chunk in ImportLargeCsv("products.csv").Chunk(chunkSize))
-{
-    db.Products.AddRange(chunk);
-    await db.SaveChangesAsync();
-    db.ChangeTracker.Clear();  // free memory between chunks
-}
-```
-
-## SqlBulkCopy — Maximum Insert Speed
-
-```csharp
-// SqlBulkCopy: fastest way to insert large amounts of data (SQL Server)
-// Bypasses EF entirely — uses SQL Server bulk copy protocol
-
-public async Task BulkInsertProductsAsync(IEnumerable<Product> products)
-{
-    var connection = (SqlConnection)db.Database.GetDbConnection();
-    await connection.OpenAsync();
-
-    using var bulkCopy = new SqlBulkCopy(connection)
+    public static async Task<SqliteTestDatabase> CreateAsync()
     {
-        DestinationTableName = "products",
-        BatchSize = 5000,
-        BulkCopyTimeout = 300
-    };
+        var conn = new SqliteConnection("Data Source=:memory:");
+        await conn.OpenAsync();  // must stay open to keep the in-memory DB alive
 
-    // Map columns explicitly
-    bulkCopy.ColumnMappings.Add(nameof(Product.Name), "name");
-    bulkCopy.ColumnMappings.Add(nameof(Product.Price), "price");
-    bulkCopy.ColumnMappings.Add(nameof(Product.CategoryId), "category_id");
+        // Run schema setup
+        await conn.ExecuteAsync(@"
+            CREATE TABLE products (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT NOT NULL,
+                price        REAL NOT NULL,
+                category_id  INTEGER NOT NULL,
+                stock_qty    INTEGER NOT NULL DEFAULT 0,
+                is_active    INTEGER NOT NULL DEFAULT 1
+            );
 
-    // Convert to DataTable
-    var table = new DataTable();
-    table.Columns.Add("name", typeof(string));
-    table.Columns.Add("price", typeof(decimal));
-    table.Columns.Add("category_id", typeof(int));
+            CREATE TABLE categories (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL
+            );");
 
-    foreach (var p in products)
-        table.Rows.Add(p.Name, p.Price, p.CategoryId);
+        return new SqliteTestDatabase(conn);
+    }
 
-    await bulkCopy.WriteToServerAsync(table);
-}
+    // Return the connection for use in repositories
+    public IDbConnection Connection => _conn;
 
-// EFCore.BulkExtensions — easier API, supports SQL Server + PostgreSQL + SQLite
-// dotnet add package EFCore.BulkExtensions
+    // Get a factory that always returns this connection
+    public IDbConnectionFactory Factory => new FixedConnectionFactory(_conn);
 
-await db.BulkInsertAsync(products);           // INSERT
-await db.BulkUpdateAsync(products);           // UPDATE
-await db.BulkDeleteAsync(products);           // DELETE
-await db.BulkInsertOrUpdateAsync(products);   // UPSERT (merge)
-
-// Performance comparison for 50,000 rows:
-// EF AddRange + SaveChanges: ~30 seconds
-// SqlBulkCopy:               ~0.5 seconds
-// BulkExtensions:            ~1 second
-```
-
-## Streaming Large Result Sets
-
-```csharp
-// Problem: loading 100,000 rows into memory with ToListAsync() = OOM
-// Solution: use AsAsyncEnumerable() to stream rows one at a time
-
-// BAD — loads all rows at once
-var allOrders = await db.Orders.ToListAsync();  // Could be gigabytes!
-
-// GOOD — stream processing
-await foreach (var order in db.Orders
-    .AsNoTracking()
-    .Where(o => o.Status == OrderStatus.Pending)
-    .AsAsyncEnumerable())
-{
-    await ProcessOrderAsync(order);
-    // Each row is processed and discarded — O(1) memory
-}
-
-// Export large dataset to CSV without loading everything
-public async IAsyncEnumerable<string> ExportOrdersCsvAsync(
-    DateTime from,
-    DateTime to,
-    [EnumeratorCancellation] CancellationToken ct = default)
-{
-    yield return "OrderId,CustomerName,Total,Date\n";  // header
-
-    await foreach (var order in db.Orders
-        .AsNoTracking()
-        .Where(o => o.CreatedAt >= from && o.CreatedAt <= to)
-        .Select(o => new { o.Id, CustomerName = o.Customer!.Name, o.Total, o.CreatedAt })
-        .AsAsyncEnumerable()
-        .WithCancellation(ct))
+    // Helper: insert test data
+    public async Task SeedAsync(params object[] products)
     {
-        yield return $"{order.Id},{order.CustomerName},{order.Total},{order.CreatedAt:O}\n";
+        await _conn.ExecuteAsync(
+            "INSERT INTO products (name, price, category_id, is_active) VALUES (@Name, @Price, @CategoryId, 1)",
+            products);
+    }
+
+    // Reset between tests
+    public async Task ResetAsync()
+    {
+        await _conn.ExecuteAsync("DELETE FROM products; DELETE FROM categories;");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _conn.CloseAsync();
+        _conn.Dispose();
     }
 }
 
-// Minimal API streaming endpoint:
-app.MapGet("/api/orders/export", async (
-    DateTime from, DateTime to,
-    OrderExportService service,
-    HttpResponse response,
-    CancellationToken ct) =>
+// Fixed factory: always returns the same connection (for tests)
+public class FixedConnectionFactory(IDbConnection conn) : IDbConnectionFactory
 {
-    response.ContentType = "text/csv";
-    response.Headers.ContentDisposition = "attachment; filename=orders.csv";
-
-    await foreach (var line in service.ExportOrdersCsvAsync(from, to, ct))
-        await response.WriteAsync(line, ct);
-});
+    public IDbConnection CreateConnection() => conn;
+    public Task<IDbConnection> CreateOpenConnectionAsync(CancellationToken ct = default)
+        => Task.FromResult(conn);
+}
 ```
 
-## Chunked Background Processing
+## xUnit Test Fixtures — Shared Database
 
 ```csharp
-// Process large datasets in chunks as a BackgroundService
-public class OrderProcessingService(
-    IDbContextFactory<AppDbContext> factory,
-    ILogger<OrderProcessingService> logger)
-    : BackgroundService
+// DatabaseFixture: shared across tests in a class (IClassFixture)
+// or across multiple classes (ICollectionFixture)
+
+public class DatabaseFixture : IAsyncLifetime
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public SqliteTestDatabase Db { get; private set; } = null!;
+
+    public async Task InitializeAsync()
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            await ProcessPendingOrdersAsync(stoppingToken);
-            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
-        }
+        Db = await SqliteTestDatabase.CreateAsync();
     }
 
-    private async Task ProcessPendingOrdersAsync(CancellationToken ct)
+    public async Task DisposeAsync()
     {
-        const int batchSize = 100;
-        int processedCount = 0;
+        await Db.DisposeAsync();
+    }
+}
 
-        await using var db = await factory.CreateDbContextAsync(ct);
+[Collection("Database")]
+public class ProductRepositoryTests(DatabaseFixture fixture) : IAsyncLifetime
+{
+    private readonly IProductRepository _repo =
+        new ProductRepository(fixture.Db.Factory);
 
-        // Process in chunks to avoid holding long transactions
-        while (true)
+    // Reset data before each test
+    public Task InitializeAsync() => fixture.Db.ResetAsync();
+    public Task DisposeAsync() => Task.CompletedTask;
+
+    [Fact]
+    public async Task GetByIdAsync_ReturnsProduct_WhenExists()
+    {
+        // Arrange
+        await fixture.Db.SeedAsync(new { Name = "Widget", Price = 9.99, CategoryId = 1 });
+        var all = await _repo.GetAllAsync();
+        var id = all.First().Id;
+
+        // Act
+        var product = await _repo.GetByIdAsync(id);
+
+        // Assert
+        Assert.NotNull(product);
+        Assert.Equal("Widget", product.Name);
+        Assert.Equal(9.99m, product.Price);
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_ReturnsNull_WhenNotFound()
+    {
+        var result = await _repo.GetByIdAsync(99999);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task CreateAsync_ReturnsNewId()
+    {
+        var product = new Product { Name = "Gadget", Price = 29.99m, CategoryId = 1 };
+        var id = await _repo.CreateAsync(product);
+
+        Assert.True(id > 0);
+
+        var fetched = await _repo.GetByIdAsync(id);
+        Assert.NotNull(fetched);
+        Assert.Equal("Gadget", fetched.Name);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_RemovesProduct()
+    {
+        await fixture.Db.SeedAsync(new { Name = "ToDelete", Price = 1m, CategoryId = 1 });
+        var id = (await _repo.GetAllAsync()).First().Id;
+
+        var deleted = await _repo.DeleteAsync(id);
+        Assert.True(deleted);
+
+        var after = await _repo.GetByIdAsync(id);
+        Assert.Null(after);
+    }
+}
+```
+
+## TestContainers — Production Database Parity
+
+```csharp
+// For SQL Server / PostgreSQL specific SQL, use a real containerized DB
+// dotnet add package Testcontainers.SqlServer
+// dotnet add package Testcontainers.PostgreSql
+// Requires Docker installed on the CI runner
+
+public class SqlServerDatabaseFixture : IAsyncLifetime
+{
+    private readonly MsSqlContainer _container = new MsSqlBuilder()
+        .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
+        .WithPassword("Your_Strong!Passw0rd")
+        .Build();
+
+    public string ConnectionString => _container.GetConnectionString();
+    public IDbConnectionFactory Factory => new SqlServerConnectionFactory(ConnectionString);
+
+    public async Task InitializeAsync()
+    {
+        await _container.StartAsync();
+
+        // Run schema migrations
+        using var conn = Factory.CreateConnection();
+        await conn.ExecuteAsync(@"
+            CREATE TABLE products (
+                id           INT IDENTITY(1,1) PRIMARY KEY,
+                name         NVARCHAR(200) NOT NULL,
+                price        DECIMAL(18,2) NOT NULL,
+                category_id  INT NOT NULL,
+                is_active    BIT NOT NULL DEFAULT 1
+            );");
+    }
+
+    public Task DisposeAsync() => _container.DisposeAsync().AsTask();
+}
+
+// Test class using the real SQL Server container:
+public class ProductRepositoryIntegrationTests(SqlServerDatabaseFixture fixture)
+    : IClassFixture<SqlServerDatabaseFixture>
+{
+    [Fact]
+    public async Task Insert_And_Query_RoundTrip()
+    {
+        var repo = new ProductRepository(fixture.Factory);
+
+        var id = await repo.CreateAsync(new Product
         {
-            var batch = await db.Orders
-                .Where(o => o.Status == OrderStatus.Pending)
-                .Take(batchSize)
-                .ToListAsync(ct);
+            Name = "SQL Server Widget",
+            Price = 99.99m,
+            CategoryId = 1
+        });
 
-            if (batch.Count == 0) break;
+        var product = await repo.GetByIdAsync(id);
+        Assert.Equal("SQL Server Widget", product?.Name);
+    }
+}
+```
 
-            foreach (var order in batch)
+## Testing Transactions
+
+```csharp
+[Fact]
+public async Task PlaceOrder_RollsBack_OnInsufficientStock()
+{
+    // Arrange: product with 2 units in stock
+    await fixture.Db.SeedAsync(
+        new { Name = "Limited Widget", Price = 10m, CategoryId = 1, StockQty = 2 });
+    var productId = (await _productRepo.GetAllAsync()).First().Id;
+
+    var service = new OrderService(
+        new ProductRepository(fixture.Db.Factory),
+        new OrderRepository(fixture.Db.Factory));
+
+    // Act & Assert: try to order 5 units (should fail)
+    await Assert.ThrowsAsync<InsufficientStockException>(() =>
+        service.PlaceOrderAsync(new PlaceOrderRequest
+        {
+            CustomerId = 1,
+            Items = [new OrderItem { ProductId = productId, Quantity = 5, UnitPrice = 10m }]
+        }));
+
+    // Verify: stock unchanged (transaction rolled back)
+    var product = await _productRepo.GetByIdAsync(productId);
+    Assert.Equal(2, product!.StockQuantity);
+
+    // Verify: no order was created
+    var orders = await _orderRepo.GetByCustomerAsync(1);
+    Assert.Empty(orders);
+}
+```
+
+## API Integration Tests with WebApplicationFactory
+
+```csharp
+// Test the full HTTP pipeline against a test database
+public class BlogApiTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+
+    public BlogApiTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory
+            .WithWebHostBuilder(builder =>
             {
-                await ProcessSingleOrderAsync(order, ct);
-                order.Status = OrderStatus.Processing;
-            }
+                builder.ConfigureServices(services =>
+                {
+                    // Replace the real connection factory with test SQLite
+                    services.AddSingleton<IDbConnectionFactory>(
+                        new SqliteConnectionFactory("Data Source=:memory:;Cache=Shared"));
+                });
+            })
+            .CreateClient();
+    }
 
-            await db.SaveChangesAsync(ct);
-            db.ChangeTracker.Clear();  // free memory
-            processedCount += batch.Count;
+    [Fact]
+    public async Task GetProduct_Returns404_WhenNotFound()
+    {
+        var response = await _client.GetAsync("/api/products/99999");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
 
-            if (batch.Count < batchSize) break;  // no more pending
-        }
+    [Fact]
+    public async Task CreateAndGetProduct_RoundTrip()
+    {
+        // Create
+        var createResponse = await _client.PostAsJsonAsync("/api/products", new
+        {
+            Name = "Test Product",
+            Price = 29.99,
+            CategoryId = 1
+        });
+        createResponse.EnsureSuccessStatusCode();
+        var created = await createResponse.Content.ReadFromJsonAsync<ProductDto>();
 
-        if (processedCount > 0)
-            logger.LogInformation("Processed {Count} pending orders", processedCount);
+        // Get
+        var getResponse = await _client.GetAsync($"/api/products/{created!.Id}");
+        getResponse.EnsureSuccessStatusCode();
+        var fetched = await getResponse.Content.ReadFromJsonAsync<ProductDto>();
+
+        Assert.Equal("Test Product", fetched!.Name);
+        Assert.Equal(29.99m, fetched.Price);
     }
 }
 ```
 
 <ExerciseBlock>
-1. Import 50,000 product records from a CSV file. Implement three approaches: (a) standard `AddRange` + `SaveChanges`, (b) chunked `AddRange` in batches of 1000, (c) `BulkExtensions.BulkInsertAsync`. Measure time and peak memory for each.
-2. Implement a streaming CSV export endpoint for orders with date range filtering. The endpoint should be able to stream 1 million rows without running out of memory. Verify with `GC.GetTotalAllocatedBytes()` that memory stays constant.
-3. Write a `DataCleanupService` BackgroundService that runs daily: (a) `ExecuteDeleteAsync` for audit logs older than 2 years, (b) `ExecuteUpdateAsync` to mark sessions older than 30 days as expired, (c) processes orphaned temporary uploads in chunks of 500. Log all counts.
+1. Set up a `DatabaseFixture` with SQLite in-memory for your `ProductRepository`. Write tests for every method: `GetByIdAsync`, `GetAllAsync`, `GetActiveByCategoryAsync`, `SearchAsync`, `CreateAsync`, `UpdateAsync`, `DeleteAsync`. Each test should reset the database and seed only the data it needs.
+2. Write transaction integration tests for `OrderService.PlaceOrderAsync`: (a) success case verifies order created + stock decremented, (b) insufficient stock verifies both order and stock unchanged, (c) multi-item order verifies all stock reserved or all rolled back.
+3. Add TestContainers tests for your most critical SQL queries — specifically any that use SQL Server-specific syntax (OUTPUT clause, MERGE, etc.). Verify they produce the same results as your SQLite versions for the shared SQL.
 </ExerciseBlock>

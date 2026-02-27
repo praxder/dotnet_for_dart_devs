@@ -1,12 +1,12 @@
 ---
-title: "Repository Pattern and Unit of Work"
+title: "Dapper: Transactions"
 day: 96
 week: 20
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "data layer abstraction in Flutter, repository pattern in Dart"
-csharpConcept: "IRepository<T>, UnitOfWork, DbContext as UoW, testability, generic repository"
+dartConcept: "sqflite transactions, atomic operations in Dart"
+csharpConcept: "IDbTransaction, BeginTransaction, Commit, Rollback, sharing transactions across repositories"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,252 +16,257 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-The Repository pattern abstracts data access behind an interface — making business logic testable without a real database. The Unit of Work coordinates multiple repositories in a single transaction. Controversy exists about whether these patterns add value over using DbContext directly; this lesson covers both perspectives.
+Transactions in Dapper are explicit: you call `connection.BeginTransaction()`, pass the transaction to each Dapper call, and commit or roll back. There's no automatic transaction wrapping like EF Core's `SaveChangesAsync()` — you control every step.
 
-## The Case For and Against Repository Over EF Core
+## Basic Transaction
 
-<ConceptCallout type="tip" title="DbContext IS a Unit of Work + Repository">
-`DbContext` already implements the Unit of Work pattern (`SaveChanges()` commits all tracked changes atomically). `DbSet<T>` already implements a generic repository. Adding another repository layer on top often just wraps EF Core in boilerplate.
+```csharp
+public async Task PlaceOrderAsync(PlaceOrderRequest request)
+{
+    using var conn = Open();
+    await conn.OpenAsync();  // must be open before BeginTransaction
 
-**When repositories add value:** testing without a database, swapping the ORM (rare), domain-layer isolation. **When they don't:** most CRUD applications where tests can use SQLite in-memory or TestContainers.
+    await using var tx = await conn.BeginTransactionAsync();
+    try
+    {
+        // Step 1: Reserve inventory
+        foreach (var item in request.Items)
+        {
+            var affected = await conn.ExecuteAsync(@"
+                UPDATE products
+                SET stock_quantity = stock_quantity - @Quantity
+                WHERE id = @ProductId AND stock_quantity >= @Quantity",
+                new { item.ProductId, item.Quantity },
+                transaction: tx);  // ← pass the transaction to every Dapper call
+
+            if (affected == 0)
+                throw new InvalidOperationException($"Insufficient stock for product {item.ProductId}");
+        }
+
+        // Step 2: Insert the order
+        var orderId = await conn.QuerySingleAsync<int>(@"
+            INSERT INTO orders (customer_id, total, status, ordered_at)
+            VALUES (@CustomerId, @Total, 'Pending', @Now);
+            SELECT last_insert_rowid();",
+            new { request.CustomerId, Total = request.Items.Sum(i => i.Total), Now = DateTime.UtcNow },
+            transaction: tx);
+
+        // Step 3: Insert order lines
+        foreach (var item in request.Items)
+        {
+            await conn.ExecuteAsync(@"
+                INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
+                VALUES (@OrderId, @ProductId, @Quantity, @UnitPrice)",
+                new { OrderId = orderId, item.ProductId, item.Quantity, item.UnitPrice },
+                transaction: tx);
+        }
+
+        await tx.CommitAsync();  // all or nothing
+    }
+    catch
+    {
+        await tx.RollbackAsync();
+        throw;
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Always Pass the Transaction">
+Every Dapper call inside a transaction must receive the `transaction:` parameter. If you forget it on even one call, that query runs outside the transaction — it won't be rolled back if something fails. This is the most common Dapper transaction mistake.
 </ConceptCallout>
 
-## Generic Repository Interface
+## Sharing a Transaction Across Repositories
 
 ```csharp
-public interface IRepository<T> where T : class
+// Problem: PlaceOrderAsync needs to update inventory (ProductRepository)
+// and create an order (OrderRepository) in the same transaction.
+// Solution: pass the connection + transaction to both repositories.
+
+// Pattern: accept connection + transaction as parameters
+public class ProductRepository
 {
-    Task<T?> GetByIdAsync(int id);
-    Task<IReadOnlyList<T>> GetAllAsync();
-    Task<IReadOnlyList<T>> FindAsync(Expression<Func<T, bool>> predicate);
-    Task AddAsync(T entity);
-    void Update(T entity);
-    void Remove(T entity);
-}
-
-public class Repository<T>(AppDbContext db) : IRepository<T> where T : class
-{
-    protected readonly DbSet<T> Set = db.Set<T>();
-
-    public async Task<T?> GetByIdAsync(int id)
-        => await Set.FindAsync(id);
-
-    public async Task<IReadOnlyList<T>> GetAllAsync()
-        => await Set.AsNoTracking().ToListAsync();
-
-    public async Task<IReadOnlyList<T>> FindAsync(Expression<Func<T, bool>> predicate)
-        => await Set.AsNoTracking().Where(predicate).ToListAsync();
-
-    public async Task AddAsync(T entity)
-        => await Set.AddAsync(entity);
-
-    public void Update(T entity)
-        => Set.Update(entity);
-
-    public void Remove(T entity)
-        => Set.Remove(entity);
-}
-```
-
-## Specific Repository with Domain Logic
-
-```csharp
-// Extend generic repo with domain-specific queries
-public interface IOrderRepository : IRepository<Order>
-{
-    Task<IReadOnlyList<Order>> GetByCustomerAsync(int customerId);
-    Task<IReadOnlyList<Order>> GetPendingAsync();
-    Task<Order?> GetWithLinesAsync(int orderId);
-    Task<decimal> GetCustomerLifetimeValueAsync(int customerId);
-}
-
-public class OrderRepository(AppDbContext db) : Repository<Order>(db), IOrderRepository
-{
-    public async Task<IReadOnlyList<Order>> GetByCustomerAsync(int customerId)
-        => await Set
-            .AsNoTracking()
-            .Where(o => o.CustomerId == customerId)
-            .OrderByDescending(o => o.OrderedAt)
-            .ToListAsync();
-
-    public async Task<IReadOnlyList<Order>> GetPendingAsync()
-        => await Set
-            .AsNoTracking()
-            .Where(o => o.Status == OrderStatus.Pending)
-            .Include(o => o.Customer)
-            .ToListAsync();
-
-    public async Task<Order?> GetWithLinesAsync(int orderId)
-        => await Set
-            .Include(o => o.Lines)
-                .ThenInclude(l => l.Product)
-            .Include(o => o.Customer)
-            .FirstOrDefaultAsync(o => o.Id == orderId);
-
-    public async Task<decimal> GetCustomerLifetimeValueAsync(int customerId)
-        => await Set
-            .Where(o => o.CustomerId == customerId && o.Status != OrderStatus.Cancelled)
-            .SumAsync(o => o.Total);
-}
-```
-
-## Unit of Work
-
-```csharp
-public interface IUnitOfWork : IAsyncDisposable
-{
-    IOrderRepository Orders { get; }
-    IRepository<Customer> Customers { get; }
-    IRepository<Product> Products { get; }
-    Task<int> SaveChangesAsync(CancellationToken ct = default);
-    Task BeginTransactionAsync();
-    Task CommitAsync();
-    Task RollbackAsync();
-}
-
-public class UnitOfWork(AppDbContext db) : IUnitOfWork
-{
-    private IDbContextTransaction? _transaction;
-
-    public IOrderRepository Orders { get; } = new OrderRepository(db);
-    public IRepository<Customer> Customers { get; } = new Repository<Customer>(db);
-    public IRepository<Product> Products { get; } = new Repository<Product>(db);
-
-    public Task<int> SaveChangesAsync(CancellationToken ct = default)
-        => db.SaveChangesAsync(ct);
-
-    public async Task BeginTransactionAsync()
-        => _transaction = await db.Database.BeginTransactionAsync();
-
-    public async Task CommitAsync()
+    public async Task<bool> ReserveStockAsync(
+        IDbConnection conn,
+        IDbTransaction tx,
+        int productId,
+        int quantity)
     {
-        if (_transaction is not null) await _transaction.CommitAsync();
-    }
+        var affected = await conn.ExecuteAsync(@"
+            UPDATE products
+            SET stock_quantity = stock_quantity - @Quantity
+            WHERE id = @ProductId AND stock_quantity >= @Quantity",
+            new { ProductId = productId, Quantity = quantity },
+            transaction: tx);
 
-    public async Task RollbackAsync()
-    {
-        if (_transaction is not null) await _transaction.RollbackAsync();
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_transaction is not null) await _transaction.DisposeAsync();
+        return affected > 0;  // false = insufficient stock
     }
 }
 
-// Registration:
-builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
-builder.Services.AddScoped<AppDbContext>();
-```
-
-## Using the Unit of Work in a Service
-
-```csharp
-public class OrderService(IUnitOfWork uow)
+public class OrderRepository
 {
-    public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request)
+    public async Task<int> CreateAsync(
+        IDbConnection conn,
+        IDbTransaction tx,
+        Order order)
     {
-        await uow.BeginTransactionAsync();
+        return await conn.QuerySingleAsync<int>(@"
+            INSERT INTO orders (customer_id, total, status, ordered_at)
+            VALUES (@CustomerId, @Total, @Status, @OrderedAt);
+            SELECT last_insert_rowid();",
+            order,
+            transaction: tx);
+    }
+}
+
+// Service that coordinates the transaction:
+public class OrderService(
+    ProductRepository productRepo,
+    OrderRepository orderRepo,
+    IConfiguration config)
+{
+    public async Task<int> PlaceOrderAsync(PlaceOrderRequest request)
+    {
+        using var conn = new SqliteConnection(config.GetConnectionString("Default"));
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+
         try
         {
-            // Deduct inventory
+            // Both repositories share the same connection + transaction
             foreach (var item in request.Items)
             {
-                var products = await uow.Products.FindAsync(p => p.Id == item.ProductId);
-                var product = products.FirstOrDefault()
-                    ?? throw new KeyNotFoundException($"Product {item.ProductId} not found");
-
-                if (product.StockQuantity < item.Quantity)
-                    throw new InvalidOperationException($"Insufficient stock: {product.Name}");
-
-                product.StockQuantity -= item.Quantity;
-                uow.Products.Update(product);
+                var reserved = await productRepo.ReserveStockAsync(conn, tx, item.ProductId, item.Quantity);
+                if (!reserved)
+                    throw new InsufficientStockException(item.ProductId);
             }
 
-            var order = new Order { CustomerId = request.CustomerId, /* ... */ };
-            await uow.Orders.AddAsync(order);
+            var orderId = await orderRepo.CreateAsync(conn, tx, new Order
+            {
+                CustomerId = request.CustomerId,
+                Total = request.Items.Sum(i => i.Total),
+                Status = "Pending",
+                OrderedAt = DateTime.UtcNow
+            });
 
-            await uow.SaveChangesAsync();
-            await uow.CommitAsync();
-            return order;
+            await tx.CommitAsync();
+            return orderId;
         }
         catch
         {
-            await uow.RollbackAsync();
+            await tx.RollbackAsync();
             throw;
         }
     }
 }
 ```
 
-## Testing with Fake Repositories
+## Isolation Levels
 
 ```csharp
-// The real payoff: business logic tests that need no database
-public class FakeOrderRepository : IOrderRepository
+// Default isolation level is typically ReadCommitted
+// For financial operations, use a higher level
+
+await using var tx = await conn.BeginTransactionAsync(
+    IsolationLevel.RepeatableRead);  // prevents dirty reads + non-repeatable reads
+
+// Common choices:
+// ReadUncommitted — see uncommitted data (dirty reads) — rarely appropriate
+// ReadCommitted   — default, sees committed data only
+// RepeatableRead  — rows read can't be modified by others until tx ends
+// Serializable    — strongest, full isolation (slowest, most blocking)
+// Snapshot        — SQL Server: read a consistent snapshot, no blocking on reads
+```
+
+## Savepoints — Partial Rollback
+
+```csharp
+// SQL Server and PostgreSQL support savepoints within a transaction
+// Roll back to a savepoint without rolling back the entire transaction
+
+await using var tx = await conn.BeginTransactionAsync();
+
+await conn.ExecuteAsync("INSERT INTO orders ...", orderParams, transaction: tx);
+
+// Create a savepoint after the order insert
+await conn.ExecuteAsync("SAVE TRANSACTION AfterOrder", transaction: tx);
+// PostgreSQL: "SAVEPOINT AfterOrder"
+
+try
 {
-    private readonly List<Order> _orders = [];
-    private int _nextId = 1;
-
-    public Task<Order?> GetByIdAsync(int id)
-        => Task.FromResult(_orders.FirstOrDefault(o => o.Id == id));
-
-    public Task<IReadOnlyList<Order>> GetAllAsync()
-        => Task.FromResult<IReadOnlyList<Order>>(_orders.ToList());
-
-    public Task<IReadOnlyList<Order>> FindAsync(Expression<Func<Order, bool>> predicate)
-        => Task.FromResult<IReadOnlyList<Order>>(
-            _orders.AsQueryable().Where(predicate).ToList());
-
-    public Task AddAsync(Order entity)
-    {
-        entity.Id = _nextId++;
-        _orders.Add(entity);
-        return Task.CompletedTask;
-    }
-
-    public void Update(Order entity) { }
-    public void Remove(Order entity) => _orders.Remove(entity);
-
-    // Domain-specific:
-    public Task<IReadOnlyList<Order>> GetByCustomerAsync(int customerId)
-        => Task.FromResult<IReadOnlyList<Order>>(
-            _orders.Where(o => o.CustomerId == customerId).ToList());
-
-    public Task<IReadOnlyList<Order>> GetPendingAsync()
-        => Task.FromResult<IReadOnlyList<Order>>(
-            _orders.Where(o => o.Status == OrderStatus.Pending).ToList());
-
-    public Task<Order?> GetWithLinesAsync(int orderId)
-        => Task.FromResult(_orders.FirstOrDefault(o => o.Id == orderId));
-
-    public Task<decimal> GetCustomerLifetimeValueAsync(int customerId)
-        => Task.FromResult(_orders
-            .Where(o => o.CustomerId == customerId)
-            .Sum(o => o.Total));
+    // Try to process payment (might fail)
+    await conn.ExecuteAsync("INSERT INTO payments ...", paymentParams, transaction: tx);
+    await tx.CommitAsync();
 }
-
-// Pure unit test — no DB required:
-[Fact]
-public async Task PlaceOrder_DeductsInventory()
+catch (PaymentException)
 {
-    var fakeUow = new FakeUnitOfWork();
-    fakeUow.Products.Seed(new Product { Id = 1, Name = "Widget", StockQuantity = 10 });
+    // Roll back only to the savepoint — keeps the order record
+    await conn.ExecuteAsync("ROLLBACK TRANSACTION AfterOrder", transaction: tx);
+    // PostgreSQL: "ROLLBACK TO SAVEPOINT AfterOrder"
 
-    var service = new OrderService(fakeUow);
-    await service.PlaceOrderAsync(new PlaceOrderRequest
-    {
-        CustomerId = 1,
-        Items = [new OrderItem { ProductId = 1, Quantity = 3 }]
-    });
+    // Update order status to reflect payment failure
+    await conn.ExecuteAsync(
+        "UPDATE orders SET status = 'PaymentFailed' WHERE id = @Id",
+        new { Id = orderId },
+        transaction: tx);
 
-    var product = (await fakeUow.Products.GetByIdAsync(1))!;
-    Assert.Equal(7, product.StockQuantity);
+    await tx.CommitAsync();  // commit the order with failed-payment status
 }
 ```
 
+## Transaction Timeout
+
+```csharp
+// Long-running transactions can cause blocking
+// Set a command timeout per query to avoid hanging
+
+await conn.ExecuteAsync(
+    "UPDATE products SET price = price * 1.1 WHERE category_id = @CatId",
+    new { CatId = 5 },
+    transaction: tx,
+    commandTimeout: 30);  // seconds — throws if query takes longer
+```
+
+## Read-Only Queries in a Transaction
+
+```csharp
+// You can also read within a transaction to see your own uncommitted changes
+public async Task<Order> PlaceOrderAndReturnAsync(PlaceOrderRequest request)
+{
+    using var conn = Open();
+    await conn.OpenAsync();
+    await using var tx = await conn.BeginTransactionAsync();
+
+    try
+    {
+        // Insert the order
+        var orderId = await conn.QuerySingleAsync<int>(
+            "INSERT INTO orders ... ; SELECT last_insert_rowid();",
+            new { /* ... */ },
+            transaction: tx);
+
+        // Read back what we just inserted (same transaction — sees our changes)
+        var order = await conn.QuerySingleAsync<Order>(
+            "SELECT * FROM orders WHERE id = @Id",
+            new { Id = orderId },
+            transaction: tx);  // same transaction — sees uncommitted insert
+
+        await tx.CommitAsync();
+        return order;
+    }
+    catch
+    {
+        await tx.RollbackAsync();
+        throw;
+    }
+}
+```
+
+<ConceptCallout type="gotcha" title="Connection Must Be Open Before BeginTransaction">
+Unlike EF Core's `DbContext`, Dapper requires you to explicitly open the connection before calling `BeginTransaction`. Call `await conn.OpenAsync()` before `conn.BeginTransaction()`. Forgetting this throws `InvalidOperationException: The connection is not open`.
+</ConceptCallout>
+
 <ExerciseBlock>
-1. Implement `IRepository<T>` and `UnitOfWork` for a library system with `Book`, `Member`, and `Loan` repositories. Add domain-specific methods: `GetOverdueLoansAsync()`, `GetMemberBorrowingHistoryAsync(int memberId)`.
-2. Write a service layer that uses the Unit of Work to process a book return (find the loan, mark it returned, update availability). Write unit tests using fake repositories — no database involved.
-3. Compare the two approaches: write the same "get active orders with customer details" query using (a) the repository pattern and (b) directly on DbContext. Evaluate lines of code, testability, and performance implications.
+1. Build a `TransferFundsAsync(int fromAccountId, int toAccountId, decimal amount)` method using a Dapper transaction. The transfer should: check the from-account has sufficient balance (fail if not), debit the from-account, credit the to-account, and log the transfer. Verify with a test that if the credit fails, the debit is rolled back.
+2. Implement a `BulkUpdateInventoryAsync(IEnumerable<InventoryUpdate> updates)` that processes all updates in a single transaction. If any update would push stock below zero, roll back all updates. Return the number of items updated, or throw with the product ID that caused the failure.
+3. Create an `OrderService` that coordinates `ProductRepository` (for stock reservation) and `OrderRepository` (for order creation) in a shared transaction. Pass the `IDbConnection` and `IDbTransaction` to both repositories. Write a test verifying that if the order insert fails, the inventory reservation is also rolled back.
 </ExerciseBlock>

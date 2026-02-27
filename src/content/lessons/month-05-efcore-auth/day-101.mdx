@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Interceptors, Audit Logging, and Soft Delete"
+title: "Dapper: Connection Management and IDbConnectionFactory"
 day: 101
 week: 21
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "middleware patterns in Dart, hooks in database packages"
-csharpConcept: "IDbCommandInterceptor, ISaveChangesInterceptor, audit trail, soft delete, shadow properties"
+dartConcept: "database connection management in Dart, connection pooling"
+csharpConcept: "IDbConnectionFactory, connection pooling, multiple databases, open/close lifecycle"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,273 +16,265 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-EF Core interceptors are hooks that run before and after database operations. They're perfect for cross-cutting concerns: audit logging, soft delete, performance tracking, and command rewriting — without polluting entity or service code.
+Connection management is one area where Dapper requires more thought than EF Core. EF Core's `DbContext` manages connections internally; with Dapper, you manage them explicitly. Done right, this gives you fine-grained control and excellent performance.
 
-## ISaveChangesInterceptor — Intercept Saves
+## How Connection Pooling Works
 
 ```csharp
-// Automatically set audit fields on every save
-public class AuditInterceptor(IHttpContextAccessor httpContext) : SaveChangesInterceptor
+// When you call new SqlConnection(connString).Open():
+// ADO.NET checks its internal connection pool for a matching idle connection.
+// If found: reuses it (fast — no TCP handshake)
+// If not: opens a new physical connection (slower)
+
+// When you call conn.Close() or conn.Dispose():
+// The connection returns to the pool — it's NOT actually closed.
+// The pool keeps it ready for the next request.
+
+// This means: opening and closing connections frequently is FINE.
+// The "open once, reuse" pattern from older code is unnecessary.
+
+// ✅ Modern pattern: create per-method, let using statement dispose it
+public async Task<Product?> GetByIdAsync(int id)
 {
-    public override InterceptionResult<int> SavingChanges(
-        DbContextEventData eventData,
-        InterceptionResult<int> result)
+    using var conn = factory.CreateConnection();  // checks pool
+    // conn is automatically opened by Dapper's QueryAsync
+    return await conn.QueryFirstOrDefaultAsync<Product>(
+        "SELECT * FROM products WHERE id = @Id", new { Id = id });
+    // Dispose() → returns to pool
+}
+```
+
+## The IDbConnectionFactory Pattern
+
+```csharp
+// Define the factory interface
+public interface IDbConnectionFactory
+{
+    IDbConnection CreateConnection();
+    Task<IDbConnection> CreateOpenConnectionAsync(CancellationToken ct = default);
+}
+
+// SQLite implementation
+public class SqliteConnectionFactory : IDbConnectionFactory
+{
+    private readonly string _connectionString;
+
+    public SqliteConnectionFactory(string connectionString)
+        => _connectionString = connectionString;
+
+    public IDbConnection CreateConnection()
+        => new SqliteConnection(_connectionString);
+
+    public async Task<IDbConnection> CreateOpenConnectionAsync(CancellationToken ct = default)
     {
-        UpdateAuditFields(eventData.Context);
-        return base.SavingChanges(eventData, result);
-    }
-
-    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
-        DbContextEventData eventData,
-        InterceptionResult<int> result,
-        CancellationToken ct = default)
-    {
-        UpdateAuditFields(eventData.Context);
-        return base.SavingChangesAsync(eventData, result, ct);
-    }
-
-    private void UpdateAuditFields(DbContext? context)
-    {
-        if (context is null) return;
-        var userId = httpContext.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
-        var now = DateTime.UtcNow;
-
-        foreach (var entry in context.ChangeTracker.Entries())
-        {
-            if (entry.State == EntityState.Added && entry.Entity is ICreatable creatable)
-            {
-                creatable.CreatedAt = now;
-                creatable.CreatedBy = userId ?? "system";
-            }
-
-            if (entry.State is EntityState.Added or EntityState.Modified
-                && entry.Entity is IModifiable modifiable)
-            {
-                modifiable.UpdatedAt = now;
-                modifiable.UpdatedBy = userId ?? "system";
-            }
-        }
+        var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        return conn;
     }
 }
 
-// Interfaces for auditable entities
-public interface ICreatable
+// SQL Server implementation
+public class SqlServerConnectionFactory : IDbConnectionFactory
 {
-    DateTime CreatedAt { get; set; }
-    string CreatedBy { get; set; }
-}
+    private readonly string _connectionString;
 
-public interface IModifiable : ICreatable
-{
-    DateTime UpdatedAt { get; set; }
-    string UpdatedBy { get; set; }
-}
+    public SqlServerConnectionFactory(string connectionString)
+        => _connectionString = connectionString;
 
-// Base class entities can inherit:
-public abstract class AuditableEntity : IModifiable
-{
-    public DateTime CreatedAt { get; set; }
-    public string CreatedBy { get; set; } = "";
-    public DateTime UpdatedAt { get; set; }
-    public string UpdatedBy { get; set; } = "";
+    public IDbConnection CreateConnection()
+        => new SqlConnection(_connectionString);
+
+    public async Task<IDbConnection> CreateOpenConnectionAsync(CancellationToken ct = default)
+    {
+        var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        return conn;
+    }
 }
 
 // Registration:
-builder.Services.AddSingleton<AuditInterceptor>();
-builder.Services.AddDbContext<AppDbContext>((sp, options) =>
-    options.UseSqlite(connectionString)
-           .AddInterceptors(sp.GetRequiredService<AuditInterceptor>()));
-```
-
-## Soft Delete Interceptor
-
-```csharp
-// Instead of deleting rows, mark them as deleted
-public interface ISoftDeletable
+builder.Services.AddSingleton<IDbConnectionFactory>(provider =>
 {
-    bool IsDeleted { get; set; }
-    DateTime? DeletedAt { get; set; }
-    string? DeletedBy { get; set; }
-}
-
-public class SoftDeleteInterceptor(IHttpContextAccessor httpContext) : SaveChangesInterceptor
-{
-    public override InterceptionResult<int> SavingChanges(
-        DbContextEventData eventData,
-        InterceptionResult<int> result)
-    {
-        ConvertDeletes(eventData.Context);
-        return base.SavingChanges(eventData, result);
-    }
-
-    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
-        DbContextEventData eventData,
-        InterceptionResult<int> result,
-        CancellationToken ct = default)
-    {
-        ConvertDeletes(eventData.Context);
-        return base.SavingChangesAsync(eventData, result, ct);
-    }
-
-    private void ConvertDeletes(DbContext? context)
-    {
-        if (context is null) return;
-        var userId = httpContext.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-        foreach (var entry in context.ChangeTracker.Entries<ISoftDeletable>()
-            .Where(e => e.State == EntityState.Deleted))
-        {
-            entry.State = EntityState.Modified;  // don't actually delete
-            entry.Entity.IsDeleted = true;
-            entry.Entity.DeletedAt = DateTime.UtcNow;
-            entry.Entity.DeletedBy = userId ?? "system";
-        }
-    }
-}
-
-// Global query filter to exclude deleted records automatically
-modelBuilder.Entity<Product>()
-    .HasQueryFilter(p => !p.IsDeleted);
-
-// To query deleted records when needed:
-var allProducts = await db.Products.IgnoreQueryFilters().ToListAsync();
-var deletedOnly = await db.Products.IgnoreQueryFilters()
-    .Where(p => p.IsDeleted)
-    .ToListAsync();
-```
-
-## Full Audit Trail — Change History Table
-
-```csharp
-// Record every change to audited entities
-public class AuditLog
-{
-    public long Id { get; set; }
-    public string TableName { get; set; } = "";
-    public string KeyValues { get; set; } = "";  // JSON: {"Id": 42}
-    public string? OldValues { get; set; }        // JSON: {"Price": 9.99}
-    public string? NewValues { get; set; }        // JSON: {"Price": 14.99}
-    public string Action { get; set; } = "";      // Added/Modified/Deleted
-    public DateTime Timestamp { get; set; }
-    public string? UserId { get; set; }
-}
-
-public class AuditTrailInterceptor(IHttpContextAccessor httpContext) : SaveChangesInterceptor
-{
-    public override async ValueTask<int> SavedChangesAsync(
-        SaveChangesCompletedEventData eventData,
-        int result,
-        CancellationToken ct = default)
-    {
-        // Called AFTER successful save — audit logs are committed atomically
-        if (eventData.Context is AppDbContext db)
-        {
-            var auditLogs = CreateAuditLogs(eventData.Context);
-            if (auditLogs.Any())
-            {
-                db.AuditLogs.AddRange(auditLogs);
-                await db.SaveChangesAsync(ct);  // second save for audit records
-            }
-        }
-        return await base.SavedChangesAsync(eventData, result, ct);
-    }
-
-    private List<AuditLog> CreateAuditLogs(DbContext? context)
-    {
-        if (context is null) return [];
-        var userId = httpContext.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-        return context.ChangeTracker.Entries()
-            .Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted)
-            .Select(entry => new AuditLog
-            {
-                TableName = entry.Metadata.GetTableName() ?? entry.Metadata.Name,
-                KeyValues = JsonSerializer.Serialize(
-                    entry.Properties
-                        .Where(p => p.Metadata.IsPrimaryKey())
-                        .ToDictionary(p => p.Metadata.Name, p => p.CurrentValue)),
-                OldValues = entry.State == EntityState.Added ? null :
-                    JsonSerializer.Serialize(
-                        entry.Properties
-                            .Where(p => p.IsModified || entry.State == EntityState.Deleted)
-                            .ToDictionary(p => p.Metadata.Name, p => p.OriginalValue)),
-                NewValues = entry.State == EntityState.Deleted ? null :
-                    JsonSerializer.Serialize(
-                        entry.Properties
-                            .Where(p => p.IsModified || entry.State == EntityState.Added)
-                            .ToDictionary(p => p.Metadata.Name, p => p.CurrentValue)),
-                Action = entry.State.ToString(),
-                Timestamp = DateTime.UtcNow,
-                UserId = userId
-            }).ToList();
-    }
-}
-```
-
-## IDbCommandInterceptor — Intercept SQL
-
-```csharp
-// Log slow queries, add SQL comments, or modify SQL commands
-public class SlowQueryInterceptor(
-    ILogger<SlowQueryInterceptor> logger,
-    int thresholdMs = 100)
-    : DbCommandInterceptor
-{
-    private readonly ConcurrentDictionary<DbCommand, Stopwatch> _timers = new();
-
-    public override InterceptionResult<DbDataReader> ReaderExecuting(
-        DbCommand command,
-        CommandEventData eventData,
-        InterceptionResult<DbDataReader> result)
-    {
-        _timers[command] = Stopwatch.StartNew();
-        return result;
-    }
-
-    public override DbDataReader ReaderExecuted(
-        DbCommand command,
-        CommandExecutedEventData eventData,
-        DbDataReader result)
-    {
-        if (_timers.TryRemove(command, out var sw) && sw.ElapsedMilliseconds > thresholdMs)
-        {
-            logger.LogWarning(
-                "Slow query ({Elapsed}ms):\n{SQL}",
-                sw.ElapsedMilliseconds,
-                command.CommandText);
-        }
-        return result;
-    }
-}
-```
-
-## Shadow Properties — Track State Without Polluting Entities
-
-```csharp
-// Shadow properties: exist in EF model but not in the C# class
-// Great for audit fields you don't want on the entity
-
-modelBuilder.Entity<Product>(entity =>
-{
-    entity.Property<DateTime>("CreatedAt").HasDefaultValueSql("GETUTCDATE()");
-    entity.Property<DateTime>("UpdatedAt");
-    entity.Property<string?>("CreatedById");
+    var connStr = builder.Configuration.GetConnectionString("Default")!;
+    // Switch on environment or config:
+    return new SqliteConnectionFactory(connStr);
+    // return new SqlServerConnectionFactory(connStr);
 });
-
-// Read shadow property:
-var createdAt = db.Entry(product).Property<DateTime>("CreatedAt").CurrentValue;
-
-// Set in interceptor:
-entry.Property("UpdatedAt").CurrentValue = DateTime.UtcNow;
-
-// Query by shadow property:
-var recent = await db.Products
-    .Where(p => EF.Property<DateTime>(p, "CreatedAt") > DateTime.UtcNow.AddDays(-7))
-    .ToListAsync();
 ```
+
+## Multiple Databases
+
+```csharp
+// When your app connects to multiple databases, use named factories
+
+public interface IReadDbConnectionFactory : IDbConnectionFactory { }
+public interface IWriteDbConnectionFactory : IDbConnectionFactory { }
+
+// Read replica for queries, primary for writes
+public class ReadDbConnectionFactory(string connStr)
+    : SqlServerConnectionFactory(connStr), IReadDbConnectionFactory { }
+
+public class WriteDbConnectionFactory(string connStr)
+    : SqlServerConnectionFactory(connStr), IWriteDbConnectionFactory { }
+
+// Registration:
+builder.Services.AddSingleton<IReadDbConnectionFactory>(
+    new ReadDbConnectionFactory(
+        builder.Configuration.GetConnectionString("ReadReplica")!));
+
+builder.Services.AddSingleton<IWriteDbConnectionFactory>(
+    new WriteDbConnectionFactory(
+        builder.Configuration.GetConnectionString("Primary")!));
+
+// Repository using both:
+public class OrderRepository(
+    IReadDbConnectionFactory readFactory,
+    IWriteDbConnectionFactory writeFactory)
+{
+    public async Task<IEnumerable<Order>> GetAllAsync()
+    {
+        using var conn = readFactory.CreateConnection();  // goes to read replica
+        return await conn.QueryAsync<Order>("SELECT * FROM orders");
+    }
+
+    public async Task<int> CreateAsync(Order order)
+    {
+        using var conn = writeFactory.CreateConnection();  // goes to primary
+        return await conn.QuerySingleAsync<int>(
+            "INSERT INTO orders ... ; SELECT SCOPE_IDENTITY()", order);
+    }
+}
+```
+
+## Connection Configuration — Tuning the Pool
+
+```csharp
+// Connection string parameters control the pool
+// SQL Server:
+var connStr = new SqlConnectionStringBuilder
+{
+    DataSource = "myserver",
+    InitialCatalog = "mydb",
+    IntegratedSecurity = false,
+    UserID = "appuser",
+    Password = "...",
+    MinPoolSize = 5,          // keep 5 connections ready
+    MaxPoolSize = 100,        // max 100 concurrent connections
+    ConnectTimeout = 30,      // seconds to wait for a connection
+    CommandTimeout = 30,      // default command timeout
+    Pooling = true,           // enable pooling (default: true)
+    ApplicationName = "MyApp" // visible in SQL Server monitoring
+}.ConnectionString;
+
+// SQLite:
+var sqliteConnStr = new SqliteConnectionStringBuilder
+{
+    DataSource = "myapp.db",
+    Cache = SqliteCacheMode.Shared,  // shared cache for in-process concurrency
+    Mode = SqliteOpenMode.ReadWriteCreate
+}.ConnectionString;
+```
+
+## Managing Connection Lifetime in Background Services
+
+```csharp
+// Background services run outside the HTTP request lifecycle
+// Don't inject Scoped services; use the factory directly
+
+public class OrderProcessingService(
+    IDbConnectionFactory factory,
+    ILogger<OrderProcessingService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await ProcessBatchAsync(stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+        }
+    }
+
+    private async Task ProcessBatchAsync(CancellationToken ct)
+    {
+        // Open one connection for the whole batch (transaction scope)
+        using var conn = await factory.CreateOpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        try
+        {
+            var pending = await conn.QueryAsync<Order>(
+                "SELECT * FROM orders WHERE status = 'Pending' LIMIT 50",
+                transaction: tx);
+
+            foreach (var order in pending)
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE orders SET status = 'Processing' WHERE id = @Id",
+                    new { order.Id },
+                    transaction: tx);
+
+                // ... process each order ...
+            }
+
+            await tx.CommitAsync(ct);
+            logger.LogInformation("Processed {Count} orders", pending.Count());
+        }
+        catch (Exception ex)
+        {
+            await tx.RollbackAsync(ct);
+            logger.LogError(ex, "Batch processing failed");
+        }
+    }
+}
+```
+
+## Detecting Connection Leaks
+
+```csharp
+// Wrapping the connection factory to detect open connections in production
+
+#if DEBUG
+public class DiagnosticConnectionFactory(IDbConnectionFactory inner) : IDbConnectionFactory
+{
+    private int _openCount;
+
+    public IDbConnection CreateConnection()
+    {
+        Interlocked.Increment(ref _openCount);
+        var conn = inner.CreateConnection();
+        return new DiagnosticConnection(conn, () => Interlocked.Decrement(ref _openCount));
+    }
+
+    public int OpenConnectionCount => _openCount;
+}
+#endif
+
+// Log pool metrics at startup or in health checks:
+public class DatabaseHealthCheck(IDbConnectionFactory factory) : IHealthCheck
+{
+    public async Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context, CancellationToken ct)
+    {
+        try
+        {
+            using var conn = factory.CreateConnection();
+            var result = await conn.ExecuteScalarAsync<int>("SELECT 1");
+            return HealthCheckResult.Healthy("Database is reachable");
+        }
+        catch (Exception ex)
+        {
+            return HealthCheckResult.Unhealthy("Database unreachable", ex);
+        }
+    }
+}
+```
+
+<ConceptCallout type="tip" title="Keep Connections Short-Lived">
+The best practice with Dapper: open a connection, do your work, dispose immediately. For transactions, open once, do all work, commit/rollback, dispose. Don't hold connections open across multiple unrelated operations — the pool handles reuse efficiently behind the scenes.
+</ConceptCallout>
 
 <ExerciseBlock>
-1. Implement a complete audit system: `AuditableEntity` base class with `CreatedAt`, `CreatedBy`, `UpdatedAt`, `UpdatedBy`. Add an interceptor that auto-populates these. Verify it works by checking the fields after creating and updating a record.
-2. Add soft delete to your blog or shop domain: implement `SoftDeleteInterceptor`, add a global query filter, and test that (a) regular queries exclude deleted records, (b) `IgnoreQueryFilters()` shows them, (c) "deleting" actually sets `IsDeleted = true`.
-3. Build a slow query detector: `SlowQueryInterceptor` that logs warnings for any query taking more than 50ms. Test it by running a query on an unindexed column with many rows. Fix it with an index and confirm the warning disappears.
+1. Implement `IDbConnectionFactory` with both SQLite and SQL Server variants. In Program.cs, switch between them based on the environment: SQLite for Development, SQL Server for Staging/Production. Verify by running in both modes.
+2. Set up a read replica pattern: configure two connection strings in appsettings.json (`ReadReplica` and `Primary`). Create `IReadDbConnectionFactory` and `IWriteDbConnectionFactory`. Update `ProductRepository` to use reads on the replica and writes on primary.
+3. Add a health check endpoint `GET /health` that verifies the database is reachable using `IDbConnectionFactory`. Return the connection time in milliseconds. Register it with `builder.Services.AddHealthChecks()` and map it with `app.MapHealthChecks("/health")`.
 </ExerciseBlock>

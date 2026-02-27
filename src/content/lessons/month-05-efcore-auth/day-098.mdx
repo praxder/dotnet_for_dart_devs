@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Performance Optimization"
+title: "Dapper: CQRS and MediatR"
 day: 98
 week: 20
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "drift query optimization, sqflite indexes"
-csharpConcept: "query batching, indexes, connection pooling, DbContext pooling, benchmarking"
+dartConcept: "BLoC pattern in Flutter, command/event separation"
+csharpConcept: "CQRS, MediatR, IRequest<T>, IRequestHandler, pipeline behaviors, Dapper in handlers"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,239 +16,313 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-EF Core convenience can hide expensive operations. Understanding what SQL it generates — and when — separates mediocre APIs from fast ones. This lesson covers the most impactful EF Core performance techniques.
+CQRS (Command Query Responsibility Segregation) separates reads from writes. With MediatR, each operation becomes a self-contained request + handler class. Dapper fits naturally here: query handlers run optimized `SELECT` SQL, command handlers run `INSERT`/`UPDATE`/`DELETE` with transactions.
 
-## Log Generated SQL — Always Do This
+## CQRS with Dapper vs EF Core
 
-```csharp
-// Development: log all SQL and parameters
-builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite(connectionString)
-           .LogTo(Console.WriteLine, LogLevel.Information)
-           .EnableSensitiveDataLogging()  // shows parameter values
-           .EnableDetailedErrors());
+<CodeComparison>
+  <div slot="dart">
+  ```dart
+  // Flutter BLoC — similar concept:
+  // Events = Commands, States = Query Results
+  class OrderBloc extends Bloc<OrderEvent, OrderState> {
+    final OrderRepository _repo;
+    OrderBloc(this._repo) : super(OrderInitial()) {
+      on<PlaceOrderEvent>(_onPlaceOrder);
+      on<LoadOrderEvent>(_onLoadOrder);
+    }
+  }
+  ```
+  </div>
+  <div slot="csharp">
+  ```csharp
+  // CQRS with MediatR — each request is a separate class
+  // Commands use Dapper for writes + transactions
+  // Queries use Dapper for optimized SELECT SQL
 
-// Or with Serilog:
-options.LogTo(
-    msg => Log.Debug(msg),
-    new[] { DbLoggerCategory.Database.Command.Name },
-    LogLevel.Information);
+  public record PlaceOrderCommand(int CustomerId, List<OrderItemDto> Items)
+      : IRequest<int>;  // returns new order ID
+
+  public record GetOrderQuery(int OrderId)
+      : IRequest<OrderDetailDto?>;
+  ```
+  </div>
+</CodeComparison>
+
+## Setup
+
+```bash
+dotnet add package MediatR
 ```
 
-## Indexes — The Biggest Win
+```csharp
+// Program.cs
+builder.Services.AddMediatR(cfg =>
+    cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
+
+// Register connection factory (from day 97)
+builder.Services.AddSingleton<IDbConnectionFactory>(
+    new SqliteConnectionFactory(builder.Configuration.GetConnectionString("Default")!));
+```
+
+## Command Handler — Write Side
 
 ```csharp
-// Indexes are the #1 performance factor — misconfigured indexes cause full table scans
-modelBuilder.Entity<Order>(entity =>
+// Command: intent to change state
+public record PlaceOrderCommand(
+    int CustomerId,
+    List<OrderItemDto> Items) : IRequest<PlaceOrderResult>;
+
+public record PlaceOrderResult(int OrderId, decimal Total);
+public record OrderItemDto(int ProductId, int Quantity, decimal UnitPrice);
+
+// Handler: all business logic for this operation, uses Dapper directly
+public class PlaceOrderCommandHandler(IDbConnectionFactory factory)
+    : IRequestHandler<PlaceOrderCommand, PlaceOrderResult>
 {
-    // Single column index for common filter
-    entity.HasIndex(o => o.CustomerId);
-
-    // Composite index for combined filters (order matters!)
-    entity.HasIndex(o => new { o.Status, o.CreatedAt });
-    // Use when query: WHERE status = 'Pending' ORDER BY created_at
-
-    // Filtered index — only indexes pending orders
-    entity.HasIndex(o => o.CreatedAt)
-        .HasFilter("status = 'Pending'");
-
-    // Unique index
-    entity.HasIndex(o => o.OrderNumber).IsUnique();
-
-    // Include non-key columns (covering index — avoids table lookup)
-    entity.HasIndex(o => o.CustomerId)
-        .IncludeProperties(o => new { o.Total, o.Status });
-});
-```
-
-## Pagination — Skip/Take Done Right
-
-```csharp
-// BAD: offset pagination degrades at high page numbers
-// SQL: SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 50000
-// Problem: DB must read and discard 50,000 rows
-var page = await db.Orders
-    .OrderBy(o => o.Id)
-    .Skip(50000)
-    .Take(20)
-    .ToListAsync();
-
-// GOOD: keyset pagination (cursor-based) — O(1) regardless of page
-// SQL: SELECT * FROM orders WHERE id > 50020 ORDER BY id LIMIT 20
-var cursor = 50020;
-var nextPage = await db.Orders
-    .Where(o => o.Id > cursor)
-    .OrderBy(o => o.Id)
-    .Take(20)
-    .AsNoTracking()
-    .ToListAsync();
-// Next cursor: nextPage.LastOrDefault()?.Id
-```
-
-## Avoid Select * — Project What You Need
-
-```csharp
-// BAD: loads all columns including large text/binary fields
-var orders = await db.Orders
-    .Include(o => o.Customer)
-    .ToListAsync();
-
-// GOOD: project only what the UI needs
-var orderList = await db.Orders
-    .AsNoTracking()
-    .Select(o => new OrderSummaryDto
+    public async Task<PlaceOrderResult> Handle(
+        PlaceOrderCommand request,
+        CancellationToken ct)
     {
-        Id = o.Id,
-        CustomerName = o.Customer!.Name,  // auto-joins
-        Total = o.Total,
-        Status = o.Status,
-        CreatedAt = o.CreatedAt
-    })
-    .ToListAsync();
-// SQL: SELECT o.id, c.name, o.total, o.status, o.created_at
-//      FROM orders o INNER JOIN customers c ON o.customer_id = c.id
-```
+        using var conn = factory.CreateConnection();
+        await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
-## Connection Pooling and DbContext Pooling
+        try
+        {
+            // Validate and reserve inventory
+            foreach (var item in request.Items)
+            {
+                var affected = await conn.ExecuteAsync(@"
+                    UPDATE products
+                    SET stock_quantity = stock_quantity - @Qty
+                    WHERE id = @ProductId AND stock_quantity >= @Qty",
+                    new { Qty = item.Quantity, item.ProductId },
+                    transaction: tx);
 
-```csharp
-// Default: DbContext is Scoped — new instance per HTTP request
-// The underlying SQL connection IS pooled by ADO.NET automatically
+                if (affected == 0)
+                    throw new InsufficientStockException(item.ProductId);
+            }
 
-// DbContext Pooling: reuse DbContext instances across requests
-// Saves allocation cost — good for high-throughput APIs
-builder.Services.AddDbContextPool<AppDbContext>(options =>
-    options.UseSqlServer(connectionString),
-    poolSize: 128);  // default 1024
+            // Create order
+            var total = request.Items.Sum(i => i.Quantity * i.UnitPrice);
+            var orderId = await conn.QuerySingleAsync<int>(@"
+                INSERT INTO orders (customer_id, total, status, ordered_at)
+                VALUES (@CustomerId, @Total, 'Pending', @Now);
+                SELECT last_insert_rowid();",
+                new { request.CustomerId, Total = total, Now = DateTime.UtcNow },
+                transaction: tx);
 
-// When using DbContextPool, avoid storing state in DbContext itself
-// (fields, custom properties) — they're shared across requests
+            // Create order lines
+            await conn.ExecuteAsync(@"
+                INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
+                VALUES (@OrderId, @ProductId, @Quantity, @UnitPrice)",
+                request.Items.Select(i => new
+                {
+                    OrderId = orderId,
+                    i.ProductId,
+                    i.Quantity,
+                    i.UnitPrice
+                }),
+                transaction: tx);
 
-// AddDbContextFactory: for background services, batch jobs
-builder.Services.AddDbContextFactory<AppDbContext>(options =>
-    options.UseSqlite(connectionString));
-
-// Usage:
-public class BatchJob(IDbContextFactory<AppDbContext> factory)
-{
-    public async Task ProcessAsync()
-    {
-        await using var db = await factory.CreateDbContextAsync();
-        // db is a fresh scoped context
+            await tx.CommitAsync(ct);
+            return new PlaceOrderResult(orderId, total);
+        }
+        catch
+        {
+            await tx.RollbackAsync(ct);
+            throw;
+        }
     }
 }
 ```
 
-## Batch Operations — Minimize Round Trips
+## Query Handler — Read Side
 
 ```csharp
-// BAD: N+1 insert pattern — N round trips to the database
-foreach (var dto in importedProducts)
+// Query: read-only, returns a DTO — no transaction needed
+public record GetOrderQuery(int OrderId) : IRequest<OrderDetailDto?>;
+
+public record OrderDetailDto(
+    int Id,
+    string CustomerName,
+    string Status,
+    decimal Total,
+    DateTime OrderedAt,
+    List<OrderLineDto> Lines);
+
+public record OrderLineDto(
+    string ProductName,
+    int Quantity,
+    decimal UnitPrice,
+    decimal LineTotal);
+
+public class GetOrderQueryHandler(IDbConnectionFactory factory)
+    : IRequestHandler<GetOrderQuery, OrderDetailDto?>
 {
-    db.Products.Add(new Product { Name = dto.Name, Price = dto.Price });
-    await db.SaveChangesAsync();  // N round trips!
+    public async Task<OrderDetailDto?> Handle(GetOrderQuery request, CancellationToken ct)
+    {
+        using var conn = factory.CreateConnection();
+
+        // Use QueryMultiple for a single round trip
+        using var multi = await conn.QueryMultipleAsync(@"
+            SELECT o.id, c.name AS CustomerName, o.status, o.total, o.ordered_at
+            FROM orders o
+            INNER JOIN customers c ON c.id = o.customer_id
+            WHERE o.id = @OrderId;
+
+            SELECT p.name AS ProductName, ol.quantity, ol.unit_price,
+                   ol.quantity * ol.unit_price AS LineTotal
+            FROM order_lines ol
+            INNER JOIN products p ON p.id = ol.product_id
+            WHERE ol.order_id = @OrderId
+            ORDER BY ol.id;",
+            new { OrderId = request.OrderId });
+
+        var order = await multi.ReadFirstOrDefaultAsync<dynamic>();
+        if (order is null) return null;
+
+        var lines = (await multi.ReadAsync<OrderLineDto>()).ToList();
+
+        return new OrderDetailDto(
+            order.id,
+            order.CustomerName,
+            order.status,
+            order.total,
+            order.ordered_at,
+            lines);
+    }
+}
+```
+
+## Using MediatR in Minimal APIs
+
+```csharp
+var orders = app.MapGroup("/api/orders");
+
+orders.MapPost("/", async (PlaceOrderCommand command, IMediator mediator) =>
+{
+    var result = await mediator.Send(command);
+    return Results.Created($"/api/orders/{result.OrderId}", result);
+});
+
+orders.MapGet("/{id:int}", async (int id, IMediator mediator) =>
+{
+    var order = await mediator.Send(new GetOrderQuery(id));
+    return order is null ? Results.NotFound() : Results.Ok(order);
+});
+```
+
+## Pipeline Behaviors — Cross-Cutting Concerns
+
+```csharp
+// Behaviors wrap every MediatR request — logging, validation, timing
+// Works exactly the same regardless of whether handlers use Dapper or EF Core
+
+// Logging behavior:
+public class LoggingBehavior<TRequest, TResponse>(
+    ILogger<LoggingBehavior<TRequest, TResponse>> logger)
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+{
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken ct)
+    {
+        logger.LogInformation("→ {Request}: {@Data}", typeof(TRequest).Name, request);
+        var sw = Stopwatch.StartNew();
+
+        var response = await next();
+
+        logger.LogInformation("← {Request} completed in {Elapsed}ms",
+            typeof(TRequest).Name, sw.ElapsedMilliseconds);
+        return response;
+    }
 }
 
-// GOOD: single SaveChanges for all changes
-var products = importedProducts.Select(dto => new Product
-{
-    Name = dto.Name, Price = dto.Price
-}).ToList();
-db.Products.AddRange(products);
-await db.SaveChangesAsync();  // 1 round trip, batched INSERT
-
-// EF Core batches up to 42 statements per round trip by default
-// Configure: options.UseSqlServer(cs, o => o.MaxBatchSize(100))
-
-// For truly massive imports (10k+ rows), use BulkExtensions or COPY:
-// dotnet add package EFCore.BulkExtensions
-await db.BulkInsertAsync(products);  // single BULK INSERT — fastest
+// Register (order = outermost first):
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
 ```
 
-## Change Tracker Optimization
+## Read-Optimized Queries — The Real CQRS Win
 
 ```csharp
-// EF Core's change tracker scans all tracked entities on SaveChanges
-// For bulk reads, disable tracking:
-var products = await db.Products.AsNoTracking().ToListAsync();
+// The read side can use a completely different SQL shape than the write model
+// No entity classes needed — project directly to DTOs
 
-// For read-heavy DbContexts, disable globally:
-public class ReadOnlyDbContext(DbContextOptions options) : DbContext(options)
+public record ListOrdersQuery(
+    int? CustomerId = null,
+    string? Status = null,
+    int Page = 1,
+    int PageSize = 20) : IRequest<PagedResult<OrderSummaryDto>>;
+
+public record OrderSummaryDto(
+    int Id,
+    string CustomerName,
+    int LineCount,
+    decimal Total,
+    string Status,
+    DateTime OrderedAt);
+
+public class ListOrdersHandler(IDbConnectionFactory factory)
+    : IRequestHandler<ListOrdersQuery, PagedResult<OrderSummaryDto>>
 {
-    public ReadOnlyDbContext() : this(new DbContextOptions<ReadOnlyDbContext>()) { }
+    public async Task<PagedResult<OrderSummaryDto>> Handle(ListOrdersQuery request, CancellationToken ct)
+    {
+        using var conn = factory.CreateConnection();
 
-    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-        => optionsBuilder.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
+        var conditions = new List<string>();
+        var parameters = new DynamicParameters();
+
+        if (request.CustomerId.HasValue)
+        {
+            conditions.Add("o.customer_id = @CustomerId");
+            parameters.Add("@CustomerId", request.CustomerId.Value);
+        }
+
+        if (!string.IsNullOrEmpty(request.Status))
+        {
+            conditions.Add("o.status = @Status");
+            parameters.Add("@Status", request.Status);
+        }
+
+        var whereClause = conditions.Count > 0
+            ? "WHERE " + string.Join(" AND ", conditions)
+            : "";
+
+        parameters.Add("@Offset", (request.Page - 1) * request.PageSize);
+        parameters.Add("@Limit", request.PageSize);
+
+        var sql = $@"
+            SELECT
+                o.id,
+                c.name  AS CustomerName,
+                COUNT(ol.id) AS LineCount,
+                o.total,
+                o.status,
+                o.ordered_at
+            FROM orders o
+            INNER JOIN customers c ON c.id = o.customer_id
+            LEFT JOIN order_lines ol ON ol.order_id = o.id
+            {whereClause}
+            GROUP BY o.id, c.name, o.total, o.status, o.ordered_at
+            ORDER BY o.ordered_at DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        var orders = await conn.QueryAsync<OrderSummaryDto>(sql, parameters);
+
+        var total = await conn.ExecuteScalarAsync<int>(
+            $"SELECT COUNT(*) FROM orders o {whereClause}", parameters);
+
+        return new PagedResult<OrderSummaryDto>(orders.ToList(), total, request.Page, request.PageSize);
+    }
 }
-
-// Detach entities after saving if you don't need to track them:
-var order = new Order { /* ... */ };
-db.Orders.Add(order);
-await db.SaveChangesAsync();
-db.Entry(order).State = EntityState.Detached;  // free from change tracker
 ```
-
-## Query Tags — Identify Queries in Logs
-
-```csharp
-// Tag queries so you can find them in SQL logs / monitoring
-var orders = await db.Orders
-    .TagWith("GetPendingOrders-DashboardPage")
-    .Where(o => o.Status == OrderStatus.Pending)
-    .ToListAsync();
-// SQL: -- GetPendingOrders-DashboardPage
-//      SELECT ... FROM orders WHERE status = 'Pending'
-
-// Automatically tag with caller info:
-var products = await db.Products
-    .TagWithCallSite()  // adds file:line to SQL comment
-    .ToListAsync();
-```
-
-## Benchmarking EF Core Queries
-
-```csharp
-// BenchmarkDotNet — measure actual performance differences
-[MemoryDiagnoser]
-public class EfBenchmarks
-{
-    private AppDbContext _db = null!;
-
-    [GlobalSetup]
-    public void Setup() => _db = new AppDbContext(/* ... */);
-
-    [Benchmark(Baseline = true)]
-    public async Task<List<Order>> WithTracking()
-        => await _db.Orders.Include(o => o.Customer).Take(100).ToListAsync();
-
-    [Benchmark]
-    public async Task<List<Order>> WithoutTracking()
-        => await _db.Orders.AsNoTracking().Include(o => o.Customer).Take(100).ToListAsync();
-
-    [Benchmark]
-    public async Task<List<OrderDto>> WithProjection()
-        => await _db.Orders
-            .AsNoTracking()
-            .Take(100)
-            .Select(o => new OrderDto(o.Id, o.Customer!.Name, o.Total))
-            .ToListAsync();
-}
-// Result: projection is typically 2-5x faster and allocates 3-10x less memory
-```
-
-<ConceptCallout type="tip" title="Performance Checklist">
-1. **Log SQL** in development — know what queries run
-2. **Index** filtered/sorted columns — check execution plans
-3. **AsNoTracking()** for all read-only queries
-4. **Project with Select()** instead of loading full entities
-5. **Batch SaveChanges** — don't call it in loops
-6. **Avoid N+1** — use Include() or Split queries
-7. **Keyset pagination** for large datasets
-8. **DbContext pooling** for high-throughput APIs
-</ConceptCallout>
 
 <ExerciseBlock>
-1. Enable SQL logging and run 5 different queries against your database. Identify: which query has the most round trips? Which generates the largest result set? Add indexes and re-run to compare execution time.
-2. Benchmark these three approaches for loading 1000 orders with customer names: (a) `Include` with tracking, (b) `Include` with `AsNoTracking`, (c) projection with `Select`. Measure time and allocations with `BenchmarkDotNet` or `Stopwatch` + `GC.GetTotalAllocatedBytes()`.
-3. Implement cursor-based pagination for an orders endpoint. The cursor is the last seen `CreatedAt` + `Id` (to handle ties). Compare SQL and performance against skip/take for page 1000.
+1. Implement CQRS for a product catalog: `CreateProductCommand`, `UpdateProductCommand`, `DeleteProductCommand`, `GetProductQuery`, and `ListProductsQuery`. Each as a separate handler class injecting `IDbConnectionFactory`. Wire them to Minimal API endpoints with MediatR.
+2. Add a `ValidationBehavior` that validates commands using FluentValidation. Add a `PlaceOrderCommandValidator` that checks: `CustomerId > 0`, `Items` list is not empty, each item has `Quantity > 0` and `UnitPrice > 0`. The behavior should throw `ValidationException` with all failures if validation fails.
+3. Write two handler implementations for `GetOrderQuery`: one using `QueryMultiple` (two queries) and one using a single JOIN with multi-mapping. Benchmark them with 10,000 orders in the database. Which is faster? Under what conditions would each be preferred?
 </ExerciseBlock>

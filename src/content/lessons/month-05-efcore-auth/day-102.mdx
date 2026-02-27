@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Multi-Tenancy Patterns"
+title: "Dapper: Performance and Bulk Operations"
 day: 102
 week: 21
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "multi-tenant apps in Flutter, tenant context"
-csharpConcept: "row-level multi-tenancy, schema-per-tenant, global query filters, tenant resolution"
+dartConcept: "performance in sqflite, batch inserts in Dart"
+csharpConcept: "buffered vs unbuffered, async streaming, bulk insert, SqlBulkCopy, benchmarking"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,260 +16,256 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-Multi-tenancy lets one application serve multiple isolated clients. There are three approaches: shared database with tenant column (row-level), separate schemas per tenant, or separate databases per tenant. EF Core handles all three, with row-level being most common in SaaS applications.
+Dapper is already very fast — near ADO.NET performance for single-row operations. But for bulk operations, large result sets, or high-concurrency APIs, there are specific techniques that make a significant difference.
 
-## Strategy 1: Row-Level Isolation (Shared Database)
+## Buffered vs Unbuffered Queries
 
 ```csharp
-// Every tenant's data lives in the same tables, filtered by tenant ID
-// Simplest, cheapest, but requires discipline to never forget the filter
+// BUFFERED (default): loads all rows into memory, then returns
+// Good for: small result sets, when you need to iterate multiple times
+var products = await conn.QueryAsync<Product>(
+    "SELECT * FROM products WHERE is_active = 1");
+// All rows are in memory — safe to use .Count(), iterate multiple times, etc.
 
-// Tenant-aware base entity
-public interface ITenantEntity
+// UNBUFFERED: streams rows one at a time — O(1) memory
+// Good for: large result sets that you process row-by-row
+var products = await conn.QueryAsync<Product>(
+    "SELECT * FROM products WHERE is_active = 1",
+    buffered: false);
+// Returns IEnumerable<T> backed by a live DataReader
+// WARNING: must iterate fully before disposing the connection!
+// Don't use buffered: false with LINQ filtering that breaks early (.First(), .Take(), etc.)
+```
+
+## Streaming Large Results — IAsyncEnumerable
+
+```csharp
+// Process millions of rows without loading them all into memory
+// Useful for: exports, reports, data migrations
+
+public async IAsyncEnumerable<Order> StreamAllOrdersAsync(
+    [EnumeratorCancellation] CancellationToken ct = default)
 {
-    string TenantId { get; set; }
+    using var conn = factory.CreateConnection();
+
+    // Use QueryUnbufferedAsync for true streaming (Dapper 2.1+)
+    var orders = conn.QueryUnbufferedAsync<Order>(
+        "SELECT * FROM orders ORDER BY ordered_at",
+        cancellationToken: ct);
+
+    await foreach (var order in orders.WithCancellation(ct))
+        yield return order;
 }
 
-public abstract class TenantEntity : ITenantEntity
+// Minimal API streaming endpoint — sends rows as they arrive
+app.MapGet("/api/orders/export", async (
+    IOrderRepository repo,
+    HttpResponse response,
+    CancellationToken ct) =>
 {
-    public string TenantId { get; set; } = "";
-}
+    response.ContentType = "text/csv";
+    response.Headers.ContentDisposition = "attachment; filename=orders.csv";
+    await response.WriteAsync("Id,CustomerId,Total,Status,OrderedAt\n", ct);
 
-// Product belongs to a tenant
-public class Product : TenantEntity
-{
-    public int Id { get; set; }
-    public required string Name { get; set; }
-    public decimal Price { get; set; }
-}
-
-// Tenant context — resolved from JWT/header/subdomain
-public interface ITenantContext
-{
-    string TenantId { get; }
-}
-
-public class TenantContext(IHttpContextAccessor httpContext) : ITenantContext
-{
-    public string TenantId
+    await foreach (var order in repo.StreamAllOrdersAsync(ct))
     {
-        get
+        await response.WriteAsync(
+            $"{order.Id},{order.CustomerId},{order.Total},{order.Status},{order.OrderedAt:O}\n", ct);
+    }
+});
+```
+
+## Bulk Insert — Multiple Approaches
+
+```csharp
+// Approach 1: ExecuteAsync with a list (simple, works everywhere)
+// Dapper runs INSERT once per item — N round trips
+// OK for hundreds of rows; slow for thousands
+var newProducts = GetProductsFromCsv();
+await conn.ExecuteAsync(
+    "INSERT INTO products (name, price, category_id) VALUES (@Name, @Price, @CategoryId)",
+    newProducts);
+// 1000 products = 1000 INSERT statements
+
+// Approach 2: Multi-value INSERT (one statement, N value groups)
+// Much faster — single round trip regardless of count
+public async Task BulkInsertProductsAsync(IEnumerable<Product> products)
+{
+    using var conn = factory.CreateConnection();
+    var list = products.ToList();
+    const int batchSize = 500;  // SQLite limit: 999 params / columns-per-row
+
+    foreach (var batch in list.Chunk(batchSize))
+    {
+        var parameters = new DynamicParameters();
+        var valueRows = new List<string>();
+
+        for (int i = 0; i < batch.Length; i++)
         {
-            // Option 1: From JWT claim
-            var claim = httpContext.HttpContext?.User.FindFirstValue("tenant_id");
-            if (claim is not null) return claim;
-
-            // Option 2: From subdomain (acme.myapp.com → "acme")
-            var host = httpContext.HttpContext?.Request.Host.Host ?? "";
-            var parts = host.Split('.');
-            if (parts.Length >= 3) return parts[0];
-
-            // Option 3: From header
-            return httpContext.HttpContext?.Request.Headers["X-Tenant-Id"].FirstOrDefault()
-                ?? throw new InvalidOperationException("No tenant context");
+            valueRows.Add($"(@Name{i}, @Price{i}, @CategoryId{i})");
+            parameters.Add($"@Name{i}", batch[i].Name);
+            parameters.Add($"@Price{i}", batch[i].Price);
+            parameters.Add($"@CategoryId{i}", batch[i].CategoryId);
         }
+
+        var sql = $"INSERT INTO products (name, price, category_id) VALUES {string.Join(", ", valueRows)}";
+        await conn.ExecuteAsync(sql, parameters);
+    }
+}
+
+// Approach 3: SqlBulkCopy — fastest for SQL Server (millions of rows)
+public async Task SqlBulkInsertAsync(IEnumerable<Product> products, IDbConnection conn)
+{
+    var sqlConn = (SqlConnection)conn;
+    await sqlConn.OpenAsync();
+
+    using var bulkCopy = new SqlBulkCopy(sqlConn)
+    {
+        DestinationTableName = "products",
+        BatchSize = 5000,
+        BulkCopyTimeout = 120
+    };
+    bulkCopy.ColumnMappings.Add("Name", "name");
+    bulkCopy.ColumnMappings.Add("Price", "price");
+    bulkCopy.ColumnMappings.Add("CategoryId", "category_id");
+
+    var table = new DataTable();
+    table.Columns.Add("Name",       typeof(string));
+    table.Columns.Add("Price",      typeof(decimal));
+    table.Columns.Add("CategoryId", typeof(int));
+
+    foreach (var p in products)
+        table.Rows.Add(p.Name, p.Price, p.CategoryId);
+
+    await bulkCopy.WriteToServerAsync(table);
+}
+// SqlBulkCopy: 50,000 rows → ~0.5 seconds vs ~30 seconds with individual INSERTs
+```
+
+## Bulk Update and Delete
+
+```csharp
+// Bulk update: build a single UPDATE with CASE WHEN
+public async Task BulkUpdatePricesAsync(IEnumerable<(int Id, decimal Price)> updates)
+{
+    using var conn = factory.CreateConnection();
+    var list = updates.ToList();
+
+    if (!list.Any()) return;
+
+    var parameters = new DynamicParameters();
+    var cases = new List<string>();
+    var ids = new List<int>();
+
+    for (int i = 0; i < list.Count; i++)
+    {
+        cases.Add($"WHEN id = @Id{i} THEN @Price{i}");
+        parameters.Add($"@Id{i}", list[i].Id);
+        parameters.Add($"@Price{i}", list[i].Price);
+        ids.Add(list[i].Id);
+    }
+
+    var sql = $@"
+        UPDATE products
+        SET price = CASE {string.Join(" ", cases)} END
+        WHERE id IN ({string.Join(",", ids)})";
+
+    await conn.ExecuteAsync(sql, parameters);
+}
+
+// Bulk delete (simple and fast):
+public async Task BulkDeleteAsync(IEnumerable<int> ids)
+{
+    if (!ids.Any()) return;
+    using var conn = factory.CreateConnection();
+    await conn.ExecuteAsync(
+        "DELETE FROM products WHERE id IN @Ids",
+        new { Ids = ids });
+}
+```
+
+## Async Best Practices
+
+```csharp
+// Always use async overloads — they don't block the thread pool
+// ✅ Correct:
+var products = await conn.QueryAsync<Product>("SELECT * FROM products");
+
+// ❌ Avoid:
+var products = conn.Query<Product>("SELECT * FROM products");  // synchronous = blocks thread
+
+// Parallel queries — when results are independent:
+public async Task<DashboardData> GetDashboardAsync()
+{
+    using var conn = factory.CreateConnection();
+
+    // Run independent queries in parallel (same connection, different commands)
+    // Note: SQLite doesn't support true parallel queries on one connection
+    // For SQL Server / PostgreSQL: open separate connections for true parallelism
+    var ordersTask   = conn.QueryAsync<OrderSummary>("SELECT ...");
+    var productsTask = conn.QueryAsync<ProductSummary>("SELECT ...");
+    var customersTask = conn.QueryAsync<CustomerSummary>("SELECT ...");
+
+    await Task.WhenAll(ordersTask, productsTask, customersTask);
+
+    return new DashboardData(
+        await ordersTask,
+        await productsTask,
+        await customersTask);
+}
+```
+
+## Benchmarking Dapper Queries
+
+```csharp
+// Use BenchmarkDotNet to measure actual performance differences
+// dotnet add package BenchmarkDotNet
+
+[MemoryDiagnoser]
+public class DapperBenchmarks
+{
+    private IDbConnectionFactory _factory = null!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _factory = new SqliteConnectionFactory("Data Source=bench.db");
+        // Seed 10,000 products
+    }
+
+    [Benchmark(Baseline = true)]
+    public async Task<List<Product>> QueryAll()
+    {
+        using var conn = _factory.CreateConnection();
+        return (await conn.QueryAsync<Product>("SELECT * FROM products")).ToList();
+    }
+
+    [Benchmark]
+    public async Task<List<ProductDto>> QueryProjected()
+    {
+        using var conn = _factory.CreateConnection();
+        return (await conn.QueryAsync<ProductDto>(
+            "SELECT id, name, price FROM products")).ToList();
+    }
+
+    [Benchmark]
+    public async Task<List<Product>> QueryUnbuffered()
+    {
+        using var conn = _factory.CreateConnection();
+        var results = new List<Product>();
+        await foreach (var p in conn.QueryUnbufferedAsync<Product>("SELECT * FROM products"))
+            results.Add(p);
+        return results;
     }
 }
 ```
 
-## Global Query Filter for Tenant Isolation
-
-```csharp
-public class AppDbContext(
-    DbContextOptions<AppDbContext> options,
-    ITenantContext tenantContext)
-    : DbContext(options)
-{
-    private string CurrentTenantId => tenantContext.TenantId;
-
-    public DbSet<Product> Products { get; set; }
-    public DbSet<Order> Orders { get; set; }
-
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        // Apply global filter to ALL tenant entities automatically
-        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
-        {
-            if (typeof(ITenantEntity).IsAssignableFrom(entityType.ClrType))
-            {
-                var method = typeof(AppDbContext)
-                    .GetMethod(nameof(ApplyTenantFilter),
-                        BindingFlags.NonPublic | BindingFlags.Static)!
-                    .MakeGenericMethod(entityType.ClrType);
-
-                method.Invoke(null, [modelBuilder, this]);
-            }
-        }
-    }
-
-    private static void ApplyTenantFilter<TEntity>(
-        ModelBuilder builder,
-        AppDbContext context)
-        where TEntity : class, ITenantEntity
-    {
-        builder.Entity<TEntity>()
-            .HasQueryFilter(e => e.TenantId == context.CurrentTenantId);
-    }
-
-    public override Task<int> SaveChangesAsync(CancellationToken ct = default)
-    {
-        // Auto-assign TenantId to new entities
-        foreach (var entry in ChangeTracker.Entries<ITenantEntity>()
-            .Where(e => e.State == EntityState.Added))
-        {
-            entry.Entity.TenantId = CurrentTenantId;
-        }
-        return base.SaveChangesAsync(ct);
-    }
-}
-
-// Registration — TenantContext is Scoped (one per request):
-builder.Services.AddScoped<ITenantContext, TenantContext>();
-builder.Services.AddDbContext<AppDbContext>();
-// With pooling, use AddDbContextFactory instead
-```
-
-## Tenant Middleware — Validate Tenant Early
-
-```csharp
-public class TenantMiddleware(RequestDelegate next, IServiceProvider sp)
-{
-    public async Task InvokeAsync(HttpContext context)
-    {
-        // Resolve tenant from request
-        var tenantId = ResolveTenantId(context);
-
-        if (tenantId is null)
-        {
-            context.Response.StatusCode = 400;
-            await context.Response.WriteAsync("Missing tenant identifier");
-            return;
-        }
-
-        // Validate tenant exists in tenant registry
-        using var scope = sp.CreateScope();
-        var registry = scope.ServiceProvider.GetRequiredService<ITenantRegistry>();
-        var tenant = await registry.GetTenantAsync(tenantId);
-
-        if (tenant is null || !tenant.IsActive)
-        {
-            context.Response.StatusCode = 404;
-            await context.Response.WriteAsync("Tenant not found or inactive");
-            return;
-        }
-
-        // Store in HttpContext for downstream use
-        context.Items["TenantId"] = tenantId;
-        context.Items["Tenant"] = tenant;
-        await next(context);
-    }
-
-    private string? ResolveTenantId(HttpContext context)
-    {
-        // Try multiple resolution strategies
-        if (context.Request.Headers.TryGetValue("X-Tenant-Id", out var header))
-            return header.FirstOrDefault();
-
-        var host = context.Request.Host.Host;
-        var subdomain = host.Split('.').FirstOrDefault();
-        if (subdomain is not null and not "www" and not "api")
-            return subdomain;
-
-        return context.User.FindFirstValue("tenant_id");
-    }
-}
-```
-
-## Strategy 2: Schema-Per-Tenant
-
-```csharp
-// Each tenant gets their own schema: tenant1.products, tenant2.products
-// More isolation, more complexity
-
-public class SchemaAwareDbContext(
-    DbContextOptions options,
-    string tenantSchema)
-    : DbContext(options)
-{
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        // All entities go in the tenant's schema
-        modelBuilder.HasDefaultSchema(tenantSchema);
-    }
-}
-
-// Factory that creates context for a specific tenant schema
-public class TenantDbContextFactory(
-    IConfiguration config,
-    ITenantContext tenantContext)
-{
-    public AppDbContext Create()
-    {
-        var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
-        optionsBuilder.UseSqlServer(config.GetConnectionString("Default"));
-
-        return new AppDbContext(
-            optionsBuilder.Options,
-            tenantContext.TenantId);  // becomes the schema name
-    }
-}
-
-// Migration: run per-tenant migrations
-// dotnet ef database update -- --schema tenant_acme
-```
-
-## Strategy 3: Database-Per-Tenant
-
-```csharp
-// Each tenant has their own database — maximum isolation, highest cost
-
-public class TenantConnectionStringResolver(
-    ITenantContext tenantContext,
-    ITenantRegistry registry)
-{
-    public async Task<string> GetConnectionStringAsync()
-    {
-        var tenant = await registry.GetTenantAsync(tenantContext.TenantId);
-        return tenant?.ConnectionString
-            ?? throw new InvalidOperationException($"No connection string for tenant {tenantContext.TenantId}");
-    }
-}
-
-// DbContext with dynamic connection string
-public class TenantDbContext : DbContext
-{
-    private readonly string _connectionString;
-
-    public TenantDbContext(string connectionString)
-    {
-        _connectionString = connectionString;
-    }
-
-    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-        => optionsBuilder.UseSqlServer(_connectionString);
-}
-
-// Onboarding new tenant:
-public async Task ProvisionTenantAsync(string tenantId, string connectionString)
-{
-    var options = new DbContextOptionsBuilder<TenantDbContext>()
-        .UseSqlServer(connectionString)
-        .Options;
-
-    using var db = new TenantDbContext(options);
-    await db.Database.MigrateAsync();  // run all migrations for new tenant DB
-    await SeedDefaultDataAsync(db);
-}
-```
-
-<ConceptCallout type="tip" title="Choosing a Multi-Tenancy Strategy">
-- **Row-level**: Easiest to implement. Use when you have many small tenants and cost is a concern. Risk: bugs can leak data between tenants if filters are bypassed.
-- **Schema-per-tenant**: Good balance of isolation and cost. Works well with PostgreSQL. Requires per-tenant migrations.
-- **Database-per-tenant**: Maximum isolation, GDPR-friendly (easy data deletion). Use for enterprise/compliance-heavy tenants or when tenants need different schemas.
+<ConceptCallout type="tip" title="Dapper Performance Profile">
+Dapper is typically **5-10x faster than EF Core** for read operations (less mapping overhead, no change tracking) and roughly equal for writes. Its main performance advantage is predictability: the SQL you write is exactly what runs — no hidden N+1, no lazy loading surprises, no Cartesian explosion.
 </ConceptCallout>
 
 <ExerciseBlock>
-1. Implement row-level multi-tenancy for a `ShopContext` with `Product` and `Order` entities. Use `ITenantEntity` + global query filters. Write a test that creates two tenants with different products and verifies that querying as tenant A never returns tenant B's products.
-2. Tenant registration endpoint: `POST /api/tenants` accepts a tenant name, auto-generates a tenant ID (slug from name), creates default configuration, and seeds initial data. Add a tenant lookup service backed by its own `TenantRegistryDbContext` (not tenant-isolated).
-3. Security exercise: write a test that attempts to bypass the tenant filter by using `IgnoreQueryFilters()` from a controller action. Verify that your authorization middleware prevents non-admin users from accessing that endpoint.
+1. Benchmark three approaches for inserting 10,000 products: (a) `ExecuteAsync` with a list (N individual INSERTs), (b) multi-value INSERT batched in groups of 500, (c) `SqlBulkCopy` (SQL Server) or equivalent. Record time and rows-per-second for each.
+2. Implement a streaming CSV export endpoint for orders that can handle 1 million rows without exceeding 50MB RAM usage. Verify with `GC.GetTotalAllocatedBytes()` and `Process.GetCurrentProcess().WorkingSet64` that memory stays bounded during the export.
+3. Write a `DataCleanupService` as a BackgroundService that runs nightly: deletes orders older than 5 years (`DELETE FROM orders WHERE ordered_at < @Cutoff`), archives audit logs older than 2 years to a separate table, and logs the row counts for each operation. Use a transaction so both operations are atomic.
 </ExerciseBlock>

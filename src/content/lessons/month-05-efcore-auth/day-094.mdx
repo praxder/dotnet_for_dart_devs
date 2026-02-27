@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Transactions and Concurrency"
+title: "Dapper: Multi-Mapping and Relationships"
 day: 94
 week: 19
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "sqflite transactions, optimistic locking"
-csharpConcept: "DbTransaction, TransactionScope, RowVersion, ConcurrencyToken, DbUpdateConcurrencyException"
+dartConcept: "manual join mapping in sqflite, nested objects from SQL"
+csharpConcept: "multi-mapping, splitOn, QueryMultiple, one-to-many with dictionary"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,244 +16,234 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-Transactions and concurrency control are critical for data integrity in any production system. EF Core provides both explicit transaction management and optimistic concurrency — protecting against lost updates when multiple users modify the same data.
+With EF Core, navigation properties load related data automatically. With Dapper, you write the JOIN and tell Dapper how to split the result row into multiple objects. This gives you exact control over what SQL runs, at the cost of a bit more mapping code.
 
-## Transactions in EF Core
-
-```csharp
-// By default, SaveChangesAsync() wraps all changes in a single transaction
-// For multi-step operations spanning multiple SaveChanges calls:
-
-public class OrderService(AppDbContext db)
-{
-    public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request)
-    {
-        // Explicit transaction
-        await using var transaction = await db.Database.BeginTransactionAsync();
-        try
-        {
-            // Step 1: Deduct inventory
-            foreach (var item in request.Items)
-            {
-                var product = await db.Products.FindAsync(item.ProductId)
-                    ?? throw new InvalidOperationException($"Product {item.ProductId} not found");
-
-                if (product.StockQuantity < item.Quantity)
-                    throw new InvalidOperationException($"Insufficient stock for {product.Name}");
-
-                product.StockQuantity -= item.Quantity;
-            }
-            await db.SaveChangesAsync();  // save inventory changes
-
-            // Step 2: Create order
-            var order = new Order
-            {
-                CustomerId = request.CustomerId,
-                Lines = request.Items.Select(i => new OrderLine
-                {
-                    ProductId = i.ProductId,
-                    Quantity = i.Quantity,
-                    UnitPrice = i.UnitPrice
-                }).ToList(),
-                Total = request.Items.Sum(i => i.Quantity * i.UnitPrice),
-                Status = OrderStatus.Pending
-            };
-            db.Orders.Add(order);
-            await db.SaveChangesAsync();  // save order
-
-            // Step 3: Commit both operations atomically
-            await transaction.CommitAsync();
-            return order;
-        }
-        catch
-        {
-            await transaction.RollbackAsync();  // undo both SaveChanges
-            throw;
-        }
-    }
-}
-```
-
-## Savepoints — Partial Rollback
+## Multi-Mapping — JOIN to Nested Objects
 
 ```csharp
-// SQL Server and PostgreSQL support savepoints within a transaction
-await using var transaction = await db.Database.BeginTransactionAsync();
-
-db.Orders.Add(order);
-await db.SaveChangesAsync();
-
-await transaction.CreateSavepointAsync("AfterOrder");
-
-try
+// The entities:
+public class Order
 {
-    await ProcessPaymentAsync(order);
-    await db.SaveChangesAsync();
-    await transaction.CommitAsync();
+    public int Id { get; set; }
+    public decimal Total { get; set; }
+    public DateTime OrderedAt { get; set; }
+    public string Status { get; set; } = "";
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }  // navigation property — you fill this in
 }
-catch (PaymentException)
-{
-    // Roll back only to the savepoint — keeps the order record
-    await transaction.RollbackToSavepointAsync("AfterOrder");
-    order.Status = OrderStatus.PaymentFailed;
-    await db.SaveChangesAsync();
-    await transaction.CommitAsync();
-}
-```
 
-## Optimistic Concurrency — RowVersion
-
-Optimistic concurrency assumes conflicts are rare. Instead of locking rows, EF Core checks if data was changed since you read it.
-
-```csharp
-public class Product
+public class Customer
 {
     public int Id { get; set; }
     public string Name { get; set; } = "";
-    public decimal Price { get; set; }
-    public int StockQuantity { get; set; }
-
-    // SQL Server: rowversion/timestamp — auto-updated by DB on every write
-    [Timestamp]
-    public byte[] RowVersion { get; set; } = [];
+    public string Email { get; set; } = "";
 }
 
-// Or with Fluent API (PostgreSQL uses xmin):
-modelBuilder.Entity<Product>()
-    .Property(p => p.RowVersion)
-    .IsRowVersion();
-
-// When two users edit the same product:
-// User A reads: RowVersion = 0x0001
-// User B reads: RowVersion = 0x0001
-// User A saves: RowVersion → 0x0002 ✓
-// User B saves: EF checks RowVersion = 0x0001, DB has 0x0002 → CONFLICT!
-```
-
-## Handling Concurrency Conflicts
-
-```csharp
-public async Task UpdateProductPriceAsync(int id, decimal newPrice)
+// Multi-mapping: Dapper splits each row into Order + Customer objects
+public async Task<IEnumerable<Order>> GetOrdersWithCustomerAsync()
 {
-    const int maxRetries = 3;
-    for (int attempt = 0; attempt < maxRetries; attempt++)
-    {
-        try
+    using var conn = Open();
+
+    return await conn.QueryAsync<Order, Customer, Order>(
+        sql: @"
+            SELECT
+                o.id, o.total, o.ordered_at, o.status, o.customer_id,
+                c.id, c.name, c.email          -- Customer columns come AFTER
+            FROM orders o
+            INNER JOIN customers c ON c.id = o.customer_id",
+        map: (order, customer) =>
         {
-            var product = await db.Products.FindAsync(id)
-                ?? throw new KeyNotFoundException();
-            product.Price = newPrice;
-            await db.SaveChangesAsync();
-            return;  // success
-        }
-        catch (DbUpdateConcurrencyException ex)
-        {
-            if (attempt == maxRetries - 1) throw;  // give up after 3 attempts
-
-            // Get the current DB values
-            var entry = ex.Entries.Single();
-            var dbValues = await entry.GetDatabaseValuesAsync();
-
-            if (dbValues is null)
-                throw new InvalidOperationException("Record was deleted by another user");
-
-            // Strategy 1: Client wins — overwrite with our values
-            // entry.OriginalValues.SetValues(dbValues);
-
-            // Strategy 2: Store wins — discard our changes
-            // entry.CurrentValues.SetValues(dbValues);
-
-            // Strategy 3: Merge — use DB price, keep other client changes
-            entry.OriginalValues.SetValues(dbValues);
-            // (keep our newPrice since we specifically want to update it)
-        }
-    }
+            order.Customer = customer;  // attach the Customer to the Order
+            return order;
+        },
+        splitOn: "id");  // "id" is the first column of the second object (Customer.Id)
+        // Dapper splits the row at the column named "id" (second occurrence)
 }
 ```
 
-## ConcurrencyToken — Field-Level Concurrency
+<ConceptCallout type="tip" title="splitOn — How Dapper Knows Where to Split">
+`splitOn` tells Dapper which column marks the start of the next object. In the SELECT above, the first `id` maps to `Order.Id`, and the second `id` (from the customers table) is where Dapper starts mapping `Customer`. Use column aliases when the split column names aren't obvious.
+</ConceptCallout>
+
+## Alias Columns for Clarity
 
 ```csharp
-// When you don't want a rowversion, mark specific fields as concurrency tokens
-public class BankAccount
+// Using aliases makes splitOn unambiguous and the SQL self-documenting
+public async Task<IEnumerable<Order>> GetOrdersWithCustomerAsync()
+{
+    using var conn = Open();
+
+    return await conn.QueryAsync<Order, Customer, Order>(@"
+        SELECT
+            o.id           AS OrderId,
+            o.total        AS Total,
+            o.ordered_at   AS OrderedAt,
+            o.status       AS Status,
+            o.customer_id  AS CustomerId,
+            c.id           AS CustomerId,   -- splitOn point
+            c.name         AS Name,
+            c.email        AS Email
+        FROM orders o
+        INNER JOIN customers c ON c.id = o.customer_id",
+        (order, customer) => { order.Customer = customer; return order; },
+        splitOn: "CustomerId");  // clearer — splits at the second "CustomerId"
+}
+```
+
+## Three-Way JOIN — Three Objects
+
+```csharp
+public class OrderLine
 {
     public int Id { get; set; }
-    public decimal Balance { get; set; }
-
-    // Any update must include the current balance value
-    [ConcurrencyCheck]
-    public decimal BalanceSnapshot { get; set; }
+    public int Quantity { get; set; }
+    public decimal UnitPrice { get; set; }
+    public Product? Product { get; set; }
 }
 
-// Fluent API:
-modelBuilder.Entity<BankAccount>()
-    .Property(a => a.Balance)
-    .IsConcurrencyToken();
-
-// EF Core generates: UPDATE ... WHERE Id=@id AND Balance=@originalBalance
-// If balance changed since we read it, 0 rows updated → throws DbUpdateConcurrencyException
-```
-
-## Pessimistic Concurrency — Database Locking
-
-```csharp
-// When you MUST prevent concurrent modifications (financial operations):
-// Use raw SQL to lock rows during read
-
-public async Task TransferFundsAsync(int fromId, int toId, decimal amount)
+public async Task<IEnumerable<OrderLine>> GetOrderLinesAsync(int orderId)
 {
-    await using var tx = await db.Database.BeginTransactionAsync(
-        System.Data.IsolationLevel.Serializable);  // strongest isolation
+    using var conn = Open();
 
-    // Lock the rows during read (SQL Server)
-    var from = await db.Accounts
-        .FromSql($"SELECT * FROM accounts WITH (UPDLOCK, ROWLOCK) WHERE Id = {fromId}")
-        .FirstAsync();
-
-    var to = await db.Accounts
-        .FromSql($"SELECT * FROM accounts WITH (UPDLOCK, ROWLOCK) WHERE Id = {toId}")
-        .FirstAsync();
-
-    if (from.Balance < amount)
-        throw new InsufficientFundsException();
-
-    from.Balance -= amount;
-    to.Balance += amount;
-
-    await db.SaveChangesAsync();
-    await tx.CommitAsync();
+    return await conn.QueryAsync<OrderLine, Product, OrderLine>(@"
+        SELECT
+            ol.id, ol.quantity, ol.unit_price,
+            p.id, p.name, p.sku
+        FROM order_lines ol
+        INNER JOIN products p ON p.id = ol.product_id
+        WHERE ol.order_id = @OrderId",
+        (line, product) => { line.Product = product; return line; },
+        new { OrderId = orderId },
+        splitOn: "id");  // second "id" = Product.Id
 }
 ```
 
-<ConceptCallout type="tip" title="Choose the Right Concurrency Strategy">
-- **Optimistic** (RowVersion): Best for most cases. Low overhead, handles conflicts after the fact. Use when conflicts are rare.
-- **Pessimistic** (database locks): Use only for critical financial operations. High overhead, can cause deadlocks.
-- **No concurrency**: Acceptable for admin-only writes or append-only data.
-</ConceptCallout>
-
-## TransactionScope — Spanning Multiple DbContexts
+## One-to-Many — Dictionary Pattern
 
 ```csharp
-// When you need to coordinate across multiple services/DbContexts
-// Requires Microsoft.Data.SqlClient (DTC must be enabled on server)
-using var scope = new TransactionScope(
-    TransactionScopeOption.Required,
-    new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted },
-    TransactionScopeAsyncFlowOption.Enabled);  // REQUIRED for async!
+// Problem: ORDER has many LINES
+// A JOIN returns duplicate Order rows (one per line)
+// Solution: use a dictionary to deduplicate
 
-await orderDb.SaveChangesAsync();   // participates in same transaction
-await inventoryDb.SaveChangesAsync();
+public class Order
+{
+    public int Id { get; set; }
+    public decimal Total { get; set; }
+    public string Status { get; set; } = "";
+    public List<OrderLine> Lines { get; set; } = [];
+}
 
-scope.Complete();  // commit all
-// If Complete() is never called, all changes are rolled back on Dispose
+public async Task<Order?> GetOrderWithLinesAsync(int orderId)
+{
+    using var conn = Open();
+
+    var orderDict = new Dictionary<int, Order>();
+
+    await conn.QueryAsync<Order, OrderLine, Order>(@"
+        SELECT
+            o.id, o.total, o.status,
+            ol.id, ol.quantity, ol.unit_price, ol.product_id
+        FROM orders o
+        LEFT JOIN order_lines ol ON ol.order_id = o.id
+        WHERE o.id = @OrderId",
+        (order, line) =>
+        {
+            // Get or create the Order in the dictionary
+            if (!orderDict.TryGetValue(order.Id, out var existingOrder))
+            {
+                existingOrder = order;
+                orderDict[order.Id] = existingOrder;
+            }
+
+            // Add the line to the deduplicated order
+            if (line?.Id > 0)  // LEFT JOIN → line can be null if no lines
+                existingOrder.Lines.Add(line);
+
+            return existingOrder;
+        },
+        new { OrderId = orderId },
+        splitOn: "id");
+
+    return orderDict.Values.FirstOrDefault();
+}
 ```
 
-<ConceptCallout type="gotcha" title="TransactionScope and Async">
-Always use `TransactionScopeAsyncFlowOption.Enabled` when using `TransactionScope` with async code. Without it, the transaction context is lost when you await across threads. Also, `TransactionScope` uses MSDTC (Distributed Transaction Coordinator) which may not be available in cloud/container environments — prefer explicit `DbTransaction` for simple cases.
+## QueryMultiple — Multiple Result Sets
+
+```csharp
+// When you need multiple independent queries in one round trip
+// More efficient than multiple separate queries
+
+public async Task<(Order? Order, IEnumerable<OrderLine> Lines)> GetOrderDetailsAsync(int orderId)
+{
+    using var conn = Open();
+
+    using var multi = await conn.QueryMultipleAsync(@"
+        SELECT id, total, status, customer_id, ordered_at
+        FROM orders
+        WHERE id = @OrderId;
+
+        SELECT ol.id, ol.quantity, ol.unit_price, ol.product_id, p.name AS ProductName
+        FROM order_lines ol
+        INNER JOIN products p ON p.id = ol.product_id
+        WHERE ol.order_id = @OrderId;",
+        new { OrderId = orderId });
+
+    var order = await multi.ReadFirstOrDefaultAsync<Order>();
+    var lines = await multi.ReadAsync<OrderLine>();
+
+    return (order, lines);
+}
+
+// Usage:
+var (order, lines) = await repo.GetOrderDetailsAsync(42);
+if (order is null) return Results.NotFound();
+
+// More complex: order + lines + customer in one trip
+using var multi = await conn.QueryMultipleAsync(@"
+    SELECT * FROM orders WHERE id = @Id;
+    SELECT * FROM order_lines WHERE order_id = @Id;
+    SELECT c.* FROM customers c
+    INNER JOIN orders o ON o.customer_id = c.id
+    WHERE o.id = @Id;",
+    new { Id = orderId });
+
+var order = await multi.ReadSingleOrDefaultAsync<Order>();
+var lines = (await multi.ReadAsync<OrderLine>()).ToList();
+var customer = await multi.ReadSingleOrDefaultAsync<Customer>();
+```
+
+<ConceptCallout type="tip" title="QueryMultiple vs Multiple Round Trips">
+`QueryMultiple` sends all queries to the database in a single network call, which is more efficient than calling `QueryAsync` three times separately. Use it when you need related data from multiple tables and want to avoid N+1 round trips without writing a complex JOIN.
 </ConceptCallout>
+
+## When to Use Each Approach
+
+```csharp
+// Use multi-mapping (JOIN + splitOn) when:
+// - You want the database to do the join (optimal query plan)
+// - The result set is reasonably sized
+// - One-to-one or many-to-one relationships (Order → Customer)
+
+var orderWithCustomer = await conn.QueryAsync<Order, Customer, Order>(
+    "SELECT ... FROM orders o JOIN customers c ON ...",
+    (o, c) => { o.Customer = c; return o; }, splitOn: "id");
+
+// Use Dictionary pattern when:
+// - One-to-many: one Order has many Lines (JOIN duplicates rows)
+
+var orderWithLines = await GetOrderWithLinesAsync(orderId);  // uses dictionary
+
+// Use QueryMultiple when:
+// - You need multiple independent result sets
+// - The data isn't naturally JOIN-able (or would create a Cartesian product)
+// - You want to avoid the complexity of multi-level nested maps
+
+var (order, lines) = await GetOrderDetailsAsync(orderId);  // uses QueryMultiple
+```
 
 <ExerciseBlock>
-1. Build a seat-reservation system: `Seat` has a `RowVersion`. Simulate two concurrent attempts to book the same seat (use two DbContext instances). The first succeeds; the second catches `DbUpdateConcurrencyException` and returns a "seat taken" error.
-2. Implement a bank transfer with optimistic concurrency on the `Balance` field. If a concurrent transfer causes a conflict, implement a retry loop that re-reads the balance and retries.
-3. Write a test that demonstrates the N+1 scenario at the transaction level: open a transaction, insert 5 products in a loop with individual `SaveChangesAsync()` calls, and compare performance against a single `SaveChangesAsync()` with all 5 products batched. Use SQL logging to count queries.
+1. Write `GetProductWithCategoryAsync(int productId)` using multi-mapping to populate `Product.Category`. Then write `GetProductsByCategoryAsync(int categoryId)` returning all products in a category, each with the category populated. Verify with SQL logging that each is a single query.
+2. Implement `GetCustomerWithOrdersAsync(int customerId)` using the dictionary pattern. The result should be a `Customer` with a populated `Orders` list. Write a second method `GetCustomerOrderSummariesAsync(int customerId)` using `QueryMultiple` to return the customer info and a separate list of order summaries (no dictionary needed since the orders are read independently).
+3. Benchmark two approaches for loading an order with 20 lines: (a) single JOIN with dictionary deduplication, (b) `QueryMultiple` with two queries. Measure round trips and total data transferred. When would you prefer each approach?
 </ExerciseBlock>

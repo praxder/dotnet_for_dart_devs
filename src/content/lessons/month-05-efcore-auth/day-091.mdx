@@ -1,12 +1,12 @@
 ---
-title: "Entity Framework Core: Getting Started"
+title: "Dapper: Getting Started"
 day: 91
 week: 19
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "drift, isar, sembast — Dart ORMs"
-csharpConcept: "DbContext, DbSet<T>, EF Core migrations, code-first, connection strings"
+dartConcept: "sqflite — raw SQL in Dart"
+csharpConcept: "Dapper, IDbConnection, QueryAsync<T>, ExecuteAsync, micro-ORM"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,223 +16,226 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-Entity Framework Core (EF Core) is .NET's built-in ORM — it maps C# objects to database tables, generates SQL, and manages migrations. If you've used Dart's `drift` package, EF Core is similar in concept but far more powerful and deeply integrated with the .NET ecosystem.
+Dapper is a lightweight "micro-ORM" — it extends `IDbConnection` with helper methods that map SQL query results directly to C# objects. Unlike Entity Framework Core, Dapper doesn't generate SQL for you or manage migrations. You write the SQL; Dapper handles the tedious mapping from `IDataReader` rows to your classes.
 
-## EF Core vs Dart ORMs
+This is exactly the tradeoff your company has chosen: full SQL control, zero magic, and performance that matches raw ADO.NET.
+
+## Dapper vs EF Core: The Tradeoff
+
+| | Dapper | EF Core |
+|---|---|---|
+| SQL | You write it | Generated from LINQ |
+| Performance | Near-ADO.NET | Slightly more overhead |
+| Learning curve | Know SQL → done | ORM concepts + LINQ |
+| Complex queries | Natural | Can be awkward |
+| Schema migration | You manage it | `dotnet ef migrations` |
+| Flexibility | Maximum | Constrained to EF model |
 
 <CodeComparison>
   <div slot="dart">
   ```dart
-  // drift: table definition
-  class Products extends Table {
-    IntColumn get id => integer().autoIncrement()();
-    TextColumn get name => text().withLength(min: 1, max: 200)();
-    RealColumn get price => real()();
-  }
+  // sqflite: you write raw SQL, map manually
+  final db = await openDatabase('myapp.db');
 
-  // Query
-  final products = await select(products)
-    .where((p) => p.price.isSmallerThanValue(50))
-    .get();
+  final results = await db.rawQuery(
+    'SELECT * FROM products WHERE price < ?',
+    [50.0],
+  );
+
+  final products = results
+    .map((row) => Product.fromMap(row))
+    .toList();
   ```
   </div>
   <div slot="csharp">
   ```csharp
-  // EF Core: plain C# class (POCO)
-  public class Product
-  {
-      public int Id { get; set; }  // convention: Id → primary key
-      public required string Name { get; set; }
-      public decimal Price { get; set; }
-      public int CategoryId { get; set; }
-      public Category? Category { get; set; }  // navigation property
-  }
+  // Dapper: same idea — write SQL, map to C# objects automatically
+  using var connection = new SqliteConnection(connectionString);
 
-  // DbContext — the entry point to EF Core
-  public class AppDbContext : DbContext
-  {
-      public DbSet<Product> Products { get; set; }  // table accessor
-
-      protected override void OnModelCreating(ModelBuilder modelBuilder)
-      {
-          modelBuilder.Entity<Product>()
-              .Property(p => p.Price)
-              .HasPrecision(18, 2);
-      }
-  }
-
-  // Query
-  var products = await db.Products
-      .Where(p => p.Price < 50)
-      .ToListAsync();
+  var products = await connection.QueryAsync<Product>(
+      "SELECT * FROM products WHERE price < @MaxPrice",
+      new { MaxPrice = 50m });
+  // Dapper maps column names → property names for you
   ```
   </div>
 </CodeComparison>
 
-## Setup and Configuration
+## Installation
 
 ```bash
-# Add packages
-dotnet add package Microsoft.EntityFrameworkCore.Sqlite      # SQLite
-dotnet add package Microsoft.EntityFrameworkCore.SqlServer   # SQL Server
-dotnet add package Microsoft.EntityFrameworkCore.Design      # migrations tool
-dotnet add package Microsoft.EntityFrameworkCore.Tools       # CLI commands
+dotnet add package Dapper
 
-# Install EF migrations tool
-dotnet tool install --global dotnet-ef
+# Plus a database driver — pick one:
+dotnet add package Microsoft.Data.Sqlite       # SQLite
+dotnet add package Microsoft.Data.SqlClient   # SQL Server
+dotnet add package Npgsql                      # PostgreSQL
 ```
+
+## Opening a Connection
 
 ```csharp
-// Program.cs — register DbContext
-builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("Default"))
-);
-// Or SQL Server:
-// options.UseSqlServer(builder.Configuration.GetConnectionString("Default"))
-
-// Enable detailed logging in development
-if (builder.Environment.IsDevelopment())
-{
-    options.EnableSensitiveDataLogging();  // logs parameter values
-    options.LogTo(Console.WriteLine, LogLevel.Information);
-}
-```
-
-```json
-// appsettings.json
+// Connection strings — store in appsettings.json, not in code
+// appsettings.json:
 {
   "ConnectionStrings": {
     "Default": "Data Source=myapp.db"
   }
 }
+
+// In Program.cs — register the connection string:
+builder.Services.AddSingleton<IConfiguration>(builder.Configuration);
+
+// In a repository or service — inject IConfiguration:
+public class ProductRepository(IConfiguration config)
+{
+    private IDbConnection CreateConnection()
+        => new SqliteConnection(config.GetConnectionString("Default"));
+}
 ```
 
-## Creating the Data Model
+<ConceptCallout type="tip" title="Connection Lifetime with Dapper">
+Unlike EF Core's `DbContext` (which you register as Scoped), Dapper works with raw connections. The pattern at most companies: create a connection per-method (open/close is fast thanks to connection pooling), or inject a connection factory. You'll see the factory pattern on day 101.
+</ConceptCallout>
+
+## Your First Query — QueryAsync&lt;T&gt;
 
 ```csharp
-// Entities — plain C# classes (no base class required)
-public class Customer
+public class Product
 {
     public int Id { get; set; }
-    public required string Name { get; set; }
-    public required string Email { get; set; }
-    public string? Phone { get; set; }
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public bool IsActive { get; set; } = true;
-
-    // Navigation properties
-    public List<Order> Orders { get; set; } = [];
+    public string Name { get; set; } = "";
+    public decimal Price { get; set; }
+    public int CategoryId { get; set; }
+    public bool IsActive { get; set; }
 }
 
-public class Order
+public class ProductRepository(IConfiguration config)
 {
-    public int Id { get; set; }
-    public int CustomerId { get; set; }
-    public Customer? Customer { get; set; }
-    public decimal Total { get; set; }
-    public DateTime OrderedAt { get; set; }
-    public OrderStatus Status { get; set; }
+    private IDbConnection Open()
+        => new SqliteConnection(config.GetConnectionString("Default"));
 
-    public List<OrderLine> Lines { get; set; } = [];
-}
-
-public enum OrderStatus { Pending, Processing, Shipped, Delivered, Cancelled }
-
-public class OrderLine
-{
-    public int Id { get; set; }
-    public int OrderId { get; set; }
-    public Order? Order { get; set; }
-    public int ProductId { get; set; }
-    public Product? Product { get; set; }
-    public int Quantity { get; set; }
-    public decimal UnitPrice { get; set; }
-}
-
-// DbContext
-public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
-{
-    public DbSet<Customer> Customers { get; set; }
-    public DbSet<Order> Orders { get; set; }
-    public DbSet<OrderLine> OrderLines { get; set; }
-    public DbSet<Product> Products { get; set; }
-}
-```
-
-## Creating and Applying Migrations
-
-```bash
-# Create first migration (scaffolds SQL from your C# model)
-dotnet ef migrations add InitialCreate
-
-# Review the generated migration file in Migrations/ folder!
-# Then apply to database:
-dotnet ef database update
-
-# Other migration commands:
-dotnet ef migrations list                    # list all migrations
-dotnet ef migrations remove                  # undo last migration (if not applied)
-dotnet ef database update 20240101_Initial  # rollback to specific migration
-dotnet ef dbcontext info                     # show context info
-dotnet ef dbcontext list                     # list DbContexts in the project
-```
-
-## Auto-Migrate on Startup (Development Only)
-
-```csharp
-// Apply pending migrations automatically — useful in development
-// NEVER use in production — run migrations as part of deployment pipeline
-if (app.Environment.IsDevelopment())
-{
-    using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.MigrateAsync();  // applies pending migrations
-}
-```
-
-## Basic CRUD
-
-```csharp
-public class CustomerRepository(AppDbContext db)
-{
-    // Create
-    public async Task<Customer> AddAsync(Customer customer)
+    // QueryAsync<T>: returns IEnumerable<T>
+    public async Task<IEnumerable<Product>> GetAllAsync()
     {
-        db.Customers.Add(customer);
-        await db.SaveChangesAsync();
-        return customer;  // Id is now populated
+        using var conn = Open();
+        return await conn.QueryAsync<Product>(
+            "SELECT id, name, price, category_id, is_active FROM products");
     }
 
-    // Read by ID
-    public async Task<Customer?> GetByIdAsync(int id)
-        => await db.Customers.FindAsync(id);
-
-    // Read with filter
-    public async Task<List<Customer>> GetActiveAsync()
-        => await db.Customers.Where(c => c.IsActive).ToListAsync();
-
-    // Update
-    public async Task UpdateAsync(Customer customer)
+    // Single item — returns null if not found
+    public async Task<Product?> GetByIdAsync(int id)
     {
-        db.Customers.Update(customer);
-        await db.SaveChangesAsync();
-    }
-
-    // Delete
-    public async Task DeleteAsync(int id)
-    {
-        var customer = await db.Customers.FindAsync(id);
-        if (customer is not null)
-        {
-            db.Customers.Remove(customer);
-            await db.SaveChangesAsync();
-        }
+        using var conn = Open();
+        return await conn.QueryFirstOrDefaultAsync<Product>(
+            "SELECT id, name, price, category_id, is_active FROM products WHERE id = @Id",
+            new { Id = id });
     }
 }
 ```
+
+## Mapping: How Dapper Matches Columns to Properties
+
+```csharp
+// Dapper matches columns to properties case-insensitively
+// "product_name" → ProductName (if you enable underscore mapping)
+// "ProductName"  → ProductName (default: works as-is)
+
+// Problem: SQL uses snake_case, C# uses PascalCase
+// Column: category_id → Property: CategoryId
+// Dapper handles this automatically for simple cases
+
+// For snake_case databases (PostgreSQL, etc.) — enable globally:
+DefaultTypeMap.MatchNamesWithUnderscores = true;
+// Now: "category_id" maps to CategoryId, "is_active" maps to IsActive
+
+// Or alias in SQL (always works):
+var products = await conn.QueryAsync<Product>(@"
+    SELECT
+        id,
+        name,
+        price,
+        category_id AS CategoryId,   -- explicit alias
+        is_active   AS IsActive
+    FROM products");
+```
+
+## Non-Query Operations — ExecuteAsync
+
+```csharp
+// INSERT
+public async Task<int> InsertAsync(string name, decimal price, int categoryId)
+{
+    using var conn = Open();
+    return await conn.ExecuteAsync(
+        @"INSERT INTO products (name, price, category_id, is_active)
+          VALUES (@Name, @Price, @CategoryId, 1)",
+        new { Name = name, Price = price, CategoryId = categoryId });
+    // Returns: rows affected (1 on success)
+}
+
+// UPDATE
+public async Task<bool> UpdatePriceAsync(int id, decimal newPrice)
+{
+    using var conn = Open();
+    var rowsAffected = await conn.ExecuteAsync(
+        "UPDATE products SET price = @Price WHERE id = @Id",
+        new { Price = newPrice, Id = id });
+    return rowsAffected > 0;
+}
+
+// DELETE
+public async Task<bool> DeleteAsync(int id)
+{
+    using var conn = Open();
+    var rowsAffected = await conn.ExecuteAsync(
+        "DELETE FROM products WHERE id = @Id",
+        new { Id = id });
+    return rowsAffected > 0;
+}
+```
+
+## Getting the Inserted ID
+
+```csharp
+// SQL Server: use OUTPUT or SCOPE_IDENTITY()
+public async Task<int> InsertAndGetIdAsync(Product product)
+{
+    using var conn = Open();
+
+    // SQL Server:
+    return await conn.QuerySingleAsync<int>(@"
+        INSERT INTO products (name, price, category_id)
+        OUTPUT INSERTED.id
+        VALUES (@Name, @Price, @CategoryId)",
+        product);
+
+    // SQLite:
+    // await conn.ExecuteAsync("INSERT INTO products ...", product);
+    // return await conn.QuerySingleAsync<int>("SELECT last_insert_rowid()");
+
+    // PostgreSQL:
+    // return await conn.QuerySingleAsync<int>(
+    //     "INSERT INTO products (name, price) VALUES (@Name, @Price) RETURNING id", product);
+}
+```
+
+## Registering in DI
+
+```csharp
+// Program.cs — a simple approach: pass the connection string directly
+// You'll learn the IDbConnectionFactory pattern on day 101
+
+// For now, register repositories as Scoped:
+builder.Services.AddScoped<ProductRepository>();
+builder.Services.AddScoped<CustomerRepository>();
+```
+
+<ConceptCallout type="tip" title="Dapper is Just Extension Methods">
+Dapper adds extension methods to `IDbConnection`. There's no `DbContext`, no change tracking, no migrations. Everything is explicit: you open a connection, execute a SQL string, get back objects. This makes the code extremely predictable — what you see is what runs.
+</ConceptCallout>
 
 <ExerciseBlock>
-1. Create a `ShopContext` with `Product`, `Category`, and `Review` entities. Generate and apply the initial migration. Seed 3 categories and 5 products via `HasData` in `OnModelCreating`.
-2. Write a `ProductRepository` with: `AddAsync`, `GetByIdAsync`, `GetByCategoryAsync(int categoryId)`, `UpdatePriceAsync(int id, decimal newPrice)`, `DeleteAsync(int id)`. Test each method.
-3. Add a second migration that adds a `IsDiscounted` column (bool, default false) and a `DiscountPercent` column (decimal, nullable) to the `Product` table. Apply it and verify the schema change with a SQLite viewer.
+1. Create a `products` table with `id`, `name`, `price`, `category_id`, and `is_active` columns. Write a `ProductRepository` with `GetAllAsync()`, `GetByIdAsync(int id)`, `GetActiveByCategoryAsync(int categoryId)`, `InsertAsync(Product)`, `UpdatePriceAsync(int id, decimal price)`, and `DeleteAsync(int id)`. Test each method with Console.WriteLine output.
+2. Enable `DefaultTypeMap.MatchNamesWithUnderscores = true` in Program.cs. Create a `categories` table with `id`, `name`, and `created_at` columns (snake_case). Write a `CategoryRepository` and verify that `created_at` maps to a `CreatedAt` DateTime property without SQL aliases.
+3. Compare the approaches: write a query using Dapper and note the generated SQL (you write it). Then think about what EF Core would generate for the same query using `Include` and `Where`. What are the tradeoffs for your specific use case?
 </ExerciseBlock>

@@ -1,12 +1,12 @@
 ---
-title: "EF Core: Relationships and Configurations"
+title: "Dapper: CRUD Patterns"
 day: 92
 week: 19
 module: 8
-moduleName: "Entity Framework Core"
+moduleName: "Dapper"
 phase: "dotnet"
-dartConcept: "drift foreign keys, relations"
-csharpConcept: "one-to-many, many-to-many, one-to-one, Fluent API, data annotations"
+dartConcept: "sqflite insert/update/delete patterns"
+csharpConcept: "QueryAsync, QueryFirstOrDefaultAsync, QuerySingleAsync, ExecuteAsync, QueryScalarAsync"
 estimatedMinutes: 30
 isProject: false
 ---
@@ -16,208 +16,252 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-EF Core's relationship configuration determines how tables relate and how navigation properties work. You can configure with conventions (implicit from naming), Data Annotations (attributes), or Fluent API (the most powerful).
+With Dapper, CRUD is explicit: you write SQL, Dapper maps the results. Today you'll learn all the query methods Dapper provides and when to use each one.
 
-## One-to-Many
+## Reading Data — The Query Family
 
 ```csharp
-// Convention: EF Core infers the relationship from navigation properties + FKs
-public class Blog
-{
-    public int Id { get; set; }
-    public string Title { get; set; } = "";
-    public List<Post> Posts { get; set; } = [];  // one blog has many posts
-}
+using var conn = Open();
 
-public class Post
-{
-    public int Id { get; set; }
-    public int BlogId { get; set; }     // foreign key (convention: {NavigationName}Id)
-    public Blog? Blog { get; set; }     // navigation property back to parent
-    public string Title { get; set; } = "";
-}
+// QueryAsync<T> — 0 or more results (IEnumerable<T>)
+var all = await conn.QueryAsync<Product>(
+    "SELECT * FROM products WHERE is_active = 1");
 
-// Fluent API configuration (in OnModelCreating):
-modelBuilder.Entity<Post>()
-    .HasOne(p => p.Blog)          // Post has one Blog
-    .WithMany(b => b.Posts)       // Blog has many Posts
-    .HasForeignKey(p => p.BlogId) // FK column
-    .OnDelete(DeleteBehavior.Cascade);  // delete posts when blog is deleted
+// QueryFirstOrDefaultAsync<T> — first row or null
+// Use this most often for "get by ID" queries
+var product = await conn.QueryFirstOrDefaultAsync<Product>(
+    "SELECT * FROM products WHERE id = @Id",
+    new { Id = 42 });
+
+// QuerySingleAsync<T> — exactly 1 row (throws if 0 or more than 1)
+// Use when the query MUST return exactly one row
+var count = await conn.QuerySingleAsync<int>(
+    "SELECT COUNT(*) FROM products WHERE category_id = @CatId",
+    new { CatId = 5 });
+
+// QuerySingleOrDefaultAsync<T> — exactly 0 or 1 (throws if more than 1)
+var user = await conn.QuerySingleOrDefaultAsync<User>(
+    "SELECT * FROM users WHERE email = @Email",
+    new { Email = "alice@example.com" });
+
+// ExecuteScalarAsync<T> — single value (first column, first row)
+var maxPrice = await conn.ExecuteScalarAsync<decimal?>(
+    "SELECT MAX(price) FROM products WHERE category_id = @CatId",
+    new { CatId = 5 });
 ```
 
-## Many-to-Many
+<ConceptCallout type="tip" title="Choose the Right Query Method">
+- `QueryAsync` → list of results (could be empty)
+- `QueryFirstOrDefaultAsync` → get by ID, returns null if missing — **most common**
+- `QuerySingleAsync` → scalar aggregates where the row must exist
+- `QuerySingleOrDefaultAsync` → unique lookup that might not exist (e.g., by email)
+- `ExecuteScalarAsync` → COUNT, MAX, SUM, EXISTS checks
+</ConceptCallout>
+
+## Full CRUD Repository Pattern
 
 ```csharp
-// EF Core 5+: implicit many-to-many (no junction entity needed)
-public class Student
+public class CustomerRepository(IConfiguration config)
 {
-    public int Id { get; set; }
-    public string Name { get; set; } = "";
-    public List<Course> Courses { get; set; } = [];
-}
+    private IDbConnection Open()
+        => new SqliteConnection(config.GetConnectionString("Default"));
 
-public class Course
-{
-    public int Id { get; set; }
-    public string Title { get; set; } = "";
-    public List<Student> Students { get; set; } = [];
-}
+    // --- READ ---
 
-// EF Core creates a StudentCourse junction table automatically
-// Convention: the table is named based on both entity names
-
-// Explicit junction table (when you need extra columns):
-public class Enrollment
-{
-    public int StudentId { get; set; }
-    public Student? Student { get; set; }
-    public int CourseId { get; set; }
-    public Course? Course { get; set; }
-    public DateTime EnrolledAt { get; set; }   // extra column
-    public decimal? Grade { get; set; }         // extra column
-}
-
-// Configuration for explicit junction:
-modelBuilder.Entity<Enrollment>()
-    .HasKey(e => new { e.StudentId, e.CourseId });  // composite PK
-
-modelBuilder.Entity<Enrollment>()
-    .HasOne(e => e.Student)
-    .WithMany(s => s.Enrollments)
-    .HasForeignKey(e => e.StudentId);
-
-modelBuilder.Entity<Enrollment>()
-    .HasOne(e => e.Course)
-    .WithMany(c => c.Enrollments)
-    .HasForeignKey(e => e.CourseId);
-```
-
-## One-to-One
-
-```csharp
-public class User
-{
-    public int Id { get; set; }
-    public string Email { get; set; } = "";
-    public UserProfile? Profile { get; set; }  // optional one-to-one
-}
-
-public class UserProfile
-{
-    public int Id { get; set; }
-    public int UserId { get; set; }    // FK in the dependent entity
-    public User? User { get; set; }
-    public string Bio { get; set; } = "";
-    public string? AvatarUrl { get; set; }
-}
-
-modelBuilder.Entity<User>()
-    .HasOne(u => u.Profile)
-    .WithOne(p => p.User)
-    .HasForeignKey<UserProfile>(p => p.UserId);
-```
-
-## Fluent API — Table Configuration
-
-```csharp
-protected override void OnModelCreating(ModelBuilder modelBuilder)
-{
-    // Table name
-    modelBuilder.Entity<OrderLine>().ToTable("order_lines");
-
-    // Column configuration
-    modelBuilder.Entity<Product>(entity =>
+    public async Task<IEnumerable<Customer>> GetAllAsync()
     {
-        entity.Property(p => p.Name)
-            .HasMaxLength(200)
-            .IsRequired();
-
-        entity.Property(p => p.Price)
-            .HasPrecision(18, 2)
-            .IsRequired();
-
-        entity.Property(p => p.Description)
-            .HasMaxLength(2000)
-            .HasDefaultValue("");
-
-        // Index
-        entity.HasIndex(p => p.Sku).IsUnique();
-        entity.HasIndex(p => new { p.CategoryId, p.Price });  // composite
-
-        // Ignore a property (not mapped)
-        entity.Ignore(p => p.ComputedDisplay);
-    });
-
-    // Global query filter — auto-applied to all queries
-    // (for soft-delete, multi-tenancy)
-    modelBuilder.Entity<Product>()
-        .HasQueryFilter(p => !p.IsDeleted);
-}
-```
-
-## IEntityTypeConfiguration — Separate Config Files
-
-```csharp
-// Better than one giant OnModelCreating:
-public class ProductConfiguration : IEntityTypeConfiguration<Product>
-{
-    public void Configure(EntityTypeBuilder<Product> builder)
-    {
-        builder.ToTable("products");
-
-        builder.HasKey(p => p.Id);
-        builder.Property(p => p.Id).UseIdentityColumn();
-
-        builder.Property(p => p.Name).HasMaxLength(200).IsRequired();
-        builder.Property(p => p.Price).HasPrecision(18, 2);
-
-        builder.HasOne(p => p.Category)
-            .WithMany(c => c.Products)
-            .HasForeignKey(p => p.CategoryId)
-            .OnDelete(DeleteBehavior.Restrict);
-
-        builder.HasIndex(p => p.Sku).IsUnique();
+        using var conn = Open();
+        return await conn.QueryAsync<Customer>(
+            "SELECT id, name, email, phone, created_at, is_active FROM customers");
     }
-}
 
-// Apply all configurations from the assembly:
-protected override void OnModelCreating(ModelBuilder modelBuilder)
-{
-    modelBuilder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
-}
-```
-
-## Seed Data
-
-```csharp
-// HasData — seeded in migrations (static, compile-time data)
-modelBuilder.Entity<Category>().HasData(
-    new Category { Id = 1, Name = "Electronics" },
-    new Category { Id = 2, Name = "Clothing" },
-    new Category { Id = 3, Name = "Books" }
-);
-
-// For development seeding with navigation properties:
-// dotnet add package Bogus  (fake data generator)
-public static class DbSeeder
-{
-    public static async Task SeedAsync(AppDbContext db)
+    public async Task<Customer?> GetByIdAsync(int id)
     {
-        if (await db.Products.AnyAsync()) return;  // already seeded
+        using var conn = Open();
+        return await conn.QueryFirstOrDefaultAsync<Customer>(
+            @"SELECT id, name, email, phone, created_at, is_active
+              FROM customers
+              WHERE id = @Id",
+            new { Id = id });
+    }
 
-        var faker = new Faker<Product>()
-            .RuleFor(p => p.Name, f => f.Commerce.ProductName())
-            .RuleFor(p => p.Price, f => f.Finance.Amount(1, 1000))
-            .RuleFor(p => p.CategoryId, f => f.PickRandom(1, 2, 3));
+    public async Task<Customer?> GetByEmailAsync(string email)
+    {
+        using var conn = Open();
+        return await conn.QuerySingleOrDefaultAsync<Customer>(
+            "SELECT * FROM customers WHERE email = @Email",
+            new { Email = email });
+    }
 
-        db.Products.AddRange(faker.Generate(50));
-        await db.SaveChangesAsync();
+    public async Task<IEnumerable<Customer>> GetActiveAsync()
+    {
+        using var conn = Open();
+        return await conn.QueryAsync<Customer>(
+            "SELECT * FROM customers WHERE is_active = 1 ORDER BY name");
+    }
+
+    // --- CREATE ---
+
+    public async Task<int> CreateAsync(Customer customer)
+    {
+        using var conn = Open();
+        // SQL Server: use OUTPUT INSERTED.id
+        // SQLite: INSERT then SELECT last_insert_rowid()
+        // PostgreSQL: RETURNING id
+        return await conn.QuerySingleAsync<int>(@"
+            INSERT INTO customers (name, email, phone, created_at, is_active)
+            VALUES (@Name, @Email, @Phone, @CreatedAt, @IsActive);
+            SELECT last_insert_rowid();",   // SQLite
+            customer);
+    }
+
+    // --- UPDATE ---
+
+    public async Task<bool> UpdateAsync(Customer customer)
+    {
+        using var conn = Open();
+        var affected = await conn.ExecuteAsync(@"
+            UPDATE customers
+            SET name     = @Name,
+                email    = @Email,
+                phone    = @Phone,
+                is_active = @IsActive
+            WHERE id = @Id",
+            customer);
+        return affected > 0;
+    }
+
+    // Partial update — only change what you need
+    public async Task<bool> DeactivateAsync(int id)
+    {
+        using var conn = Open();
+        var affected = await conn.ExecuteAsync(
+            "UPDATE customers SET is_active = 0 WHERE id = @Id",
+            new { Id = id });
+        return affected > 0;
+    }
+
+    // --- DELETE ---
+
+    public async Task<bool> DeleteAsync(int id)
+    {
+        using var conn = Open();
+        var affected = await conn.ExecuteAsync(
+            "DELETE FROM customers WHERE id = @Id",
+            new { Id = id });
+        return affected > 0;
     }
 }
 ```
+
+## Passing Parameters — Multiple Ways
+
+```csharp
+// 1. Anonymous object (most common — clean and readable)
+await conn.QueryAsync<Product>(
+    "SELECT * FROM products WHERE category_id = @CatId AND price < @Max",
+    new { CatId = 5, Max = 100m });
+
+// 2. Your model directly (property names must match parameter names)
+var product = new Product { Name = "Widget", Price = 9.99m, CategoryId = 3 };
+await conn.ExecuteAsync(
+    "INSERT INTO products (name, price, category_id) VALUES (@Name, @Price, @CategoryId)",
+    product);
+
+// 3. Dictionary (useful when building dynamic queries)
+var parameters = new Dictionary<string, object>
+{
+    ["Name"] = "Widget",
+    ["Price"] = 9.99m
+};
+await conn.ExecuteAsync(
+    "INSERT INTO products (name, price) VALUES (@Name, @Price)",
+    parameters);
+
+// 4. DynamicParameters (most flexible — covered in depth on day 93)
+var dp = new DynamicParameters();
+dp.Add("@Name", "Widget");
+dp.Add("@Price", 9.99m, DbType.Decimal, size: 18);
+await conn.ExecuteAsync("INSERT INTO products (name, price) VALUES (@Name, @Price)", dp);
+```
+
+## Bulk Execute — ExecuteAsync with a List
+
+```csharp
+// Execute the same SQL once per item in a list
+// Dapper handles the loop — not truly a bulk INSERT, but convenient
+var newProducts = new List<Product>
+{
+    new() { Name = "Alpha", Price = 10m, CategoryId = 1 },
+    new() { Name = "Beta",  Price = 20m, CategoryId = 1 },
+    new() { Name = "Gamma", Price = 30m, CategoryId = 2 },
+};
+
+// ExecuteAsync with a list: runs INSERT 3 times (one per item)
+await conn.ExecuteAsync(
+    "INSERT INTO products (name, price, category_id) VALUES (@Name, @Price, @CategoryId)",
+    newProducts);
+
+// For true bulk insert performance, see day 102
+```
+
+## Checking Existence
+
+```csharp
+// EXISTS check — returns bool
+public async Task<bool> EmailExistsAsync(string email)
+{
+    using var conn = Open();
+    var count = await conn.ExecuteScalarAsync<int>(
+        "SELECT COUNT(1) FROM customers WHERE email = @Email",
+        new { Email = email });
+    return count > 0;
+}
+
+// Or with EXISTS keyword (more efficient in SQL):
+public async Task<bool> EmailExistsAsync(string email)
+{
+    using var conn = Open();
+    return await conn.ExecuteScalarAsync<bool>(
+        "SELECT EXISTS(SELECT 1 FROM customers WHERE email = @Email)",
+        new { Email = email });
+    // Works in PostgreSQL; for SQLite use CASE WHEN EXISTS ... THEN 1 ELSE 0 END
+}
+```
+
+## Counting and Aggregates
+
+```csharp
+public class OrderStats
+{
+    public int CustomerId { get; set; }
+    public int OrderCount { get; set; }
+    public decimal TotalSpent { get; set; }
+    public DateTime? LastOrderDate { get; set; }
+}
+
+public async Task<OrderStats?> GetCustomerStatsAsync(int customerId)
+{
+    using var conn = Open();
+    return await conn.QueryFirstOrDefaultAsync<OrderStats>(@"
+        SELECT
+            @CustomerId AS CustomerId,
+            COUNT(*)    AS OrderCount,
+            COALESCE(SUM(total), 0) AS TotalSpent,
+            MAX(ordered_at) AS LastOrderDate
+        FROM orders
+        WHERE customer_id = @CustomerId
+          AND status != 'Cancelled'",
+        new { CustomerId = customerId });
+}
+```
+
+<ConceptCallout type="gotcha" title="QueryAsync Returns IEnumerable, Not List">
+`QueryAsync` returns `IEnumerable<T>`, which is lazy. The data is already loaded from the database (unlike EF Core's `IQueryable`), but calling `.ToList()` gives you a concrete list you can index and iterate multiple times. If you only need to iterate once, keep it as `IEnumerable`. If you need `.Count` or multiple iterations, call `.ToList()`.
+</ConceptCallout>
 
 <ExerciseBlock>
-1. Model a `Library` system: `Book` (has many copies), `Author` (many-to-many with Book), `Member`, `Loan` (junction between Member and Copy, with checkout date and due date). Configure all relationships with Fluent API in separate `IEntityTypeConfiguration` classes.
-2. Add a `SoftDeletable` base class with `IsDeleted` and `DeletedAt` properties. Configure a global query filter on all soft-deletable entities. Write a `SoftDeleteInterceptor` that overrides `SaveChangesAsync` to set `IsDeleted = true` instead of actually deleting.
-3. Seed your Library database with realistic data using Bogus: 20 authors, 100 books, 3 copies per book, 50 members, and 30 active loans.
+1. Build a complete `OrderRepository` with: `GetAllAsync()`, `GetByIdAsync(int)`, `GetByCustomerAsync(int customerId)`, `GetByStatusAsync(string status)`, `CreateAsync(Order)` returning the new ID, `UpdateStatusAsync(int id, string status)`, and `DeleteAsync(int id)`. Use the appropriate query method for each.
+2. Implement a `GetOrderSummaryAsync(int orderId)` that returns a custom `OrderSummaryDto` with: order ID, customer name (join), item count (subquery or join with COUNT), and total amount. Verify the SQL is a single query.
+3. Write an `ExistsAsync(int id)` method for both `ProductRepository` and `OrderRepository`. Measure the difference between `SELECT COUNT(*) > 0` and `SELECT EXISTS(...)` using SQLite's query planner (`EXPLAIN QUERY PLAN`).
 </ExerciseBlock>
