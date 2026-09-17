@@ -1,0 +1,38 @@
+---
+title: "The Generic Host Lifecycle"
+order: 7
+summary: "See configuration, logging, dependency injection, startup, background services, and shutdown as one application lifecycle."
+flutterAnalogy: "Like the bootstrap around runApp plus app lifecycle callbacks, but shared by web servers, workers, and console services."
+relatedDays: [66, 70, 71, 73, 75]
+---
+
+## One host, many application styles
+
+The .NET Generic Host composes an application’s cross-cutting infrastructure: dependency injection, configuration, logging, lifetime notifications, and hosted services. ASP.NET Core’s `WebApplication` builds on this model.
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddSingleton<Clock>();
+builder.Services.AddHostedService<QueueWorker>();
+
+var app = builder.Build();
+app.MapGet("/time", (Clock clock) => clock.UtcNow);
+await app.RunAsync();
+```
+
+Registration builds a service graph; it should not perform application work. After the host starts, it accepts traffic and runs hosted services. During shutdown, the host signals cancellation and waits for services within a configured timeout.
+
+## Startup has reliability consequences
+
+Fail fast for invalid configuration that makes the application unusable. Avoid making startup depend on optional remote systems: a temporary analytics outage should not necessarily prevent the API from starting. Readiness checks can keep traffic away until required dependencies are usable.
+
+`IHostedService.StartAsync` runs sequentially. Long startup work delays the whole host. `BackgroundService.ExecuteAsync` should represent the service’s lifetime, observe its stopping token, and allow exceptions to be observed by the host.
+
+## Configuration precedence
+
+Configuration is layered. Later providers override earlier ones—commonly JSON, environment-specific JSON, user secrets in development, environment variables, and command-line arguments. Bind related settings to options and validate them at startup when invalid values would make operation unsafe.
+
+## Sources
+
+- [.NET Generic Host](https://learn.microsoft.com/en-us/dotnet/core/extensions/generic-host)
+- [Configuration in ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/configuration/)

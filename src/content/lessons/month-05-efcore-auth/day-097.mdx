@@ -26,19 +26,19 @@ The repository pattern abstracts data access behind an interface. With Dapper, r
 
 public interface IDbConnectionFactory
 {
-    IDbConnection CreateConnection();
+    DbConnection CreateConnection();
 }
 
 public class SqliteConnectionFactory(string connectionString) : IDbConnectionFactory
 {
-    public IDbConnection CreateConnection()
+    public DbConnection CreateConnection()
         => new SqliteConnection(connectionString);
 }
 
 // SQL Server version:
 public class SqlServerConnectionFactory(string connectionString) : IDbConnectionFactory
 {
-    public IDbConnection CreateConnection()
+    public DbConnection CreateConnection()
         => new SqlConnection(connectionString);
 }
 
@@ -164,72 +164,35 @@ builder.Services.AddScoped<IProductRepository, ProductRepository>();
 ## Repository With Transactions — Unit of Work Pattern
 
 ```csharp
-// When multiple repositories need to share a transaction,
-// use a Unit of Work that owns the connection and transaction.
-
-public interface IUnitOfWork : IAsyncDisposable
+// Use DbConnection/DbTransaction when the abstraction needs async ADO.NET APIs.
+// The connection and transaction belong to this operation.
+public sealed class UnitOfWork(IDbConnectionFactory factory)
 {
-    IProductRepository Products { get; }
-    IOrderRepository Orders { get; }
-    Task BeginAsync();
-    Task CommitAsync();
-    Task RollbackAsync();
-}
-
-public class UnitOfWork : IUnitOfWork
-{
-    private readonly IDbConnection _conn;
-    private IDbTransaction? _tx;
-
-    public UnitOfWork(IDbConnectionFactory factory)
+    public async Task ExecuteAsync(
+        Func<DbConnection, DbTransaction, CancellationToken, Task> operation,
+        CancellationToken cancellationToken)
     {
-        _conn = factory.CreateConnection();
-        _conn.Open();
+        await using var connection = factory.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction =
+            await connection.BeginTransactionAsync(cancellationToken);
 
-        // Repositories share the same open connection
-        Products = new ProductRepository(_conn);
-        Orders   = new OrderRepository(_conn);
-    }
-
-    public IProductRepository Products { get; }
-    public IOrderRepository Orders { get; }
-
-    public Task BeginAsync()
-    {
-        _tx = _conn.BeginTransaction();
-        // Pass transaction to repositories
-        ((ProductRepository)Products).SetTransaction(_tx);
-        ((OrderRepository)Orders).SetTransaction(_tx);
-        return Task.CompletedTask;
-    }
-
-    public async Task CommitAsync()
-    {
-        if (_tx is null) throw new InvalidOperationException("No active transaction");
-        await _tx.CommitAsync();
-        _tx = null;
-    }
-
-    public async Task RollbackAsync()
-    {
-        if (_tx is not null)
+        try
         {
-            await _tx.RollbackAsync();
-            _tx = null;
+            await operation(connection, transaction, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_tx is not null) await _tx.DisposeAsync();
-        if (_conn.State == ConnectionState.Open) _conn.Close();
-        _conn.Dispose();
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
     }
 }
 ```
 
 <ConceptCallout type="tip" title="Simple Repositories vs Unit of Work">
-For most operations (single-repository calls), you don't need a Unit of Work — just `using var conn = factory.CreateConnection()` in each repository method. Use the Unit of Work pattern only when you need coordinated multi-repository transactions. Keep the default case simple.
+For most operations, you don't need a Unit of Work—open and dispose one connection in the repository method. Use a transaction wrapper only when multiple commands must commit atomically. Pass the same `DbConnection` and `DbTransaction` to every Dapper command in that operation.
 </ConceptCallout>
 
 ## Testing Repositories

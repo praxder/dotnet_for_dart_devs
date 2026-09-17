@@ -31,7 +31,7 @@ on:
     branches: [main]
 
 env:
-  DOTNET_VERSION: '9.x'
+  DOTNET_VERSION: '10.0.x'
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
@@ -56,16 +56,16 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       # Cache NuGet packages
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
@@ -80,7 +80,8 @@ jobs:
 
       # Run unit tests
       - name: Unit Tests
-        run: dotnet test tests/UnitTests --no-build -c Release
+        run: >-
+          dotnet test tests/UnitTests --no-build -c Release
           --logger "trx;LogFileName=unit-test-results.xml"
           --collect:"XPlat Code Coverage"
 
@@ -91,7 +92,8 @@ jobs:
           Jwt__Key: "test-key-that-is-at-least-32-characters-long"
           Jwt__Issuer: "test"
           Jwt__Audience: "test"
-        run: dotnet test tests/IntegrationTests --no-build -c Release
+        run: >-
+          dotnet test tests/IntegrationTests --no-build -c Release
           --logger "trx;LogFileName=integration-test-results.xml"
 
       # Publish test results
@@ -103,7 +105,7 @@ jobs:
 
       # Publish code coverage
       - name: Upload Coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: "**/coverage.cobertura.xml"
           fail_ci_if_error: true
@@ -134,7 +136,7 @@ jobs:
       packages: write  # needed to push to GHCR
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Log in to Container Registry
         uses: docker/login-action@v3
@@ -145,16 +147,17 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=sha,prefix=sha-
+            type=raw,value=sha-${{ github.sha }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -174,7 +177,7 @@ jobs:
           exit-code: '1'  # fail on critical vulnerabilities
 
       - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
 ```
@@ -255,7 +258,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version from tag
         id: version

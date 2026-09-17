@@ -84,7 +84,7 @@ public class PlaceOrderCommandHandler(IDbConnectionFactory factory)
         PlaceOrderCommand request,
         CancellationToken ct)
     {
-        using var conn = factory.CreateConnection();
+        await using var conn = factory.CreateConnection();
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
@@ -163,7 +163,7 @@ public class GetOrderQueryHandler(IDbConnectionFactory factory)
 {
     public async Task<OrderDetailDto?> Handle(GetOrderQuery request, CancellationToken ct)
     {
-        using var conn = factory.CreateConnection();
+        await using var conn = factory.CreateConnection();
 
         // Use QueryMultiple for a single round trip
         using var multi = await conn.QueryMultipleAsync(@"
@@ -271,7 +271,7 @@ public class ListOrdersHandler(IDbConnectionFactory factory)
 {
     public async Task<PagedResult<OrderSummaryDto>> Handle(ListOrdersQuery request, CancellationToken ct)
     {
-        using var conn = factory.CreateConnection();
+        await using var conn = factory.CreateConnection();
 
         var conditions = new List<string>();
         var parameters = new DynamicParameters();

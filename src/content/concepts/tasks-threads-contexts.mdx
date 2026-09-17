@@ -1,0 +1,38 @@
+---
+title: "Tasks, Threads, and Execution Contexts"
+order: 4
+summary: "Separate asynchronous work from parallel CPU work, and understand why UI thread rules differ from ASP.NET Core request handling."
+flutterAnalogy: "Flutter has a UI isolate and event loop; .NET UI apps have thread affinity, while ASP.NET Core normally has no request SynchronizationContext."
+relatedDays: [51, 52, 53, 57, 58]
+---
+
+## A task is not a thread
+
+`Task` represents eventual completion. Asynchronous socket and file APIs can wait without occupying a thread. CPU-bound work still needs CPU time and may use thread-pool threads or dedicated workers.
+
+```csharp
+var response = await httpClient.GetAsync(uri, cancellationToken);
+// While I/O is pending, no thread needs to block for this request.
+```
+
+Do not wrap naturally asynchronous I/O in `Task.Run`. It consumes a thread without making the I/O more asynchronous. `Task.Run` is mainly useful to move CPU-heavy work away from a UI thread, or to deliberately schedule independent CPU work.
+
+## UI apps versus ASP.NET Core
+
+WPF, WinForms, and .NET MAUI controls normally have thread affinity. Code that blocks the UI thread freezes input and painting. After `await`, their synchronization context commonly resumes on the UI thread unless you opt out.
+
+ASP.NET Core normally has no custom `SynchronizationContext`. An awaited request continuation may run on any thread-pool thread, and that is expected. There is no ASP.NET “main thread” to return to. Avoid thread-affine state and avoid blocking with `.Result`, `.Wait()`, or synchronous I/O because blocked worker threads reduce throughput and can cause thread-pool starvation.
+
+`ConfigureAwait(false)` matters most in reusable libraries that must not depend on a caller’s context. It is usually unnecessary in ASP.NET Core application code.
+
+## Safe default
+
+- Use async APIs end to end for I/O.
+- Await every task or deliberately track its completion and failures.
+- Keep CPU-heavy work bounded; move durable jobs to a queue/worker.
+- In UI apps, marshal UI mutations through the framework dispatcher.
+
+## Sources
+
+- [Task asynchronous programming model](https://learn.microsoft.com/en-us/dotnet/csharp/asynchronous-programming/task-asynchronous-programming-model)
+- [ASP.NET Core best practices](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/best-practices)

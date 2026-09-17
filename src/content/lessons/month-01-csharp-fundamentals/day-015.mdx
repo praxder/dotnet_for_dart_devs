@@ -198,8 +198,9 @@ public class Statistics
         var list = data.ToList();
         if (list.Count == 0) return false;
 
-        mean = list.Average();
-        var variance = list.Average(x => Math.Pow(x - mean, 2));
+        var calculatedMean = list.Average();
+        var variance = list.Average(x => Math.Pow(x - calculatedMean, 2));
+        mean = calculatedMean;
         stdDev = Math.Sqrt(variance);
         return true;
     }

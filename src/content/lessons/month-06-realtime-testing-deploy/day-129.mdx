@@ -1,5 +1,5 @@
 ---
-title: "Capstone Project: Flutter + .NET API (Part 1 — Architecture)"
+title: "Capstone Project: Integration Plan and Architecture"
 day: 129
 week: 26
 module: 10
@@ -15,7 +15,7 @@ projectType: "capstone"
 import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-You've spent 128 days learning C# and .NET. Today you design a full-stack project that uses everything — from LINQ and EF Core to auth, SignalR, Docker, and CI/CD — alongside your existing Flutter expertise.
+This capstone consolidates work from the backend modules into one releasable system. Day 129 is an architecture and integration checkpoint, not a claim that a production application can be designed from scratch in 45 minutes. Reuse the API, Dapper repositories, authentication, tests, container, and CI work you built earlier.
 
 ## The Capstone: Real-Time Task Board
 
@@ -89,10 +89,11 @@ src/
 │   └── Notifications/
 │       └── TaskMovedNotificationHandler.cs  ← pushes via SignalR
 │
-├── TaskBoard.Infrastructure/      ← EF Core, Identity, external services
+├── TaskBoard.Infrastructure/      ← Dapper, Identity store, external services
 │   ├── Persistence/
-│   │   ├── AppDbContext.cs
-│   │   └── Configurations/
+│   │   ├── NpgsqlConnectionFactory.cs
+│   │   ├── Repositories/
+│   │   └── Migrations/
 │   ├── Identity/
 │   │   └── JwtTokenService.cs
 │   └── Hubs/
@@ -248,7 +249,7 @@ class BoardNotifier extends _$BoardNotifier {
 ```
 
 <ExerciseBlock>
-1. **Architecture review**: Before writing any code, document your architecture decisions: (a) Why CQRS + MediatR? (b) Why EF Core with owned types for `Label[]`? (c) How does SignalR handle concurrent moves — what happens if two users move the same task simultaneously? (d) How does the Flutter app handle the SignalR connection when it goes to the background?
+1. **Architecture review**: Before integration, document your architecture decisions: (a) Is CQRS + MediatR earning its complexity for this application? (b) How will Dapper map `Label[]` and persist board aggregates without hidden N+1 queries? (c) How are concurrent task moves detected and resolved? (d) How does the Flutter app handle the SignalR connection when it enters the background?
 2. **Domain modeling**: Implement the `Board` aggregate with its `AddTask`, `MoveTask`, `ReorderTask`, and `DeleteTask` methods. Each method should enforce invariants: no duplicate positions in a column, task must exist to be moved, column must exist. Write unit tests for all invariants.
-3. **Data layer**: Design the EF Core migrations for the task board. The tricky parts: (a) `TaskPosition` as a value object, (b) `Label[]` stored as JSON column, (c) `members` as a many-to-many with roles. Create the migration and seed a test workspace with 3 boards.
+3. **Data layer**: Write reviewed PostgreSQL migrations and Dapper mappings for the task board. Cover `TaskPosition`, labels in normalized tables or `jsonb`, workspace membership with roles, indexes, foreign keys, and an optimistic-concurrency version. Seed a test workspace with three boards and verify repository behavior with an integration test.
 </ExerciseBlock>

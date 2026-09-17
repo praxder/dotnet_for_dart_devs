@@ -87,8 +87,8 @@ for (int i = 0; i < 5; i++)
 correctActions.ForEach(a => a());  // prints: 0 1 2 3 4
 ```
 
-<ConceptCallout type="gotcha" title="Dart Has the Same Closure Issue">
-This loop-closure bug exists in Dart too: `for (var i = 0; i < 5; i++) { list.add(() => print(i)); }` prints `5` five times. The fix is the same: capture into a local variable inside the loop body.
+<ConceptCallout type="different" title="Dart Loop Variables Differ">
+Dart creates a fresh loop variable for each iteration of a standard `for` loop, so the direct Dart translation captures `0, 1, 2, 3, 4`. C#'s `for` loop reuses one variable. C# `foreach`, however, has per-iteration capture semantics in modern language versions.
 </ConceptCallout>
 
 ## Static Lambdas — Zero Allocation
@@ -98,7 +98,7 @@ This loop-closure bug exists in Dart too: `for (var i = 0; i < 5; i++) { list.ad
 int threshold = 10;
 var filter = (int n) => n > threshold;  // Allocates: closure holds 'threshold'
 
-// static lambda — explicitly prevents capture, zero allocation
+// static lambda — explicitly prevents closure capture
 // Great for LINQ predicates that don't need captured state
 var filtered = numbers.Where(static n => n > 10);  // No closure allocation
 
@@ -130,7 +130,7 @@ int result = parser("42");                    // 42
 
 // Method groups with instance methods
 var sb = new StringBuilder();
-Action<string> append = sb.Append;            // captures sb as the instance
+Action<string> append = text => sb.Append(text); // adapt StringBuilder's return value to void
 append("Hello");
 append(" World");
 Console.WriteLine(sb);  // "Hello World"

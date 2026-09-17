@@ -32,7 +32,6 @@ Traces    → Why was this request slow? (which service/query took how long)
 // OpenTelemetry is the standard — export to any backend (Jaeger, Prometheus, OTLP)
 // dotnet add package OpenTelemetry.Extensions.Hosting
 // dotnet add package OpenTelemetry.Instrumentation.AspNetCore
-// dotnet add package OpenTelemetry.Instrumentation.EntityFrameworkCore
 // dotnet add package OpenTelemetry.Exporter.Prometheus.AspNetCore
 
 builder.Services.AddOpenTelemetry()
@@ -47,10 +46,6 @@ builder.Services.AddOpenTelemetry()
                 options.Filter = ctx =>
                     // Don't trace health checks
                     !ctx.Request.Path.StartsWithSegments("/health");
-            })
-            .AddEntityFrameworkCoreInstrumentation(options =>
-            {
-                options.SetDbStatementForText = true;  // include SQL in traces
             })
             .AddHttpClientInstrumentation()
             .AddSource("BlogApi.*")  // custom traces
@@ -81,7 +76,7 @@ public class BlogMetrics
     private readonly UpDownCounter<long> _activeSessions;
     private readonly ObservableGauge<int> _pendingComments;
 
-    public BlogMetrics(IMeterFactory meterFactory, AppDbContext db)
+    public BlogMetrics(IMeterFactory meterFactory, PendingCommentCounter pendingComments)
     {
         var meter = meterFactory.Create("BlogApi.Metrics");
 
@@ -99,10 +94,10 @@ public class BlogMetrics
             "blog.active.sessions",
             unit: "{sessions}");
 
-        // Observable: polled on demand
+        // Observable callbacks must be fast and non-blocking; do not query PostgreSQL here.
         _pendingComments = meter.CreateObservableGauge<int>(
             "blog.comments.pending",
-            () => db.Comments.Count(c => c.Status == CommentStatus.Pending),
+            () => pendingComments.Value,
             unit: "{comments}");
     }
 
@@ -130,7 +125,7 @@ public class BlogMetrics
 builder.Services.AddSingleton<BlogMetrics>();
 
 // In a query handler:
-public class GetPostHandler(AppDbContext db, BlogMetrics metrics) : ...
+public class GetPostHandler(IPostRepository posts, BlogMetrics metrics) : ...
 {
     public async Task<PostDetailDto?> Handle(GetPostQuery request, CancellationToken ct)
     {
@@ -143,7 +138,7 @@ public class GetPostHandler(AppDbContext db, BlogMetrics metrics) : ...
 ## Custom Distributed Traces
 
 ```csharp
-public class PostSearchService(AppDbContext db, BlogMetrics metrics)
+public class PostSearchService(IPostSearchRepository posts, BlogMetrics metrics)
 {
     private static readonly ActivitySource Source = new("BlogApi.Search");
 
@@ -151,20 +146,13 @@ public class PostSearchService(AppDbContext db, BlogMetrics metrics)
     {
         // Create a span for this operation — visible in Jaeger/Zipkin
         using var activity = Source.StartActivity("SearchPosts");
-        activity?.SetTag("search.query", query);
         activity?.SetTag("search.query.length", query.Length);
 
         using var timer = metrics.MeasureSearch(query);
 
         try
         {
-            var results = await db.Posts
-                .AsNoTracking()
-                .TagWith("SearchPosts")
-                .Where(p => p.Title.Contains(query) || p.Body.Contains(query))
-                .Select(p => new PostSummaryDto(p.Id, p.Title, p.Slug, p.Summary))
-                .Take(20)
-                .ToListAsync(ct);
+            var results = await posts.SearchAsync(query, limit: 20, ct);
 
             activity?.SetTag("search.result.count", results.Count);
             activity?.SetStatus(ActivityStatusCode.Ok);

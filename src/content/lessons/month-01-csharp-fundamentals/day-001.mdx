@@ -124,7 +124,7 @@ Dart generates a `bin/` directory with your main file and a `lib/` directory for
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
@@ -247,7 +247,7 @@ After `dotnet run` or `dotnet build`, a `bin/` folder appears:
 MyApp/
 ├── bin/
 │   └── Debug/
-│       └── net9.0/
+│       └── net10.0/
 │           ├── MyApp.dll        ← The compiled assembly
 │           ├── MyApp.exe        ← Platform launcher (Windows) or symlink (Linux/macOS)
 │           └── MyApp.runtimeconfig.json
@@ -347,7 +347,7 @@ dotnet run -- foo bar baz
 
 1. **Install and verify**: Install the .NET SDK, run `dotnet --info`, and identify the SDK version and the list of installed runtimes.
 
-2. **Create and explore**: Run `dotnet new console -n DartDevIntro`. Open `DartDevIntro.csproj` and identify each XML property. What does `TargetFramework` control? What happens if you change `net9.0` to `net8.0`?
+2. **Create and explore**: Run `dotnet new console -n DartDevIntro`. Open `DartDevIntro.csproj` and identify each XML property. What does `TargetFramework` control? What happens if you change `net10.0` to `net8.0`?
 
 3. **Classic vs modern**: Rewrite the generated `Program.cs` in the old-style class-based form with an explicit `static void Main`. Confirm it still compiles and runs with `dotnet run`.
 

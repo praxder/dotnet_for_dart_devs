@@ -151,6 +151,17 @@ const projectLessons = allLessons.filter(l => l.data.isProject);
           </div>
         </section>
 
+        <section class="rounded-xl border border-indigo-800/40 bg-indigo-950/20 p-5">
+          <p class="text-xs font-semibold uppercase tracking-wider text-indigo-400 mb-2">Architecture guide</p>
+          <h2 class="text-lg font-semibold text-white mb-2">How .NET applications behave</h2>
+          <p class="text-sm text-slate-400 leading-relaxed mb-4">
+            Twelve high-level concepts connect C# syntax to real application behavior: the CLR, managed memory, async execution, cancellation, hosting, dependency-injection scopes, the ASP.NET pipeline, database ownership, and production operations.
+          </p>
+          <a href={`${import.meta.env.BASE_URL}concepts`} class="inline-flex text-sm font-medium text-indigo-300 hover:text-indigo-200">
+            Explore .NET application concepts →
+          </a>
+        </section>
+
       </div>
     </div>
 

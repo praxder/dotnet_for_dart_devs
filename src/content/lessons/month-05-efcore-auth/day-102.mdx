@@ -261,7 +261,7 @@ public class DapperBenchmarks
 ```
 
 <ConceptCallout type="tip" title="Dapper Performance Profile">
-Dapper is typically **5-10x faster than EF Core** for read operations (less mapping overhead, no change tracking) and roughly equal for writes. Its main performance advantage is predictability: the SQL you write is exactly what runs — no hidden N+1, no lazy loading surprises, no Cartesian explosion.
+Dapper has low mapping overhead and gives you direct control of SQL, but there is no universal “5–10× faster” rule. Query shape, network and database time, buffering, indexes, and EF Core tracking choices dominate many workloads. Benchmark the complete operation with representative data; choose Dapper here for explicit SQL and predictable execution, not a guaranteed multiplier.
 </ConceptCallout>
 
 <ExerciseBlock>

@@ -16,7 +16,7 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-If you've shipped any real Dart code, `async`/`await` is already in your muscle memory. C#'s async model is the **direct ancestor** of Dart's — Microsoft shipped it in C# 5 (2012), and Dart's designers drew heavily from it. The mental model transfers almost 1:1. The differences are in the details, and those details matter.
+If you've shipped any real Dart code, `async`/`await` is already in your muscle memory. C# and Dart use very similar syntax for composing asynchronous operations. The mental model transfers well, but runtime and application-host details still matter.
 
 ## Task\<T\> Is Future\<T\>
 
@@ -56,10 +56,10 @@ async Task Main()
 ```
 </CodeComparison>
 
-The structure is identical. The `async` keyword goes on the method, `await` pauses execution at that expression until the task completes, and the return type wraps the actual value in `Task<T>`.
+The structure is nearly identical. The `async` keyword goes on the method, an incomplete awaited operation suspends the method without blocking its thread, and the return type represents eventual completion with `Task<T>`.
 
 <ConceptCallout type="same">
-`async`/`await` syntax and semantics are nearly identical between Dart and C#. If you write a `Future<T>` method in Dart, you already know how to write a `Task<T>` method in C#. The mental model is the same: the method appears to run synchronously but yields the thread while waiting.
+`async`/`await` syntax is nearly identical between Dart and C#. In both languages, code runs synchronously until it reaches an incomplete awaited operation, then the method suspends so other work can proceed.
 </ConceptCallout>
 
 ## The Return Type Rules
@@ -87,10 +87,10 @@ async Task SaveUserAsync(User user)
     // no return needed — Task is implicit
 }
 
-// BAD: async void — fire and forget, exceptions are swallowed
+// BAD: the caller cannot await completion or observe failure through a Task
 async void LoadData() // <-- don't do this
 {
-    await SomethingAsync(); // exceptions vanish into the void
+    await SomethingAsync();
 }
 ```
 
@@ -125,13 +125,13 @@ Task<string> GetCachedName()
 // For void (no return value):
 Task DoNothing()
 {
-    return Task.CompletedTask; // singleton completed Task
+    return Task.CompletedTask; // already completed
 }
 ```
 </CodeComparison>
 
 <ConceptCallout type="tip">
-`Task.CompletedTask` is a singleton — it's the same object every time. Use it whenever you need to satisfy a `Task` return type but have nothing async to do. It's zero-allocation and very fast. `Task.FromResult(value)` is the same idea for `Task<T>`.
+Use `Task.CompletedTask` whenever you need to satisfy a `Task` return type but have no asynchronous work. `Task.FromResult(value)` is the corresponding tool for `Task<T>`. Treat both as completion values; do not rely on task object identity or implementation-specific caching.
 </ConceptCallout>
 
 ## ConfigureAwait(false): The Library Developer's Tool
@@ -142,7 +142,7 @@ You'll see this constantly in C# codebases and NuGet packages:
 var result = await SomeOperationAsync().ConfigureAwait(false);
 ```
 
-This is a subtle but important concept. When you `await` a task, C# by default tries to **resume on the same synchronization context** (the UI thread in desktop apps, the ASP.NET request context in web apps). `ConfigureAwait(false)` says "I don't need to resume on that context — any thread is fine."
+This is a subtle but important concept. When a synchronization context or custom task scheduler is present, `await` normally captures it so the continuation can return there—for example, to a UI thread in a desktop app. `ConfigureAwait(false)` says the continuation does not require that captured context. It does not promise a thread switch.
 
 ```csharp
 // Library code — use ConfigureAwait(false)
@@ -150,7 +150,7 @@ This is a subtle but important concept. When you `await` a task, C# by default t
 public async Task<string> FetchDataAsync()
 {
     var response = await httpClient.GetAsync(url).ConfigureAwait(false);
-    // This continues on a thread pool thread, not the UI thread
+    // No request to marshal the continuation back to a captured context.
     return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 }
 
@@ -213,9 +213,9 @@ async Task<User> LoadUser(int id)
 In C#, use `throw;` to rethrow an exception (preserving the original stack trace). Using `throw ex;` creates a **new** exception from the current location, losing the original stack trace. This is opposite to intuition — `throw;` without an argument is the correct form. Dart's `rethrow` is the exact equivalent.
 </ConceptCallout>
 
-## Async Methods Are Lazy in a Specific Way
+## Async Methods Start Immediately
 
-One subtle difference from Dart: in C#, an `async` method **starts executing immediately** when called, up to the first `await`. In Dart, a `Future` returned from an `async` method is always scheduled (even synchronous `Future.value()` delivers on the next microtask). In C#, the code before the first `await` runs synchronously on the calling thread:
+In both C# and Dart, an `async` method starts executing synchronously when called. It runs until it reaches an awaited operation that has not completed. In C#, that means code before the first suspension runs on the calling thread:
 
 ```csharp
 async Task<int> DoWork()
@@ -232,8 +232,8 @@ Console.WriteLine("Task started");
 var result = await task; // waits for the rest
 ```
 
-<ConceptCallout type="different">
-In Dart, async method bodies are always deferred to at least the next event loop turn. In C#, the code before the first `await` executes synchronously on the calling thread. This is rarely a practical problem but can matter for thread safety and for understanding call ordering.
+<ConceptCallout type="same">
+Dart also runs an async function synchronously until its first incomplete `await`. Neither language moves CPU-bound work to a background thread merely because a method is marked `async`; use an isolate in Dart or an appropriate worker/thread-pool strategy in .NET when CPU work must leave the UI thread.
 </ConceptCallout>
 
 ## Putting It Together: A Real Async Pattern

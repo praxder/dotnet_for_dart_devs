@@ -75,26 +75,23 @@ app.MapPost("/api/posts", async (
 ## SQL Injection Prevention
 
 ```csharp
-// EF Core parameterizes ALL LINQ queries — safe by default
+// Dapper parameters keep values separate from SQL structure.
 var name = userInput;
-var products = await db.Products
-    .Where(p => p.Name == name)  // SQL: WHERE name = @p0 — SAFE
-    .ToListAsync();
-
-// Safe raw SQL with interpolation (EF Core 8):
-var products2 = await db.Products
-    .FromSql($"SELECT * FROM products WHERE name = {name}")  // parameterized — SAFE
-    .ToListAsync();
+var products = await connection.QueryAsync<Product>(
+    "SELECT id, name, price FROM products WHERE name = @name",
+    new { name });
 
 // DANGEROUS — never do this:
-var products3 = await db.Products
-    .FromSqlRaw($"SELECT * FROM products WHERE name = '{name}'")  // SQL INJECTION!
-    .ToListAsync();
+var unsafeSql = $"SELECT * FROM products WHERE name = '{name}'";
+var unsafeProducts = await connection.QueryAsync<Product>(unsafeSql);
 
-// Safe raw SQL with explicit parameters:
-var products4 = await db.Products
-    .FromSqlRaw("SELECT * FROM products WHERE name = {0}", name)  // SAFE
-    .ToListAsync();
+// Dynamic identifiers cannot be parameters. Map user choices to known SQL.
+var sortColumn = requestedSort switch
+{
+    "price" => "price",
+    "created" => "created_at",
+    _ => "name"
+};
 ```
 
 ## CORS — Cross-Origin Resource Sharing
@@ -145,8 +142,8 @@ app.Use(async (context, next) =>
     // Clickjacking protection
     context.Response.Headers["X-Frame-Options"] = "DENY";
 
-    // XSS protection (old browsers)
-    context.Response.Headers["X-XSS-Protection"] = "1; mode=block";
+    // Disable obsolete browser XSS auditors; use output encoding and CSP instead.
+    context.Response.Headers["X-XSS-Protection"] = "0";
 
     // HTTPS only (combined with HSTS middleware)
     // context.Response.Headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";

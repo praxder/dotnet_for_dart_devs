@@ -1,0 +1,17 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Header from '../../components/layout/Header.astro';
+
+const destination = `${import.meta.env.BASE_URL}modules/dapper`;
+---
+
+<BaseLayout title="Module moved" description="The data-access module now teaches Dapper and SQL-first persistence.">
+  <meta http-equiv="refresh" content={`0;url=${destination}`} slot="head" />
+  <Header />
+  <main class="max-w-xl mx-auto px-4 py-20 text-center">
+    <h1 class="text-2xl font-bold text-white mb-3">This module is now Dapper &amp; SQL Data Access</h1>
+    <p class="text-slate-400 mb-6">The old URL is preserved so existing bookmarks continue to work.</p>
+    <a href={destination} class="text-indigo-400 hover:text-indigo-300">Continue to the module →</a>
+  </main>
+  <script is:inline define:vars={{ destination }}>window.location.replace(destination);</script>
+</BaseLayout>

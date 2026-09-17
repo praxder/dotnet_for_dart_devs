@@ -1,0 +1,43 @@
+---
+title: "Data Ownership, Transactions, and Pooling"
+order: 11
+summary: "Treat connections, transactions, constraints, retries, and migrations as parts of one consistency boundary."
+flutterAnalogy: "Similar to a mobile repository transaction, except server instances share a database and many callers race concurrently."
+relatedDays: [91, 96, 97, 101, 103, 104]
+---
+
+## The database owns durable invariants
+
+Application checks improve errors, but database constraints are the final authority for uniqueness, foreign keys, and valid state that must survive concurrent callers. Handle the resulting constraint violation and translate it into the application contract.
+
+A transaction groups statements into one atomic unit on one connection. Every command must use the same connection and transaction object.
+
+```csharp
+await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+try
+{
+    await InsertOrderAsync(connection, transaction, order, cancellationToken);
+    await InsertItemsAsync(connection, transaction, order.Items, cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
+}
+catch
+{
+    await transaction.RollbackAsync(CancellationToken.None);
+    throw;
+}
+```
+
+## Connections are pooled leases
+
+Opening a provider connection usually leases a physical connection from a pool. Keep the lease short, dispose it promptly, and do not share a connection across concurrent requests. A transaction also holds resources; never wait for unrelated network calls while a database transaction is open unless the consistency requirement truly demands it.
+
+Retries are safe only when the operation is idempotent or the outcome is known. A timeout may occur after the server committed. Use idempotency keys, unique constraints, and an outbox for durable side effects instead of blindly rerunning a multi-step command.
+
+Schema migrations are deployment artifacts. Dapper does not manage them, so choose a tool and run reviewed migrations as a controlled deployment step rather than ad hoc at request startup.
+
+## Sources
+
+- [ADO.NET transactions](https://learn.microsoft.com/en-us/dotnet/framework/data/adonet/local-transactions)
+- [Npgsql basic usage](https://www.npgsql.org/doc/basic-usage.html)

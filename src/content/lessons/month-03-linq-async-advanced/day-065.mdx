@@ -111,19 +111,27 @@ public class OrderProcessor : IAsyncDisposable
 
     private async Task ProcessOrdersAsync(CancellationToken ct)
     {
-        await foreach (var order in _inboundChannel.Reader.ReadAllAsync(ct))
+        try
         {
-            try
+            await foreach (var order in _inboundChannel.Reader.ReadAllAsync(ct))
             {
-                await ProcessSingleOrderAsync(order, ct);
+                try
+                {
+                    await ProcessSingleOrderAsync(order, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    var failed = order.WithStatus(OrderStatus.Failed);
+                    _orderStore[order.Id] = failed;
+                    await _eventChannel.Writer.WriteAsync(
+                        new OrderEvent.Failed(order.Id, ex.Message, DateTime.UtcNow), ct);
+                }
             }
-            catch (Exception ex)
-            {
-                var failed = order.WithStatus(OrderStatus.Failed);
-                _orderStore[order.Id] = failed;
-                await _eventChannel.Writer.WriteAsync(
-                    new OrderEvent.Failed(order.Id, ex.Message, DateTime.UtcNow), ct);
-            }
+        }
+        finally
+        {
+            // No more events can be produced after order processing finishes.
+            _eventChannel.Writer.TryComplete();
         }
     }
 
@@ -185,15 +193,23 @@ public class OrderProcessor : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
-        _inboundChannel.Writer.Complete();
-        _eventChannel.Writer.Complete();
-
-        await Task.WhenAll(_processingTask, _eventDispatchTask);
-        _cts.Dispose();
+        // Graceful shutdown: stop intake, drain orders, then drain events.
+        _inboundChannel.Writer.TryComplete();
+        try
+        {
+            await _processingTask;
+            await _eventDispatchTask;
+        }
+        finally
+        {
+            // Cancellation is reserved for a separate forced-shutdown policy.
+            _cts.Dispose();
+        }
     }
 }
 ```
+
+Normal disposal drains accepted work. A production host should also define a bounded forced-shutdown path: after its grace period, cancel the processor, record unfinished work, and await both tasks so cancellation and failures are observed.
 
 ### Analytics Engine
 

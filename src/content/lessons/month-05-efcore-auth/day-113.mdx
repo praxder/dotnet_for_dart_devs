@@ -25,18 +25,17 @@ Security isn't a one-time setup — it requires ongoing testing and vigilance. T
 ```csharp
 // Insecure Direct Object Reference — most common API vulnerability
 // VULNERABLE: no ownership check
-app.MapGet("/api/orders/{id}", async (int id, AppDbContext db) =>
-    await db.Orders.FindAsync(id));  // any authenticated user can see any order!
+app.MapGet("/api/orders/{id}", async (int id, IOrderRepository orders) =>
+    await orders.GetByIdAsync(id));  // any authenticated user can see any order!
 
 // SECURE: always filter by current user's ID
 app.MapGet("/api/orders/{id}", async (
     int id,
-    AppDbContext db,
+    IOrderRepository orders,
     ClaimsPrincipal user) =>
 {
     var userId = user.GetUserId();
-    var order = await db.Orders
-        .FirstOrDefaultAsync(o => o.Id == id && o.CustomerId == userId);
+    var order = await orders.GetForCustomerAsync(id, userId);
     return order is null ? Results.NotFound() : Results.Ok(order);
 }).RequireAuthorization();
 ```
@@ -195,11 +194,11 @@ jobs:
   dependency-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '9.x'
+          dotnet-version: '10.x'
 
       # Scan for vulnerable NuGet packages
       - name: Audit dependencies
@@ -207,7 +206,7 @@ jobs:
 
       # SAST with CodeQL
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: csharp
 
@@ -215,7 +214,7 @@ jobs:
         run: dotnet build
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
 
       # OWASP Dependency Check
       - name: OWASP Dependency Check
@@ -226,37 +225,32 @@ jobs:
           format: 'HTML'
 ```
 
-## Runtime Security Checks
+## Runtime Guardrails and Safe Security Events
+
+Do not try to detect SQL injection or path traversal with a blacklist. Attack strings have many encodings and valid inputs can contain suspicious-looking text. Enforce authorization and resource ownership, validate each endpoint's input model, parameterize SQL, limit request sizes, and let framework parsers handle structured input.
 
 ```csharp
-// Detect suspicious patterns at runtime
-public class SecurityAuditMiddleware(RequestDelegate next, ILogger<SecurityAuditMiddleware> logger)
+// Record a bounded event when an actual security control rejects a request.
+public static class SecurityEvents
 {
-    private static readonly string[] SuspiciousPatterns =
-        ["<script", "javascript:", "' OR '", "'; DROP", "UNION SELECT", "../", "etc/passwd"];
-
-    public async Task InvokeAsync(HttpContext context)
+    public static void Rejected(
+        ILogger logger,
+        HttpContext context,
+        string control,
+        string outcome)
     {
-        // Check query string for injection attempts
-        foreach (var (key, value) in context.Request.Query)
-        {
-            if (SuspiciousPatterns.Any(p =>
-                value.ToString().Contains(p, StringComparison.OrdinalIgnoreCase)))
-            {
-                logger.LogWarning(
-                    "Suspicious input detected from {IP}: key={Key}, value={Value}",
-                    context.Connection.RemoteIpAddress,
-                    key, value);
-                context.Response.StatusCode = 400;
-                await context.Response.WriteAsJsonAsync(new { error = "Invalid input" });
-                return;
-            }
-        }
-
-        await next(context);
+        var endpoint = context.GetEndpoint()?.DisplayName ?? "unmatched";
+        logger.LogWarning(
+            "Security control {Control} rejected {Endpoint}; outcome={Outcome}; trace={TraceId}",
+            control,
+            endpoint,
+            outcome,
+            context.TraceIdentifier);
     }
 }
 ```
+
+Use normalized endpoint metadata and correlation IDs in these events. Never attach raw authorization headers, tokens, request bodies, or query-string values.
 
 <ConceptCallout type="tip" title="Security Testing Mindset">
 For each endpoint, ask: (1) What if an unauthenticated user calls this? (2) What if a low-privilege user calls this? (3) What if the ID in the URL belongs to another user? (4) What if I send a massive payload? (5) What if I replay the same request 1000 times? Write tests for the "no" answers. Security tests are often the most valuable tests in a codebase.
@@ -265,5 +259,5 @@ For each endpoint, ask: (1) What if an unauthenticated user calls this? (2) What
 <ExerciseBlock>
 1. Write a comprehensive security test suite for your blog API. Cover: unauthenticated access to protected routes (401), low-privilege access to admin routes (403), BOLA (accessing another user's resource returns 404), and rate limiting (6th login attempt returns 429).
 2. Run `dotnet list package --vulnerable` on your project. If vulnerabilities are found, research and update the affected packages. Set up a GitHub Actions workflow that fails the build if vulnerable packages are detected.
-3. Implement a "security honeypot": add fake endpoints like `/api/admin/backup`, `/api/internal/config`, and `/api/v1/admin` that are never publicly advertised. If called, log the caller's IP and JWT (if any) as a security event. This helps detect automated scanners probing your API.
+3. Implement a security-event test for requests to a deliberately nonexistent administrative route. Record a correlation ID, normalized route, outcome, and a non-reversible token fingerprint if correlation is necessary. Never log the raw JWT, authorization header, query-string secrets, or request body.
 </ExerciseBlock>

@@ -23,7 +23,7 @@ Containers are the standard way to deploy .NET applications. They bundle your ap
 ```dockerfile
 # Multi-stage build: build in full SDK image, run in smaller runtime image
 # Stage 1: Build
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy project files first (for layer caching — only re-run restore when .csproj changes)
@@ -47,7 +47,7 @@ RUN dotnet publish "Api.csproj" \
     --self-contained false
 
 # Stage 3: Final runtime image
-FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 
 # Security: run as non-root user
@@ -69,11 +69,11 @@ ENTRYPOINT ["dotnet", "Api.dll"]
 
 ```dockerfile
 # Chiseled images: minimal attack surface, smaller size
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 # ... (same build stages as above)
 
 # Use chiseled runtime image (Ubuntu-based, stripped down)
-FROM mcr.microsoft.com/dotnet/aspnet:9.0-jammy-chiseled AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled AS final
 WORKDIR /app
 EXPOSE 8080
 ENV ASPNETCORE_URLS=http://+:8080
@@ -169,15 +169,15 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders =
         ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    options.KnownNetworks.Clear();   // trust any proxy (or configure specific IPs)
-    options.KnownProxies.Clear();
+    // Trust only proxy addresses or networks owned by your deployment platform.
+    options.KnownProxies.Add(IPAddress.Parse("10.0.0.10"));
 });
 app.UseForwardedHeaders();  // must be first middleware!
 
 // 3. Health checks for container orchestrators
 builder.Services.AddHealthChecks()
-    .AddNpgSql(connectionString, name: "database")
-    .AddRedis(redisConnectionString, name: "redis");
+    .AddNpgSql(connectionString, name: "database", tags: ["ready"])
+    .AddRedis(redisConnectionString, name: "redis", tags: ["ready"]);
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
@@ -204,19 +204,19 @@ lifetime.ApplicationStopping.Register(() =>
 ## Running Migrations on Startup
 
 ```csharp
-// Automatically run pending migrations when the container starts
-// Useful for simple deployments; use separate migration job for production
+// A Dapper application uses an explicit SQL migration tool.
+// This is acceptable for local development; use a separate migration job in production.
 
 public static async Task ApplyMigrationsAsync(WebApplication app)
 {
     using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var migrator = scope.ServiceProvider.GetRequiredService<ISchemaMigrator>();
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
     try
     {
         logger.LogInformation("Applying database migrations...");
-        await db.Database.MigrateAsync();
+        await migrator.MigrateAsync();
         logger.LogInformation("Migrations applied successfully");
     }
     catch (Exception ex)
@@ -235,12 +235,12 @@ await app.RunAsync();
 1. **Non-root user**: ASP.NET Core chiseled images run as non-root by default
 2. **Read-only filesystem**: mount secrets as files, not baked into the image
 3. **No secrets in image**: use environment variables or mounted secrets
-4. **Minimal base image**: use `aspnet:9.0-jammy-chiseled` or Alpine-based images
+4. **Minimal base image**: use a pinned .NET 10 chiseled or Alpine image compatible with your globalization requirements
 5. **Scan images**: run `docker scout` or Trivy in CI to detect vulnerabilities
 </ConceptCallout>
 
 <ExerciseBlock>
 1. Write a multi-stage Dockerfile for your blog API. Verify the image builds, runs, and responds to `GET /health`. Check the final image size with `docker images`.
-2. Create a `docker-compose.yml` with your API, PostgreSQL, and Redis. Add health checks so the API only starts after the database is ready. Test `docker compose up` brings everything up and that `dotnet ef database update` runs automatically.
-3. Add a `docker-compose.override.yml` for development: enable hot reload with `dotnet watch`, mount the source directory as a volume, and expose debugging port 9229. The base `docker-compose.yml` should be production-ready; the override adds dev conveniences.
+2. Create a `docker-compose.yml` with your API, PostgreSQL, and Redis. Add health checks so the API only starts after the database is ready. Run reviewed SQL migrations with the migration tool chosen in the Dapper module as a separate startup job, not from request handling.
+3. Add a `docker-compose.override.yml` for development: enable hot reload with `dotnet watch`, mount the source directory as a volume, and configure debugger attachment for your IDE. Keep development-only settings out of the production image.
 </ExerciseBlock>

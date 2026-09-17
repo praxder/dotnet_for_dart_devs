@@ -18,6 +18,8 @@ import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
 ASP.NET Core Identity is the complete membership system for .NET — user registration, login, password hashing, roles, claims, email confirmation, lockouts, two-factor auth, and external provider login. It integrates directly with EF Core for persistence.
 
+This course keeps that integration inside an **Identity-only context**. Blog, order, and other application data continue to use the Dapper repositories from module 8. Sharing one PostgreSQL server is fine; sharing persistence models or using the Identity context as a general application `DbContext` is not part of this architecture.
+
 ## Setup
 
 ```bash
@@ -38,16 +40,16 @@ public class AppUser : IdentityUser
 }
 
 // DbContext — extend IdentityDbContext
-public class AppDbContext : IdentityDbContext<AppUser>
+public class AppIdentityDbContext : IdentityDbContext<AppUser>
 {
-    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+    public AppIdentityDbContext(DbContextOptions<AppIdentityDbContext> options) : base(options) { }
 
     // Identity already adds: AspNetUsers, AspNetRoles, AspNetUserRoles,
     // AspNetUserClaims, AspNetUserLogins, AspNetUserTokens, AspNetRoleClaims
 }
 
 // Program.cs:
-builder.Services.AddDbContext<AppDbContext>(options =>
+builder.Services.AddDbContext<AppIdentityDbContext>(options =>
     options.UseSqlite(connectionString));
 
 builder.Services.AddIdentity<AppUser, IdentityRole>(options =>
@@ -66,7 +68,7 @@ builder.Services.AddIdentity<AppUser, IdentityRole>(options =>
     options.User.RequireUniqueEmail = true;
     options.SignIn.RequireConfirmedEmail = false;  // set true for production
 })
-.AddEntityFrameworkStores<AppDbContext>()
+.AddEntityFrameworkStores<AppIdentityDbContext>()
 .AddDefaultTokenProviders();  // for password reset, email confirmation
 ```
 

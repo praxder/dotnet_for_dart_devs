@@ -5,7 +5,7 @@ week: 1
 module: 1
 moduleName: "C# Environment & Type System"
 phase: "csharp"
-dartConcept: "Dart int (arbitrary precision), double"
+dartConcept: "Dart int (platform-dependent representation), double, BigInt"
 csharpConcept: "int (32-bit), long (64-bit), double, float, decimal, BigInteger"
 estimatedMinutes: 30
 isProject: false
@@ -18,7 +18,7 @@ import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
 # Numeric Types: int, long, double, decimal, and More
 
-In Dart, you have exactly two numeric types: `int` (arbitrary-precision integers on the VM, 64-bit on native) and `double` (64-bit IEEE 754 floating point). That is it. C# has a full suite of numeric types, each with a specific size, range, and use case. This lesson covers all of them, explains when to use each, and highlights the `decimal` type — a C# feature with no Dart equivalent that is essential for financial calculations.
+Dart's built-in numeric types are `int` and `double`; arbitrary-precision integers use `BigInt`. Native Dart uses signed 64-bit integers, while JavaScript targets have different representation and precision constraints. C# exposes a wider set of fixed-size numeric types plus `decimal` and `BigInteger`.
 
 ---
 
@@ -89,13 +89,12 @@ long unixEpoch = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();  // current tim
 long creditCardTransactions = 1_000_000_000_000L;
 ```
 
-The `L` suffix on a literal tells the compiler it is a `long`. Without it, the compiler infers `int` and will error if the value exceeds `int.MaxValue`.
+The `L` suffix forces a literal to be `long`. An unsuffixed integer literal is assigned the first fitting type among `int`, `uint`, `long`, and `ulong`, so a fitting conversion to `long` can still be legal.
 
 ```csharp
-// Common mistake
-long big = 3000000000;   // ERROR: integer literal too large for int
-long big2 = 3000000000L; // OK: explicit long literal
-long big3 = (long)3000000000; // also OK but verbose
+int tooLarge = 3000000000; // ERROR: the literal does not fit in int
+long big = 3000000000;     // OK: the literal fits and converts to long
+long explicitLong = 3000000000L; // OK: suffix communicates intent
 ```
 
 ---
@@ -233,7 +232,7 @@ checked
 }
 ```
 
-In Dart, overflow on native `int` also wraps silently. But Dart's VM `int` is arbitrary precision, so overflow is impossible. On native, Dart's behavior is similar to C#'s unchecked mode.
+Native Dart integers are signed 64-bit values, so code must not assume arbitrary precision. Use Dart `BigInt` when values can exceed that range. In C#, use `checked` where overflow must fail rather than wrap.
 </ConceptCallout>
 
 <CodeComparison>
@@ -243,8 +242,8 @@ In Dart, overflow on native `int` also wraps silently. But Dart's VM `int` is ar
   int count = 42;              // 64-bit on native
   double ratio = 3.14;         // 64-bit IEEE 754
   
-  // Dart int is arbitrary precision on VM
-  int huge = 99999999999999999999999999999999;
+  // BigInt is the explicit arbitrary-precision type
+  BigInt huge = BigInt.parse('99999999999999999999999999999999');
   
   // Type conversion
   double d = count.toDouble();
@@ -252,8 +251,7 @@ In Dart, overflow on native `int` also wraps silently. But Dart's VM `int` is ar
   int i2 = ratio.round();      // rounds
   int i3 = ratio.ceil();       // ceiling
   
-  // No overflow on VM
-  print(9223372036854775807 + 1);  // big number (arbitrary precision)
+  print(huge + BigInt.one);
   ```
   </div>
   <div slot="csharp">
@@ -300,7 +298,7 @@ Console.WriteLine(factorial200);
 ```
 
 <DartEquivalent>
-Dart's `int` is already arbitrary precision on the VM, so there is no equivalent of `BigInteger` needed in most Dart code. On Dart native (AOT), `int` is 64-bit and can overflow. For truly arbitrary precision in Dart on native, you would reach for a package.
+Dart's `BigInt` and C#'s `BigInteger` are the explicit arbitrary-precision choices. Do not make correctness depend on a target runtime widening ordinary Dart `int` values.
 </DartEquivalent>
 
 ---

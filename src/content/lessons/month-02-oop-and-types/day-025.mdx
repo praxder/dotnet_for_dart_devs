@@ -110,9 +110,9 @@ var bad = new Address { PostalCode = "12345" };
 public class Order
 {
     // init: can set in object initializer, frozen after
-    public required Guid Id { get; init; } = Guid.NewGuid();
+    public Guid Id { get; init; } = Guid.NewGuid();
     public required string CustomerId { get; init; }
-    public required DateTime PlacedAt { get; init; } = DateTime.UtcNow;
+    public DateTime PlacedAt { get; init; } = DateTime.UtcNow;
 
     // Regular set: can mutate later
     public OrderStatus Status { get; set; } = OrderStatus.Pending;

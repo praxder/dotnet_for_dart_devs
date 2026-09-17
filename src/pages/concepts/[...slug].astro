@@ -1,0 +1,38 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Header from '../../components/layout/Header.astro';
+import { getConceptSlug } from '../../lib/concepts.mjs';
+
+export async function getStaticPaths() {
+  const concepts = await getCollection('concepts');
+  return concepts.map(concept => ({ params: { slug: getConceptSlug(concept.id) }, props: { concept } }));
+}
+
+const { concept } = Astro.props;
+const concepts = (await getCollection('concepts')).sort((a, b) => a.data.order - b.data.order);
+const index = concepts.findIndex(item => item.id === concept.id);
+const previous = concepts[index - 1];
+const next = concepts[index + 1];
+const { Content } = await concept.render();
+---
+
+<BaseLayout title={concept.data.title} description={concept.data.summary}>
+  <Header />
+  <main class="max-w-3xl mx-auto px-4 sm:px-6 py-12">
+    <a href={`${import.meta.env.BASE_URL}concepts`} class="text-xs text-slate-500 hover:text-slate-300">← All concepts</a>
+    <header class="mt-8 mb-8 border-b border-slate-800 pb-8">
+      <p class="text-xs font-semibold uppercase tracking-wider text-indigo-400 mb-3">Concept {concept.data.order} of {concepts.length}</p>
+      <h1 class="text-3xl font-bold text-white mb-3">{concept.data.title}</h1>
+      <p class="text-slate-400 leading-relaxed">{concept.data.summary}</p>
+      <p class="text-sm text-teal-400 mt-4">Flutter bridge: {concept.data.flutterAnalogy}</p>
+    </header>
+    <article class="prose prose-invert prose-slate max-w-none prose-headings:scroll-mt-20 prose-p:leading-relaxed prose-p:text-slate-300 prose-a:text-indigo-400 prose-code:text-teal-300 prose-code:bg-slate-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-pre:bg-slate-900 prose-pre:border prose-pre:border-slate-700">
+      <Content />
+    </article>
+    <nav class="mt-12 pt-6 border-t border-slate-800 flex justify-between gap-4 text-sm">
+      {previous ? <a href={`${import.meta.env.BASE_URL}concepts/${getConceptSlug(previous.id)}`} class="text-slate-400 hover:text-white">← {previous.data.title}</a> : <span />}
+      {next ? <a href={`${import.meta.env.BASE_URL}concepts/${getConceptSlug(next.id)}`} class="text-right text-slate-400 hover:text-white">{next.data.title} →</a> : <span />}
+    </nav>
+  </main>
+</BaseLayout>

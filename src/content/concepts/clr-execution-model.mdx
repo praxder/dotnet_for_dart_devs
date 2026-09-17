@@ -1,0 +1,35 @@
+---
+title: "The CLR Execution Model"
+order: 1
+summary: "Understand what compiles, what the runtime loads, and where JIT, AOT, assemblies, and the base class library fit."
+flutterAnalogy: "The CLR fills a role similar to the Dart VM/runtime, but .NET deployment and compilation modes differ."
+relatedDays: [1, 66, 67]
+---
+
+## The mental model
+
+C# is a language; .NET is the platform. The C# compiler normally turns source into Common Intermediate Language (CIL) plus metadata inside assemblies (`.dll` or `.exe`). The Common Language Runtime (CLR) loads those assemblies, verifies and resolves types, manages memory, and executes code.
+
+Most deployed .NET applications use just-in-time compilation: methods become native machine code when needed. ReadyToRun can precompile some code, while Native AOT produces a native executable with stricter limits around reflection and dynamic loading. These are deployment choices, not different C# languages.
+
+An assembly is a versioned deployment and type-identity boundary. A namespace only organizes names. Two types can share a namespace while living in different assemblies, and one assembly can contain many namespaces.
+
+## Why application developers care
+
+- Runtime and SDK are different. The SDK builds projects; a runtime executes framework-dependent deployments.
+- Reflection-heavy libraries can work under JIT yet require configuration or changes under trimming and Native AOT.
+- Loading a type may run static initialization. Avoid hidden I/O and order dependencies there.
+- Exceptions, garbage collection, threading, and interoperability are runtime services—not compiler tricks.
+
+## Working rule
+
+Start with the normal SDK and framework-dependent deployment. Choose self-contained, trimming, ReadyToRun, or Native AOT only for a measured deployment goal such as startup time, image size, or environments without a preinstalled runtime.
+
+## Check your understanding
+
+When a production container says a runtime is missing, identify whether you published framework-dependent or self-contained. When trimming breaks reflection-based behavior, treat it as a deployment-compatibility problem rather than a random language failure.
+
+## Sources
+
+- [Managed execution process](https://learn.microsoft.com/en-us/dotnet/standard/managed-execution-process)
+- [.NET application publishing overview](https://learn.microsoft.com/en-us/dotnet/core/deploying/)

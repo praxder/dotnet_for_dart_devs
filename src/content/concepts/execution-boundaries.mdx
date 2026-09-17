@@ -1,0 +1,39 @@
+---
+title: "Deferred Execution and Boundary Crossing"
+order: 10
+summary: "Know when a query is a recipe, when work actually executes, and whether data is in memory, streaming, remote, or already materialized."
+flutterAnalogy: "Like distinguishing a lazy Iterable or Stream from a completed List, with the additional boundary of remote SQL execution."
+relatedDays: [44, 45, 47, 92, 94]
+---
+
+## Types reveal where work happens
+
+`IEnumerable<T>` represents synchronous iteration. LINQ operators over it usually run in process and many are deferred until enumeration. `IAsyncEnumerable<T>` represents asynchronous streaming. `IQueryable<T>` is an expression tree that a provider may translate for remote execution.
+
+Dapper’s normal `QueryAsync<T>` awaits the database read and returns buffered results by default. The returned `IEnumerable<T>` does not mean the SQL will rerun lazily. By contrast, a LINQ-to-database `IQueryable<T>` may execute when materialized.
+
+```csharp
+var adults = people.Where(person => person.Age >= 18); // recipe
+people.Add(new Person("Kai", 30));
+var snapshot = adults.ToList();                        // executes now
+```
+
+## Boundaries change the cost model
+
+Crossing process, network, database, or serialization boundaries changes failure modes and performance. A method that appears to return a collection may hold a connection open while the caller enumerates. A JSON response may buffer the entire result unless explicit streaming is used.
+
+Materialize before disposing a required resource. Stream when data is large and the protocol supports partial delivery, but then design for cancellation and mid-stream failure. Avoid multiple enumeration when the source performs work or cannot be replayed.
+
+## Questions to ask
+
+- What triggers execution?
+- Where does each filter run?
+- How long must the underlying resource remain alive?
+- Can the sequence be enumerated twice?
+- Is cancellation observed between items?
+- Does the consumer need a snapshot or a stream?
+
+## Sources
+
+- [LINQ deferred execution](https://learn.microsoft.com/en-us/dotnet/standard/linq/deferred-execution-lazy-evaluation)
+- [Generate and consume async streams](https://learn.microsoft.com/en-us/dotnet/csharp/asynchronous-programming/generate-consume-asynchronous-stream)

@@ -151,6 +151,7 @@ public class ListPostsHandler(IDbConnectionFactory factory)
             FROM posts p
             INNER JOIN authors a ON a.id = p.author_id
             LEFT JOIN comments c ON c.post_id = p.id AND c.is_approved = 1
+            /**join**/
             /**where**/
             GROUP BY p.id, p.title, p.slug, p.summary, a.name, p.published_at, p.view_count
             /**orderby**/
@@ -160,6 +161,7 @@ public class ListPostsHandler(IDbConnectionFactory factory)
         var countTemplate = builder.AddTemplate(@"
             SELECT COUNT(DISTINCT p.id)
             FROM posts p
+            /**join**/
             /**where**/");
 
         builder.Where("p.status = 'Published'");
@@ -255,8 +257,8 @@ public class GetPostHandler(IDbConnectionFactory factory)
         var tags = (await multi.ReadAsync<string>()).ToList();
         var allComments = (await multi.ReadAsync<dynamic>()).ToList();
 
-        // Increment view count asynchronously (fire and forget for this demo)
-        _ = conn.ExecuteAsync(
+        // Await the write so failures are observed and the connection stays alive.
+        await conn.ExecuteAsync(
             "UPDATE posts SET view_count = view_count + 1 WHERE slug = @Slug",
             new { request.Slug });
 

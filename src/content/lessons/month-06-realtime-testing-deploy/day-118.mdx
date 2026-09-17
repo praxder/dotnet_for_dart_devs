@@ -35,12 +35,12 @@ az appservice plan create \
     --sku B1 \
     --is-linux
 
-# Create web app (.NET 9 runtime)
+# Create web app (.NET 10 runtime)
 az webapp create \
     --name myblogapi \
     --resource-group blogapi-rg \
     --plan blogapi-plan \
-    --runtime "DOTNETCORE:9.0"
+    --runtime "DOTNETCORE:10.0"
 
 # Deploy from local zip
 dotnet publish -c Release -o ./publish
@@ -67,7 +67,7 @@ az webapp config appsettings set \
 az webapp config connection-string set \
     --resource-group blogapi-rg \
     --name myblogapi \
-    --connection-string-type SQLAzure \
+    --connection-string-type Custom \
     --settings "Default=Server=..."
 
 # Scale up/out
@@ -96,15 +96,14 @@ if (builder.Environment.IsProduction())
     // DefaultAzureCredential automatically uses Managed Identity in Azure
 }
 
-// 4. Access SQL Database with managed identity (no password!):
-builder.Services.AddDbContext<AppDbContext>(options =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("Default");
-    options.UseSqlServer(connectionString, sqlOptions =>
-        sqlOptions.UseAzureActiveDirectoryAuthentication(new DefaultAzureCredential()));
-});
-// SQL: uses Entra ID (AAD) authentication — no password in connection string
+// 4. Build the Dapper data source after Key Vault configuration is loaded.
+// The connection string secret is retrieved at runtime, not committed to the app.
+var connectionString = builder.Configuration.GetConnectionString("Default")
+    ?? throw new InvalidOperationException("Missing database connection string");
+builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 ```
+
+Some Azure database products also support passwordless Entra ID connections. Follow the current provider documentation and use a driver-supported token refresh mechanism. Do not invent an EF Core option or assign a one-time access token that will expire inside a long-lived connection pool.
 
 ## Azure Container Apps — Serverless Containers
 
