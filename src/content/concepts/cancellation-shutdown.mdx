@@ -1,0 +1,41 @@
+---
+title: "Cancellation and Graceful Shutdown"
+order: 6
+summary: "Treat cancellation as a cooperative protocol and design a separate, observable path for graceful application shutdown."
+flutterAnalogy: "Comparable to cancelling subscriptions and closing controllers, but tokens propagate one shared stop request through an operation graph."
+relatedDays: [53, 58, 65, 75]
+---
+
+## Cancellation is a request
+
+A `CancellationToken` does not stop code. Operations observe it and stop at safe points. Pass the token through every cancellable call rather than creating unrelated tokens deep in the stack.
+
+```csharp
+public async Task<Order?> FindAsync(int id, CancellationToken cancellationToken)
+{
+    await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+    return await connection.QuerySingleOrDefaultAsync<Order>(
+        new CommandDefinition(sql, new { id }, cancellationToken: cancellationToken));
+}
+```
+
+Cancellation is not normally an application error. At an HTTP boundary it may mean the client disconnected; during host shutdown it means the grace period started. Log it at an appropriate level and avoid noisy error telemetry when the token you were given was actually cancelled.
+
+## Graceful versus forced stop
+
+A queue owner should have distinct actions:
+
+1. Stop accepting new work.
+2. Signal that no more items will arrive.
+3. Await consumers and outstanding operations.
+4. After the shutdown deadline, cancel remaining work.
+5. Observe and report failures.
+
+Cancelling first and hoping the queue drains is contradictory. Choose and document whether shutdown drains, checkpoints, retries, or abandons queued work.
+
+Linked token sources combine policies such as request cancellation plus a timeout. Dispose linked sources. Do not convert every operation into a short timeout: a timeout is a product and reliability decision.
+
+## Sources
+
+- [Cancellation in managed threads](https://learn.microsoft.com/en-us/dotnet/standard/threading/cancellation-in-managed-threads)
+- [Worker services in .NET](https://learn.microsoft.com/en-us/dotnet/core/extensions/workers)

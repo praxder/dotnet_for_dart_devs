@@ -36,11 +36,12 @@ public class BlogApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         builder.ConfigureTestServices(services =>
         {
-            // Replace real DB with TestContainers DB
-            services.RemoveAll<DbContextOptions<AppDbContext>>();
-            services.RemoveAll<AppDbContext>();
-            services.AddDbContext<AppDbContext>(options =>
-                options.UseNpgsql(_postgres.GetConnectionString()));
+            // Replace production Dapper infrastructure with the container database.
+            services.RemoveAll<NpgsqlDataSource>();
+            services.RemoveAll<IDbConnectionFactory>();
+            services.AddSingleton(NpgsqlDataSource.Create(_postgres.GetConnectionString()));
+            services.AddSingleton<IDbConnectionFactory>(
+                new NpgsqlConnectionFactory(_postgres.GetConnectionString()));
 
             // Replace email service with fake
             services.RemoveAll<IEmailService>();
@@ -57,10 +58,10 @@ public class BlogApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         await _postgres.StartAsync();
 
-        // Run migrations
+        // Run the same reviewed SQL migrations used by deployment.
         using var scope = Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        await db.Database.MigrateAsync();
+        var migrator = scope.ServiceProvider.GetRequiredService<ISchemaMigrator>();
+        await migrator.MigrateAsync();
     }
 
     public new async Task DisposeAsync()
@@ -79,12 +80,17 @@ public abstract class IntegrationTestBase(BlogApiFactory factory)
     : IClassFixture<BlogApiFactory>, IAsyncLifetime
 {
     protected readonly HttpClient Client = factory.CreateClient();
-    protected AppDbContext Db = null!;
+    private AsyncServiceScope _scope;
+    protected NpgsqlDataSource DataSource = null!;
+    protected IPostRepository Posts = null!;
+    protected IAuthorRepository Authors = null!;
 
     public async Task InitializeAsync()
     {
-        var scope = factory.Services.CreateScope();
-        Db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        _scope = factory.Services.CreateAsyncScope();
+        DataSource = _scope.ServiceProvider.GetRequiredService<NpgsqlDataSource>();
+        Posts = _scope.ServiceProvider.GetRequiredService<IPostRepository>();
+        Authors = _scope.ServiceProvider.GetRequiredService<IAuthorRepository>();
         await CleanDatabaseAsync();
         await SeedTestDataAsync();
     }
@@ -94,14 +100,15 @@ public abstract class IntegrationTestBase(BlogApiFactory factory)
     {
         // Respawn — fast database cleanup
         // dotnet add package Respawn
+        await using var connection = await DataSource.OpenConnectionAsync();
         var respawner = await Respawner.CreateAsync(
-            Db.Database.GetDbConnection(),
+            connection,
             new RespawnerOptions
             {
                 SchemasToInclude = ["public"],
                 DbAdapter = DbAdapter.Postgres
             });
-        await respawner.ResetAsync(Db.Database.GetDbConnection());
+        await respawner.ResetAsync(connection);
     }
 
     protected virtual Task SeedTestDataAsync() => Task.CompletedTask;
@@ -130,14 +137,14 @@ public abstract class IntegrationTestBase(BlogApiFactory factory)
         string email = "user@test.com",
         string role = "User")
     {
-        var userManager = factory.Services.GetRequiredService<UserManager<AppUser>>();
+        var userManager = _scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
         var user = new AppUser { UserName = email, Email = email, DisplayName = "Test User" };
         await userManager.CreateAsync(user, "Password123!");
         await userManager.AddToRoleAsync(user, role);
         return user;
     }
 
-    public Task DisposeAsync() => Task.CompletedTask;
+    public async Task DisposeAsync() => await _scope.DisposeAsync();
 }
 ```
 
@@ -151,14 +158,8 @@ public class PostEndpointTests(BlogApiFactory factory)
 
     protected override async Task SeedTestDataAsync()
     {
-        _author = new Author
-        {
-            Name = "Test Author",
-            Email = "author@test.com",
-            User = await CreateUserAsync("author@test.com", "Author")
-        };
-        Db.Authors.Add(_author);
-        await Db.SaveChangesAsync();
+        var user = await CreateUserAsync("author@test.com", "Author");
+        _author = await Authors.CreateAsync("Test Author", "author@test.com", user.Id);
     }
 
     [Fact]
@@ -204,7 +205,7 @@ public class PostEndpointTests(BlogApiFactory factory)
         Assert.Equal(HttpStatusCode.OK, publishResponse.StatusCode);
 
         // Verify in database
-        var dbPost = await Db.Posts.FindAsync(post.Id);
+        var dbPost = await Posts.GetByIdAsync(post.Id);
         Assert.Equal(PostStatus.Published, dbPost!.Status);
         Assert.NotNull(dbPost.PublishedAt);
     }
@@ -220,8 +221,8 @@ public class PostEndpointTests(BlogApiFactory factory)
             await Client.GetAsync($"/api/blog/posts/{post.Slug}");
 
         // Assert
-        await Db.Entry(post).ReloadAsync();
-        Assert.Equal(3, post.ViewCount);
+        var reloaded = await Posts.GetByIdAsync(post.Id);
+        Assert.Equal(3, reloaded!.ViewCount);
     }
 
     [Fact]

@@ -129,11 +129,11 @@ builder.Services.AddAuthorization(options =>
 app.MapPut("/api/posts/{id}", async (
     int id,
     UpdatePostRequest body,
-    AppDbContext db,
+    IPostRepository posts,
     IAuthorizationService authService,
     ClaimsPrincipal user) =>
 {
-    var post = await db.Posts.FindAsync(id);
+    var post = await posts.GetByIdAsync(id);
     if (post is null) return Results.NotFound();
 
     // Check authorization against the specific post
@@ -143,7 +143,7 @@ app.MapPut("/api/posts/{id}", async (
     // Proceed with update
     post.Title = body.Title;
     post.Body = body.Body;
-    await db.SaveChangesAsync();
+    await posts.UpdateAsync(post);
     return Results.Ok(post);
 });
 ```
@@ -206,7 +206,7 @@ var canDelete = await authService.AuthorizeAsync(user, document, Operations.Dele
 ```csharp
 // Use IAuthorizationService directly in services, not just endpoints
 public class CommentService(
-    AppDbContext db,
+    ICommentRepository comments,
     IAuthorizationService authService,
     IHttpContextAccessor httpContext)
 {
@@ -214,7 +214,7 @@ public class CommentService(
 
     public async Task<bool> DeleteCommentAsync(int commentId)
     {
-        var comment = await db.Comments.FindAsync(commentId);
+        var comment = await comments.GetByIdAsync(commentId);
         if (comment is null) return false;
 
         // Check authorization before deleting
@@ -222,8 +222,7 @@ public class CommentService(
         if (!result.Succeeded)
             throw new UnauthorizedAccessException("Cannot delete this comment");
 
-        db.Comments.Remove(comment);
-        await db.SaveChangesAsync();
+        await comments.DeleteAsync(commentId);
         return true;
     }
 }

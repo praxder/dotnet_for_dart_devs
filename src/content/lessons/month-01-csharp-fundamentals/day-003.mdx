@@ -1,5 +1,5 @@
 ---
-title: "Value Types vs Reference Types: The Stack/Heap Split"
+title: "Value Types vs Reference Types: Copying and Aliasing"
 day: 3
 week: 1
 module: 1
@@ -16,7 +16,7 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-# Value Types vs Reference Types: The Stack/Heap Split
+# Value Types vs Reference Types: Copying and Aliasing
 
 This lesson covers the single most important conceptual difference between Dart and C#. In Dart, **everything is an object** — `int`, `bool`, `double`, your custom classes, all of it. There are no exceptions. In C#, there is a fundamental split between two categories of types, and understanding this split changes how you reason about memory, performance, equality, and mutation.
 
@@ -27,14 +27,14 @@ This lesson covers the single most important conceptual difference between Dart 
 | | Value Type | Reference Type |
 |--|-----------|----------------|
 | **Examples** | `int`, `bool`, `double`, `char`, `struct`, `enum` | `class`, `string`, `object`, arrays, delegates |
-| **Storage** | Stack (or inline in containing type) | Heap |
+| **Storage** | Depends on context; may be inline, boxed, or optimized | Object storage is normally managed; references can appear anywhere |
 | **Assignment** | Copies the value | Copies the reference (pointer) |
 | **Default equality** | Compares contents | Compares identity (same object?) |
 | **Null by default** | Cannot be null (without `?`) | Can be null |
 | **Base type** | `System.ValueType` → `object` | `object` directly |
 
 <ConceptCallout type="different">
-In Dart, `int x = 5; int y = x;` — both `x` and `y` refer to the same integer object in the Dart VM's object pool. Mutation is impossible because Dart integers are immutable objects. In C#, `int x = 5; int y = x;` copies the 32-bit integer value. `x` and `y` are completely independent storage locations. There is no object, no heap allocation, no GC involvement.
+In C#, `int x = 5; int y = x;` copies the 32-bit value. With a class, assignment copies a reference, so two variables can identify the same object. Focus on those observable copy and aliasing semantics. Storage location and allocation are runtime details that depend on context and optimization.
 </ConceptCallout>
 
 ---
@@ -115,43 +115,36 @@ Console.WriteLine(p1.X);   // 99 — BOTH changed, same object
 Console.WriteLine(p2.X);   // 99
 ```
 
-When `Point` is a `class`, `p1` and `p2` both point to the same heap object. Mutating through either variable mutates the shared object. This is identical to Dart's behavior for all objects.
+When `Point` is a `class`, `p1` and `p2` identify the same object. Mutating through either variable mutates shared state. This is identical to Dart's behavior for mutable objects.
 
 ---
 
-## Where Things Live in Memory
+## Storage Is Context-Dependent
 
-### Stack allocation
-
-Value types declared as local variables live on the **stack**:
+The language specifies value and reference semantics, not a simple storage map. A value type can be a local, a field inside a managed object, an array element, a boxed object, or a value kept entirely in a CPU register by the JIT:
 
 ```csharp
 void Compute()
 {
-    int x = 10;          // on the stack
-    double y = 3.14;     // on the stack
-    bool flag = true;    // on the stack
-    // When Compute() returns, the stack frame is popped — instant cleanup, no GC
+    int x = 10;
+    var values = new[] { x };        // int values stored inline in an array object
+    object boxed = x;                // boxing creates a managed object
+    var holder = new Holder { X = x }; // int stored inside another object
 }
 ```
 
-Stack allocation is extremely fast — it is just a pointer increment. And cleanup is free — just decrement the stack pointer when the function returns. No garbage collector involvement whatsoever.
-
-### Heap allocation
-
-Reference types are allocated on the **managed heap**:
+Reference-type objects are normally managed by the garbage collector, while a local variable contains a reference to the object:
 
 ```csharp
 void CreateUser()
 {
-    var user = new User { Name = "Alice" };  // on the heap
-    // user holds a reference (pointer) to the heap object
-    // When user goes out of scope, it becomes eligible for GC
+    var user = new User { Name = "Alice" };
+    // The object becomes eligible for collection only when it is no longer reachable.
 }
 ```
 
 <ConceptCallout type="info">
-The C# garbage collector is generational and highly optimized. Most short-lived objects are collected in "Gen 0" with very low overhead. But frequent small heap allocations in hot paths (like inside tight loops processing millions of items) can cause GC pressure. This is why C# gives you value types as an escape hatch — you can process large data sets with zero heap allocation.
+The .NET garbage collector is generational and optimized for short-lived objects. Value types can reduce allocations in some designs, but they do not guarantee “zero heap allocation.” Boxing, captured closures, arrays, and containing objects can still allocate. Measure a hot path before changing a design for allocation concerns.
 </ConceptCallout>
 
 ---
@@ -221,7 +214,7 @@ Boxing is a performance trap in hot paths. Every time you put a value type into 
 </ConceptCallout>
 
 <DartEquivalent>
-Dart does not have boxing because everything is already a heap object. There is no performance penalty for putting an `int` in a `List<Object>` — it was already an object. C# gives you better performance in return for this complexity.
+Dart does not expose C#-style value-type boxing. Its runtime representation is an implementation detail, so avoid assuming every Dart value requires a separate heap allocation.
 </DartEquivalent>
 
 ---
@@ -283,10 +276,10 @@ readonly struct Vector2
 }
 ```
 
-A `readonly struct` guarantees no defensive copies are made when passing to `in` parameters, and the compiler enforces immutability.
+A `readonly struct` prevents mutation through the instance and can help the compiler avoid defensive copies in common `in` and readonly-member scenarios; inspect generated code or benchmark before making a performance claim.
 
 <ConceptCallout type="tip">
-The .NET runtime itself uses `readonly struct` extensively for high-performance types: `System.Numerics.Vector3`, `System.Drawing.Color`, `System.TimeSpan`, and many others. When you see these types in the framework, you know they are stack-allocated, copy-on-assign, and zero heap allocation in most usage patterns.
+The .NET libraries use structs extensively for value semantics and, in some contexts, performance. A struct is copy-on-assign, but it is not guaranteed to be stack-allocated or allocation-free. `readonly` prevents mutation through the instance and can avoid some defensive copies.
 </ConceptCallout>
 
 ---

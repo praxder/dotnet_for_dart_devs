@@ -56,16 +56,14 @@ public class EmailDigestService(
     {
         // Use IServiceScopeFactory to get scoped services in a singleton
         using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var subscribers = scope.ServiceProvider.GetRequiredService<ISubscriberRepository>();
         var emailService = scope.ServiceProvider.GetRequiredService<IEmailService>();
 
-        var subscribers = await db.Users
-            .Where(u => u.EmailDigestEnabled && u.IsActive)
-            .ToListAsync(ct);
+        var recipients = await subscribers.GetActiveDigestRecipientsAsync(ct);
 
-        logger.LogInformation("Sending digest to {Count} subscribers", subscribers.Count);
+        logger.LogInformation("Sending digest to {Count} subscribers", recipients.Count);
 
-        foreach (var subscriber in subscribers)
+        foreach (var subscriber in recipients)
         {
             await emailService.SendDigestAsync(subscriber.Email, ct);
         }
@@ -163,22 +161,13 @@ public class EmailJobHandler(
 }
 
 [Queue("default")]
-public class ReportJobHandler(AppDbContext db, IStorageService storage)
+public class ReportJobHandler(IReportRepository reports, IStorageService storage)
 {
     public async Task GenerateDailyReportAsync(PerformContext? context)
     {
         var yesterday = DateTime.UtcNow.Date.AddDays(-1);
 
-        var report = await db.Orders
-            .Where(o => o.CreatedAt.Date == yesterday)
-            .GroupBy(o => 1)
-            .Select(g => new
-            {
-                TotalOrders = g.Count(),
-                Revenue = g.Sum(o => o.Total),
-                AvgOrderValue = g.Average(o => o.Total)
-            })
-            .FirstOrDefaultAsync();
+        var report = await reports.GetDailyOrderSummaryAsync(yesterday);
 
         var pdf = GeneratePdf(report);
         await storage.UploadAsync($"reports/daily/{yesterday:yyyy-MM-dd}.pdf", pdf);
@@ -205,7 +194,7 @@ builder.Services.AddQuartz(q =>
         .ForJob(reportJobKey)
         .WithIdentity("DailyReport-Trigger")
         .WithCronSchedule("0 0 6 * * ?",  // 6 AM every day
-            x => x.InTimeZone(TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time")))
+            x => x.InTimeZone(TimeZoneInfo.FindSystemTimeZoneById("America/New_York")))
         .StartNow());
 });
 
@@ -213,12 +202,12 @@ builder.Services.AddQuartzHostedService(options =>
     options.WaitForJobsToComplete = true);  // graceful shutdown
 
 // Job implementation
-public class DailyReportJob(AppDbContext db, ILogger<DailyReportJob> logger) : IJob
+public class DailyReportJob(IReportService reports, ILogger<DailyReportJob> logger) : IJob
 {
     public async Task Execute(IJobExecutionContext context)
     {
         logger.LogInformation("Running daily report job");
-        // ... report generation
+        await reports.GenerateDailyAsync(context.CancellationToken);
     }
 }
 ```

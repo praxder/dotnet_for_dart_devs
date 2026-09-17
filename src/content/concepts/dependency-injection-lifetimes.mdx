@@ -1,0 +1,44 @@
+---
+title: "Dependency Injection Lifetimes and Scopes"
+order: 8
+summary: "Use transient, scoped, and singleton lifetimes as ownership boundaries rather than arbitrary registration options."
+flutterAnalogy: "Similar to provider scope in Flutter: where a dependency is created determines what may safely hold it."
+relatedDays: [69, 70, 76, 91]
+---
+
+## Lifetimes express ownership
+
+- **Transient** creates an instance each time it is requested.
+- **Scoped** creates one instance per scope. In ASP.NET Core, a request creates a scope.
+- **Singleton** creates one instance for the application container.
+
+A longer-lived object must not capture a shorter-lived object. A singleton that constructor-injects a scoped repository effectively keeps request state forever and may use it concurrently.
+
+```csharp
+builder.Services.AddScoped<OrderService>();
+builder.Services.AddSingleton<SystemClock>();
+builder.Services.AddHostedService<InvoiceWorker>();
+```
+
+A hosted service is singleton-like. To use scoped services for each unit of work, inject `IServiceScopeFactory`, create a scope, resolve the service, finish the work, and dispose the scope.
+
+```csharp
+await using var scope = scopeFactory.CreateAsyncScope();
+var processor = scope.ServiceProvider.GetRequiredService<InvoiceProcessor>();
+await processor.ProcessAsync(cancellationToken);
+```
+
+## Keep the composition root explicit
+
+Register dependencies near startup. Prefer constructor injection. Avoid service locator calls throughout business code because they hide dependencies and move failures to runtime. Do not call `BuildServiceProvider` during registration; it creates a second container with different singleton ownership.
+
+The container owns services it creates and disposes them with their scope. Instances registered directly have different ownership concerns; consult the API contract rather than assuming disposal.
+
+## Design test
+
+If a class asks for many unrelated services, the problem is usually class responsibility, not dependency injection. Split behavior around coherent use cases before introducing an abstraction-heavy container setup.
+
+## Sources
+
+- [Dependency injection in .NET](https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection)
+- [Service lifetimes](https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection#service-lifetimes)

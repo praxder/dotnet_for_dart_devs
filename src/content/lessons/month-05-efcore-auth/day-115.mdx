@@ -19,7 +19,7 @@ This is the Module 9 capstone. You'll integrate the complete authentication and 
 
 ## Project: Secure Blog API — Complete Auth Stack
 
-Building on the EF Core blog API from module 8, add the full auth layer.
+Building on the Dapper blog API from module 8, add the full auth layer. Dapper remains the application data-access approach. ASP.NET Core Identity may use EF Core only as its isolated user-store adapter; keep that boundary explicit and do not introduce a second persistence model for blog data.
 
 ### Authentication Architecture
 
@@ -47,8 +47,8 @@ POST /api/account/2fa/disable    → Disable 2FA
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
 
-// Database
-builder.Services.AddDbContext<AppDbContext>(options =>
+// Identity store only; application repositories continue to use Dapper.
+builder.Services.AddDbContext<AppIdentityDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
 // Identity
@@ -61,7 +61,7 @@ builder.Services.AddIdentity<AppUser, IdentityRole>(options =>
     options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
     options.User.RequireUniqueEmail = true;
 })
-.AddEntityFrameworkStores<AppDbContext>()
+.AddEntityFrameworkStores<AppIdentityDbContext>()
 .AddDefaultTokenProviders();
 
 // Authentication
@@ -101,10 +101,15 @@ builder.Services.AddSingleton<IAuthorizationHandler, CommentOwnershipHandler>();
 // Rate limiting
 builder.Services.AddRateLimiter(options =>
 {
-    options.AddFixedWindowLimiter("auth", cfg =>
+    options.AddPolicy("auth", context =>
     {
-        cfg.Window = TimeSpan.FromMinutes(15);
-        cfg.PermitLimit = 5;
+        var networkKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(networkKey, _ => new()
+        {
+            Window = TimeSpan.FromMinutes(15),
+            PermitLimit = 5,
+            QueueLimit = 0
+        });
     });
     options.AddPolicy("per-user", context =>
     {
@@ -117,7 +122,8 @@ builder.Services.AddRateLimiter(options =>
                     PermitLimit = 60,
                     SegmentsPerWindow = 6
                 })
-            : RateLimitPartition.GetFixedWindowLimiter("anon", _ =>
+            : RateLimitPartition.GetFixedWindowLimiter(
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ =>
                 new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) });
     });
 });
@@ -150,8 +156,8 @@ var app = builder.Build();
 app.UseSecurityHeaders();     // custom middleware adding security headers
 app.UseHttpsRedirection();
 app.UseCors("Flutter");
-app.UseRateLimiter();
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 
 // Register all endpoint groups
@@ -200,10 +206,10 @@ public static class BlogEndpoints
             UpdatePostRequest body,
             IMediator m,
             IAuthorizationService authService,
-            AppDbContext db,
+            IPostRepository posts,
             ClaimsPrincipal user) =>
         {
-            var post = await db.Posts.FindAsync(id);
+            var post = await posts.GetByIdAsync(id);
             if (post is null) return Results.NotFound();
 
             var authResult = await authService.AuthorizeAsync(user, post, "PostOwner");

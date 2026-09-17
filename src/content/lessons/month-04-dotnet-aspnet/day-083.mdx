@@ -18,6 +18,17 @@ import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
 File upload and download are essential for document management, image uploading, and data import/export. This lesson covers both simple `IFormFile` uploads and efficient streaming for large files.
 
+Minimal API endpoints that bind `IFormFile` require antiforgery services and middleware in current ASP.NET Core versions. For browser cookie authentication, issue and validate antiforgery tokens. A mobile API that exclusively uses bearer tokens is not vulnerable to cookie-based CSRF, so it may explicitly disable antiforgery on that endpoint after documenting the authentication constraint.
+
+```csharp
+builder.Services.AddAntiforgery();
+
+var app = builder.Build();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseAntiforgery();
+```
+
 ## Single File Upload
 
 <CodeComparison>
@@ -40,12 +51,17 @@ File upload and download are essential for document management, image uploading,
       if (file.Length > 10 * 1024 * 1024)  // 10MB limit
           return Results.BadRequest("File too large (max 10MB)");
 
-      var allowedTypes = new[] { "image/jpeg", "image/png", "image/webp", "application/pdf" };
-      if (!allowedTypes.Contains(file.ContentType))
+      var allowedTypes = new Dictionary<string, string>
+      {
+          ["image/jpeg"] = ".jpg",
+          ["image/png"] = ".png",
+          ["application/pdf"] = ".pdf",
+      };
+      if (!allowedTypes.TryGetValue(file.ContentType, out var extension)
+          || !await FileValidator.IsValidContentTypeAsync(file, file.ContentType))
           return Results.BadRequest($"File type {file.ContentType} not allowed");
 
-      // Generate safe filename
-      var extension = Path.GetExtension(file.FileName);
+      // Generate a safe name and choose the extension from validated content.
       var fileName = $"{Guid.NewGuid()}{extension}";
       var uploadPath = Path.Combine(env.ContentRootPath, "uploads", fileName);
 
@@ -57,7 +73,9 @@ File upload and download are essential for document management, image uploading,
       await file.CopyToAsync(stream);
 
       return Results.Ok(new { fileName, url = $"/files/{fileName}" });
-  });
+  })
+  .RequireAuthorization()
+  .DisableAntiforgery(); // Only for a bearer-token-only mobile API; never for cookie auth.
   ```
   </div>
 </CodeComparison>
@@ -182,7 +200,7 @@ public static class FileValidator
         IFormFile file, string expectedContentType)
     {
         if (!MagicNumbers.TryGetValue(expectedContentType, out var magic))
-            return true;  // no magic number defined — skip check
+            return false; // unknown types are rejected, not trusted
 
         var header = new byte[magic.Length];
         await using var stream = file.OpenReadStream();

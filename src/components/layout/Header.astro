@@ -30,6 +30,9 @@ const { currentDay } = Astro.props;
       <a href={`${import.meta.env.BASE_URL}modules`} class="px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
         Modules
       </a>
+      <a href={`${import.meta.env.BASE_URL}concepts`} class="px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
+        Concepts
+      </a>
       {currentDay && (
         <span class="px-3 py-1.5 rounded-lg bg-indigo-900/50 text-indigo-300 text-xs font-medium">
           Day {currentDay}

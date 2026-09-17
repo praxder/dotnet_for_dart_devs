@@ -54,7 +54,8 @@ public class Order  // AGGREGATE ROOT
     private readonly List<OrderLine> _lines = [];
     private readonly List<IDomainEvent> _domainEvents = [];
 
-    public int Id { get; private set; }
+    public Guid Id { get; private set; }
+    public int CustomerId { get; private set; }
     public OrderStatus Status { get; private set; } = OrderStatus.Draft;
     public Money Total { get; private set; } = Money.Zero("USD");
 
@@ -62,12 +63,11 @@ public class Order  // AGGREGATE ROOT
     public IReadOnlyList<OrderLine> Lines => _lines.AsReadOnly();
     public IReadOnlyList<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
 
-    // PROTECTED: only Order can create lines
-    private Order() { }  // for EF Core
+    private Order() { }
 
     public static Order Create(int customerId)
     {
-        var order = new Order { CustomerId = customerId };
+        var order = new Order { Id = Guid.NewGuid(), CustomerId = customerId };
         order.RaiseEvent(new OrderCreated(order.Id, customerId));
         return order;
     }
@@ -140,7 +140,7 @@ public class OrderLine
 public interface IDomainEvent { DateTime OccurredAt { get; } }
 
 public record OrderSubmitted(
-    int OrderId,
+    Guid OrderId,
     int CustomerId,
     Money Total,
     DateTime OccurredAt) : IDomainEvent;
@@ -151,31 +151,29 @@ public record PostPublished(
     int AuthorId,
     DateTime OccurredAt) : IDomainEvent;
 
-// Dispatch domain events after saving:
-public class AppDbContext : DbContext
+// Persist the aggregate and its outgoing events atomically with Dapper.
+public sealed class SubmitOrderHandler(
+    NpgsqlDataSource dataSource,
+    IOrderRepository orders,
+    IOutboxWriter outbox)
 {
-    private readonly IMediator _mediator;
-
-    public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+    public async Task HandleAsync(Order order, CancellationToken cancellationToken)
     {
-        var result = await base.SaveChangesAsync(ct);
+        order.Submit();
 
-        // Collect and dispatch domain events
-        var domainEvents = ChangeTracker
-            .Entries<AggregateRoot>()
-            .SelectMany(e => e.Entity.DomainEvents)
-            .ToList();
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        foreach (var entry in ChangeTracker.Entries<AggregateRoot>())
-            entry.Entity.ClearEvents();
+        await orders.UpdateAsync(connection, transaction, order, cancellationToken);
+        await outbox.AppendAsync(connection, transaction, order.DomainEvents, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
-        foreach (var @event in domainEvents)
-            await _mediator.Publish(@event, ct);
-
-        return result;
+        order.ClearEvents();
     }
 }
 ```
+
+An outbox worker publishes committed events and records delivery progress. Publishing directly after a database commit can lose an event if the process stops between the commit and publish; publishing before commit can announce a change that later rolls back. Consumers must still be idempotent because outbox delivery is normally at least once.
 
 ## Domain Services — Logic That Doesn't Fit an Entity
 
@@ -272,5 +270,5 @@ Don't apply all DDD patterns to everything. Use them where they add clarity: (1)
 <ExerciseBlock>
 1. Model an `Order` aggregate for an e-commerce system. The invariants: total always equals sum of lines, can't add items to a submitted order, can't submit with zero items, can't have duplicate product lines (increase quantity instead). Write unit tests that verify each invariant by trying to violate it.
 2. Implement domain events for the order: `OrderCreated`, `ItemAdded`, `OrderSubmitted`, `OrderCancelled`. After `OrderSubmitted`, dispatch `OrderSubmitted` event which triggers: inventory reservation, payment initiation, and confirmation email (three separate notification handlers).
-3. Apply the Specification pattern to your blog API: implement `PublishedPostSpec`, `PostByAuthorSpec`, `PostByTagSpec`, `FeaturedPostSpec`. Combine them in query handlers using `.And()` / `.Or()`. Write tests verifying the specs work both with EF Core (database) and in-memory (list filtering).
+3. Decide whether a Specification abstraction improves your Dapper blog API. Compare it with explicit query objects for published, author, tag, and featured-post searches. Prefer direct SQL/query handlers unless the abstraction removes real duplication, and verify generated parameters and results with PostgreSQL integration tests.
 </ExerciseBlock>

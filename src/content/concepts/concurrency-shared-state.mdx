@@ -1,0 +1,42 @@
+---
+title: "Concurrency and Shared State"
+order: 5
+summary: "Protect invariants—not individual lines—when requests and background work touch shared mutable state."
+flutterAnalogy: "Dart isolates avoid shared memory by default; .NET commonly runs many requests concurrently in one process."
+relatedDays: [56, 57, 58, 63, 82]
+---
+
+## The server is concurrent by default
+
+Multiple ASP.NET Core requests execute at the same time. Singleton services, static fields, caches, and in-memory queues can therefore be accessed concurrently. “It worked in one request” says nothing about safety under load.
+
+A race exists when correctness depends on timing. Thread-safe collections make individual operations safe, but a multi-step invariant can still race:
+
+```csharp
+if (!cache.ContainsKey(key))
+{
+    cache[key] = await LoadAsync(key, cancellationToken);
+}
+```
+
+Several callers can all load the same key. For cache stampede protection, use an abstraction that guarantees single-flight behavior, such as `HybridCache.GetOrCreateAsync`, or maintain a carefully tested per-key coordination mechanism whose lifetime cannot race with waiters.
+
+## Choose the smallest coordination model
+
+- Prefer immutable values and request-local state.
+- Use `lock` for short synchronous critical sections; never `await` inside it.
+- Use `SemaphoreSlim` for bounded asynchronous coordination, and release it in `finally`.
+- Use `Channel<T>` for producer/consumer pipelines with backpressure.
+- Use `Interlocked` for simple atomic counters and state transitions.
+- Use a database transaction or constraint when the invariant belongs to persistent data.
+
+Locks only coordinate callers in one process. A load-balanced service needs a distributed strategy or, preferably, a database constraint/atomic command that remains correct across processes.
+
+## Review checklist
+
+Identify the shared state, state the invariant in one sentence, decide its ownership boundary, then test overlapping operations. If the invariant is “email is unique,” the final authority should be a database unique constraint—not an in-process lock.
+
+## Sources
+
+- [Managed threading best practices](https://learn.microsoft.com/en-us/dotnet/standard/threading/managed-threading-best-practices)
+- [HybridCache library](https://learn.microsoft.com/en-us/aspnet/core/performance/caching/hybrid)

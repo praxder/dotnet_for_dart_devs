@@ -124,8 +124,8 @@ ImmutableArray<T>        // struct wrapper, fastest for reads
 var builder = ImmutableList.CreateBuilder<string>();
 for (int i = 0; i < 1000; i++)
     builder.Add($"item{i}");
-ImmutableList<string> result = builder.ToImmutable();  // one allocation
-// Better than: 1000 ImmutableList.Add() calls (1000 allocations)
+ImmutableList<string> result = builder.ToImmutable();  // efficient batch construction
+// Better than repeatedly replacing an immutable list in a loop
 ```
 
 <ConceptCallout type="tip" title="ImmutableList is Thread-Safe by Design">
@@ -147,7 +147,7 @@ var config = new Dictionary<string, string>
 }.ToFrozenDictionary();
 
 // Faster lookup than regular Dictionary for read-only use
-string host = config["host"];  // Very fast — uses perfect hash
+string host = config["host"];  // optimized for repeated read-only lookup
 
 // FrozenSet also exists
 var validCodes = new[] { "USD", "EUR", "GBP", "JPY" }.ToFrozenSet();

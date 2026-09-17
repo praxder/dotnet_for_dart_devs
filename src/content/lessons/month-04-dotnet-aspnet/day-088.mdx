@@ -105,8 +105,7 @@ app.MapGet("/users/{id}", async (int id) =>
 });
 
 // With TypedResults — OpenAPI documents both 200 and 404 correctly
-app.MapGet("/users/{id}", async (int id)
-    : Task<Results<Ok<UserDto>, NotFound>> =>
+app.MapGet("/users/{id}", async Task<Results<Ok<UserDto>, NotFound>> (int id) =>
 {
     var user = await GetUserAsync(id);
     return user is not null

@@ -187,10 +187,24 @@ public class CreateProductRequestValidator : AbstractValidator<CreateProductRequ
         => _repo.CategoryExistsAsync(id, ct);
 }
 
-// Register in Program.cs
-builder.Services.AddFluentValidationAutoValidation();
+// Register validators in Program.cs
 builder.Services.AddValidatorsFromAssemblyContaining<CreateProductRequestValidator>();
+
+// Invoke async validators explicitly from an async endpoint/action.
+app.MapPost("/api/products", async (
+    CreateProductRequest request,
+    IValidator<CreateProductRequest> validator,
+    CancellationToken cancellationToken) =>
+{
+    var validation = await validator.ValidateAsync(request, cancellationToken);
+    if (!validation.IsValid)
+        return Results.ValidationProblem(validation.ToDictionary());
+
+    return Results.Created("/api/products/pending", request);
+});
 ```
+
+FluentValidation's ASP.NET MVC automatic-validation pipeline is synchronous. Do not combine `AddFluentValidationAutoValidation` with `MustAsync` rules: async validators cannot run correctly in that pipeline. Explicit asynchronous validation also makes I/O and cancellation visible at the endpoint boundary.
 
 ## ActionResult and Return Types
 

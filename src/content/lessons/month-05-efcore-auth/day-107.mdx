@@ -158,7 +158,7 @@ public class RefreshToken
 // Refresh endpoint — exchange refresh token for new token pair
 app.MapPost("/api/auth/refresh", async (
     RefreshRequest request,
-    AppDbContext db,
+    AppIdentityDbContext db,
     UserManager<AppUser> userManager,
     JwtTokenService jwtService) =>
 {
@@ -198,7 +198,7 @@ app.MapPost("/api/auth/refresh", async (
 // Revoke (logout)
 app.MapPost("/api/auth/logout", async (
     RevokeRequest request,
-    AppDbContext db,
+    AppIdentityDbContext db,
     ClaimsPrincipal user) =>
 {
     var token = await db.RefreshTokens

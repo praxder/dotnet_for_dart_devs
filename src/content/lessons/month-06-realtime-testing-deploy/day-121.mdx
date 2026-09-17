@@ -138,13 +138,10 @@ public class LiveStatsHub : Hub
     // Stream search results as they come in
     public async IAsyncEnumerable<PostSummaryDto> StreamSearchResults(
         string query,
-        AppDbContext db,
+        IPostRepository posts,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        await foreach (var post in db.Posts
-            .Where(p => p.Title.Contains(query))
-            .AsAsyncEnumerable()
-            .WithCancellation(ct))
+        await foreach (var post in posts.StreamSearchAsync(query, ct))
         {
             yield return new PostSummaryDto(post.Id, post.Title, post.Slug, post.Summary);
             await Task.Delay(50, ct);  // simulate real-time delivery

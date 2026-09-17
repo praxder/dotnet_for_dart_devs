@@ -110,7 +110,7 @@ var products = await conn.QueryAsync<Product>(
 ```
 
 <ConceptCallout type="gotcha" title="Empty IN Clause">
-Passing an empty array to an `IN @Param` clause generates invalid SQL. Always check `if (!list.Any()) return empty result` before executing the query. This is a common Dapper gotcha.
+Dapper expands list parameters and handles an empty list for supported providers, but returning early is still clearer and avoids a database round trip. Materialize one-shot enumerables before checking emptiness so you do not consume them twice.
 </ConceptCallout>
 
 ## Building Safe Dynamic WHERE Clauses

@@ -92,7 +92,7 @@ When you reference a NuGet package, you're getting its `.dll` assembly. Your app
 
 ```bash
 # After dotnet build, your output directory contains:
-bin/Release/net9.0/
+bin/Release/net10.0/
   MyApp.dll          # Your app's IL code
   MyApp.runtimeconfig.json   # Which .NET version to use
   MyApp.deps.json    # Dependency graph
@@ -130,7 +130,7 @@ dart compile exe bin/main.dart -o myapp
 dotnet publish -r linux-x64 -c Release
 
 # Result: single native binary, no .NET runtime needed
-./bin/Release/net9.0/linux-x64/publish/MyApp
+./bin/Release/net10.0/linux-x64/publish/MyApp
 ```
 </Fragment>
 </CodeComparison>
@@ -177,21 +177,23 @@ You'll encounter these terms in Stack Overflow answers, legacy codebases, and Nu
 - **.NET Standard** — Not a runtime, but a *specification*. A library targeting .NET Standard 2.0 works on both .NET Framework 4.6.1+ and .NET Core 2.0+. Used for shared libraries.
 - **.NET 5+** (2020–present) — Microsoft unified everything. ".NET 5" replaced ".NET Core 4" (they skipped "4" to avoid confusion with .NET Framework 4.x). Now just called ".NET."
 
-**Today: use the latest .NET LTS version.** Currently .NET 8 (LTS) or .NET 9. Ignore the Framework/Core/Standard distinction unless maintaining legacy code.
+**Course baseline: .NET 10 LTS with C# 14.** Use a supported target framework and install current servicing patches. Ignore the Framework/Core/Standard history unless you are maintaining older code or publishing a compatibility library.
 </ConceptCallout>
 
 ### Version Support Policy
 
 | Version | Type | End of Support |
 |---------|------|----------------|
-| .NET 6 | LTS | November 2024 |
-| .NET 8 | LTS | November 2026 |
-| .NET 9 | STS | May 2026 |
-| .NET 10 | LTS | November 2027 (expected) |
+| .NET 6 | LTS | November 12, 2024 (ended) |
+| .NET 8 | LTS | November 10, 2026 |
+| .NET 9 | STS | November 10, 2026 |
+| .NET 10 | LTS | November 14, 2028 |
 
 **LTS** = Long-Term Support (3 years). **STS** = Standard-Term Support (18 months). For production, use LTS unless you need features from the latest STS.
 
 This mirrors Dart's own LTS/stable channel distinction, though .NET's cadence is annual releases.
+
+Support dates change as releases move through servicing. Verify them on the official [.NET support policy](https://dotnet.microsoft.com/en-us/platform/support/policy) before choosing a production baseline.
 
 ## Why .NET Is Cross-Platform Today
 
@@ -272,7 +274,7 @@ cd RuntimeExplorer
 dotnet build
 
 # 3. Look at what was built
-ls -la bin/Debug/net9.0/
+ls -la bin/Debug/net10.0/
 
 # 4. Examine the IL with dotnet-ildasm (if installed) or just inspect file sizes
 # The .dll is your app's IL assembly
@@ -280,7 +282,7 @@ ls -la bin/Debug/net9.0/
 
 # 5. Run it both ways
 dotnet run
-dotnet bin/Debug/net9.0/RuntimeExplorer.dll
+dotnet bin/Debug/net10.0/RuntimeExplorer.dll
 ```
 
 **Questions to answer:**

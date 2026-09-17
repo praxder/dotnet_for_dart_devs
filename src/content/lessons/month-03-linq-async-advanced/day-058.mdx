@@ -143,53 +143,86 @@ await consumer;
 // Pipeline: read files → parse → validate → save
 // Each stage is a Channel; output of one feeds input of next
 
-async Task<ChannelReader<ParsedData>> ParseStage(ChannelReader<string> input)
+record PipelineStage<T>(ChannelReader<T> Reader, Task Completion);
+
+PipelineStage<ParsedData> ParseStage(
+    ChannelReader<string> input,
+    CancellationToken cancellationToken)
 {
     var output = Channel.CreateUnbounded<ParsedData>();
 
-    _ = Task.Run(async () =>
+    async Task RunAsync()
     {
-        await foreach (var line in input.ReadAllAsync())
+        Exception? failure = null;
+        try
         {
-            var parsed = ParseLine(line);
-            await output.Writer.WriteAsync(parsed);
+            await foreach (var line in input.ReadAllAsync(cancellationToken))
+                await output.Writer.WriteAsync(ParseLine(line), cancellationToken);
         }
-        output.Writer.Complete();
-    });
+        catch (Exception ex)
+        {
+            failure = ex;
+            throw;
+        }
+        finally
+        {
+            output.Writer.TryComplete(failure);
+        }
+    }
 
-    return output.Reader;
+    return new PipelineStage<ParsedData>(output.Reader, RunAsync());
 }
 
-async Task<ChannelReader<ValidatedData>> ValidateStage(ChannelReader<ParsedData> input)
+PipelineStage<ValidatedData> ValidateStage(
+    ChannelReader<ParsedData> input,
+    CancellationToken cancellationToken)
 {
     var output = Channel.CreateUnbounded<ValidatedData>();
 
-    _ = Task.Run(async () =>
+    async Task RunAsync()
     {
-        await foreach (var item in input.ReadAllAsync())
+        Exception? failure = null;
+        try
         {
-            if (Validate(item) is ValidatedData valid)
-                await output.Writer.WriteAsync(valid);
+            await foreach (var item in input.ReadAllAsync(cancellationToken))
+            {
+                if (Validate(item) is ValidatedData valid)
+                    await output.Writer.WriteAsync(valid, cancellationToken);
+            }
         }
-        output.Writer.Complete();
-    });
+        catch (Exception ex)
+        {
+            failure = ex;
+            throw;
+        }
+        finally
+        {
+            output.Writer.TryComplete(failure);
+        }
+    }
 
-    return output.Reader;
+    return new PipelineStage<ValidatedData>(output.Reader, RunAsync());
 }
 
 // Wire stages together
+using var cts = new CancellationTokenSource();
 var rawChannel = Channel.CreateUnbounded<string>();
-var parsedReader = await ParseStage(rawChannel.Reader);
-var validatedReader = await ValidateStage(parsedReader);
+var parse = ParseStage(rawChannel.Reader, cts.Token);
+var validate = ValidateStage(parse.Reader, cts.Token);
 
 // Feed data in
 foreach (var line in File.ReadLines("data.csv"))
-    await rawChannel.Writer.WriteAsync(line);
-rawChannel.Writer.Complete();
+    await rawChannel.Writer.WriteAsync(line, cts.Token);
+rawChannel.Writer.TryComplete();
 
-// Consume validated results
-await foreach (var item in validatedReader.ReadAllAsync())
-    await SaveAsync(item);
+async Task ConsumeAsync()
+{
+    await foreach (var item in validate.Reader.ReadAllAsync(cts.Token))
+        await SaveAsync(item);
+}
+
+// Observe every stage so faults cannot become detached background failures.
+await Task.WhenAll(parse.Completion, validate.Completion, ConsumeAsync());
 ```
 
 <ConceptCallout type="tip" title="Channels vs Queues vs BlockingCollection">
@@ -224,12 +257,14 @@ async Task ConsumerHandlingErrors(ChannelReader<int> reader)
         await foreach (var item in reader.ReadAllAsync())
             Console.WriteLine(item);
     }
-    catch (ChannelClosedException ex) when (ex.InnerException != null)
+    catch (Exception ex) when (ex is not OperationCanceledException)
     {
-        Console.WriteLine($"Producer failed: {ex.InnerException.Message}");
+        Console.WriteLine($"Producer failed: {ex.Message}");
     }
 }
 ```
+
+Do not depend on a particular wrapper exception here. A failed writer faults the reader's completion, and enumeration reports that failure. In application code, observe the stage task and channel completion, then handle the domain-specific exception at the pipeline boundary.
 
 <ExerciseBlock>
 1. Build a log aggregation pipeline using Channels: (a) a producer that generates `LogEntry` records at 100/second, (b) a parse stage that extracts `Level`, `Timestamp`, and `Message`, (c) a filter stage that only passes `Error` and `Critical` entries, (d) a consumer that batches entries into groups of 10 before writing.

@@ -1,43 +1,51 @@
-# Astro Starter Kit: Minimal
+# C# for Flutter Developers
 
-```sh
-npm create astro@latest -- --template minimal
+An Astro-based, self-paced curriculum for experienced Dart and Flutter developers learning C#, .NET, ASP.NET Core, and SQL-first backend development.
+
+The course contains 130 numbered lessons across 10 modules. Existing lesson URLs and browser-stored progress remain stable. A separate 12-topic [application concepts](src/content/concepts) guide explains the runtime and architectural ideas that syntax lessons tend to miss.
+
+## Curriculum baseline
+
+- .NET 10 LTS and C# 14
+- ASP.NET Core Minimal APIs
+- Dapper with PostgreSQL for application data
+- ASP.NET Core Identity, with EF Core permitted only as its isolated persistence adapter
+- Automated testing, containers, CI/CD, observability, and production operations
+
+Version-specific statements should link to primary documentation. Historical version labels are retained when they explain when a feature was introduced.
+
+## Local development
+
+Requires a current Node.js release and npm.
+
+```bash
+npm install
+npm test
+npm run build
+npm run dev
 ```
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+The site uses the `/dotnet_for_dart_devs/` base path. The production build is written to `dist/`.
 
-## 🚀 Project Structure
-
-Inside of your Astro project, you'll see the following folders and files:
+## Content structure
 
 ```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
+src/content/lessons/   130 progress-tracked MDX lessons
+src/content/concepts/  Supplemental high-level .NET concepts
+src/pages/lessons/     Stable day-based lesson routes
+src/pages/modules/     Module indexes and compatibility routes
+tests/                 Curriculum structure and regression checks
 ```
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+## Authoring expectations
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
+Examples should be compilable unless explicitly labeled as an expected compiler error or pseudocode. Security examples must never recommend logging credentials or bearer tokens. Database examples use parameterized SQL, explicit connection/transaction ownership, and integration tests against the real provider.
 
-Any static assets, like images, can be placed in the `public/` directory.
+Before submitting content changes, run:
 
-## 🧞 Commands
+```bash
+npm test
+npm run build
+```
 
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+Do not renumber lesson days or change `/lessons/day-NNN` routes. Add supplemental material under `/concepts` when it should not affect learner progress.

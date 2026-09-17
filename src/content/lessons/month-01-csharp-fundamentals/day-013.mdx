@@ -166,7 +166,7 @@ Filters can also be used for logging without catching:
 ```csharp
 // This NEVER catches — the filter always returns false
 // But the side effect (logging) still runs before the exception propagates
-catch (Exception e) when (LogException(e) == false)
+catch (Exception e) when (LogException(e))
 {
     // Never reached
 }

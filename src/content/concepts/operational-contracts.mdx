@@ -1,0 +1,33 @@
+---
+title: "Contracts and Production Operations"
+order: 12
+summary: "Design APIs, telemetry, health checks, retries, and deployment behavior as part of the application—not cleanup after coding."
+flutterAnalogy: "This is the backend half of the contract your Flutter client depends on: stable JSON, useful failures, and observable behavior."
+relatedDays: [77, 85, 89, 113, 116, 117, 129, 130]
+---
+
+## External contracts are product behavior
+
+Use explicit request and response DTOs rather than exposing persistence models. Decide naming, nullability, dates, pagination, and versioning deliberately. Return consistent problem details for errors. A validation failure, missing resource, conflict, unavailable dependency, and unexpected exception should not all become an opaque 500 response.
+
+## Telemetry must answer questions safely
+
+Structured logs should carry stable event names and properties such as operation, resource ID, elapsed time, and correlation identifiers. Never log passwords, access tokens, refresh tokens, authorization headers, secrets, or unnecessary personal data. If a token must be correlated during an incident, log a non-reversible fingerprint with a narrowly defined retention policy.
+
+Metrics show trends and saturation; traces connect work across service boundaries; logs explain discrete events. Use all three with consistent correlation.
+
+## Health is not one boolean
+
+Liveness answers “should the process be restarted?” Readiness answers “should this instance receive traffic?” A dependency outage may make the service unready without making the process dead. Tag and expose checks intentionally, and protect detailed diagnostic endpoints from public disclosure.
+
+## Reliability policies need boundaries
+
+Retries amplify load and can duplicate side effects. Retry only transient failures, use bounded exponential backoff with jitter, honor cancellation, and combine with timeouts and circuit breaking where appropriate. Make write operations idempotent before retrying them.
+
+Deploy immutable artifacts, run migrations deliberately, verify readiness, and retain a rollback path. A capstone is complete when its failure and operations paths are tested—not merely when the happy-path endpoint responds.
+
+## Sources
+
+- [Problem details in ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/error-handling-api)
+- [Logging in .NET](https://learn.microsoft.com/en-us/dotnet/core/extensions/logging)
+- [Health checks in ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/health-checks)

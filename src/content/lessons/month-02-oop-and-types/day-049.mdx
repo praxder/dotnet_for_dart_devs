@@ -37,7 +37,7 @@ Console.WriteLine(list.Capacity);  // 16
 
 // Pre-allocate if you know the size
 var knownSize = new List<int>(1000);  // capacity=1000, no reallocation up to 1000 items
-knownSize.AddRange(Enumerable.Range(1, 1000));  // one allocation only
+knownSize.AddRange(Enumerable.Range(1, 1000));  // avoids growth reallocations
 
 // Trim unused capacity
 var sparse = new List<int> { 1, 2, 3 };
@@ -124,7 +124,7 @@ Don't micro-optimize LINQ away prematurely. Use `BenchmarkDotNet` or the `dotnet
 int[] array = [1, 2, 3];
 List<int> list = [1, 2, 3];
 ImmutableArray<int> immut = [1, 2, 3];
-Span<int> span = [1, 2, 3];  // stack-allocated!
+Span<int> span = [1, 2, 3];  // compiler chooses suitable temporary storage
 
 // Spread operator — like Dart's spread (...)
 int[] a = [1, 2, 3];

@@ -1,5 +1,5 @@
 ---
-title: "Capstone Project: Flutter + .NET API (Part 2 — Ship It)"
+title: "Capstone Project: Hardening and Release Gate"
 day: 130
 week: 26
 module: 10
@@ -15,7 +15,7 @@ projectType: "capstone"
 import ConceptCallout from '../../../components/lesson/ConceptCallout.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-Day 130. You've completed 26 weeks of C# and .NET. Today you ship the capstone: a production-ready, real-time collaborative task board with a Flutter frontend. This lesson is your implementation guide and completion checklist.
+Day 130 is a hardening and release-readiness checkpoint. A production system is not completed in one 60-minute lesson. Use this session to run the release gate against the application accumulated during modules 7–10, record failures, and choose the next smallest fix.
 
 ## What You're Building
 
@@ -44,7 +44,7 @@ Day 130. You've completed 26 weeks of C# and .NET. Today you ship the capstone: 
 │  └────────────────────────────────────────────────────────────┘   │
 │                              │                                     │
 │  ┌───────────────────────────▼──────────────────────────────┐    │
-│  │         EF Core → PostgreSQL | Redis (cache + SignalR)    │    │
+│  │       Dapper → PostgreSQL | Redis (cache + SignalR)       │    │
 │  └──────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -56,12 +56,12 @@ Day 130. You've completed 26 weeks of C# and .NET. Today you ship the capstone: 
 □ ASP.NET Core Identity with JWT + refresh tokens
 □ Google OAuth via ID token verification
 □ Board aggregate with task management invariants
-□ EF Core with proper indexes and relationships
+□ Dapper repositories with parameterized SQL, indexes, and constraints
 □ CQRS with MediatR + FluentValidation pipeline behavior
 □ SignalR BoardHub with Redis backplane
 □ MediatR notifications → SignalR push (task events)
 □ Resource-based authorization (board member check)
-□ Soft delete + audit logging interceptors
+□ Explicit soft-delete and audit behavior covered by repository tests
 □ Output caching for read-heavy endpoints
 □ Rate limiting (auth: 5/15min, API: 100/min per user)
 □ OpenAPI docs with Scalar UI
@@ -104,46 +104,46 @@ public record MoveTaskCommand(
     string RequestingUserId) : IRequest<MoveTaskResult>;
 
 public class MoveTaskHandler(
-    AppDbContext db,
+    IBoardRepository boards,
     IAuthorizationService authService,
-    IHubContext<BoardHub, IBoardHubClient> hub,
     ClaimsPrincipal user)
     : IRequestHandler<MoveTaskCommand, MoveTaskResult>
 {
     public async Task<MoveTaskResult> Handle(MoveTaskCommand request, CancellationToken ct)
     {
-        // Load board with all tasks (need to reorder)
-        var board = await db.Boards
-            .Include(b => b.Tasks)
-            .Include(b => b.Members)
-            .FirstOrDefaultAsync(b => b.Id == request.BoardId, ct)
+        // Repository loads the aggregate with one deliberate Dapper query shape.
+        var board = await boards.GetAggregateAsync(request.BoardId, ct)
             ?? throw new NotFoundException("Board not found");
 
         // Authorization: must be a board member
         var authResult = await authService.AuthorizeAsync(user, board, "BoardMember");
         if (!authResult.Succeeded) throw new ForbiddenException();
 
-        // Apply domain logic
+        var expectedVersion = board.Version;
         var task = board.MoveTask(
             request.TaskId,
             request.ToColumnId,
             request.NewPosition);
 
-        await db.SaveChangesAsync(ct);
-
-        // Push real-time update to all watchers
-        await hub.Clients
-            .Group($"board:{request.BoardId}")
-            .TaskMoved(new TaskMovedEvent(
+        // Save aggregate rows and an outbox event in one transaction.
+        await boards.SaveWithOutboxAsync(
+            board,
+            expectedVersion,
+            new TaskMovedEvent(
                 task.Id,
                 task.ColumnId,
                 task.Position,
                 request.RequestingUserId,
-                DateTime.UtcNow));
+                DateTime.UtcNow),
+            ct);
 
         return new MoveTaskResult(task.Id, task.ColumnId, task.Position);
     }
 }
+
+// An outbox dispatcher publishes committed events to SignalR. Clients ignore
+// duplicate event IDs. A failed version check becomes 409 Conflict so the
+// Flutter client can refresh instead of overwriting another user's move.
 
 // Board.MoveTask — the domain logic
 public TaskItem MoveTask(int taskId, string toColumnId, int requestedPosition)
@@ -235,7 +235,7 @@ After 130 days, you have working knowledge of the entire .NET ecosystem:
 
 **ASP.NET Core** (Month 4): Middleware pipeline, Minimal APIs and MVC controllers, JWT and cookie authentication, policy and resource-based authorization, rate limiting, gRPC, SignalR real-time, health checks.
 
-**Entity Framework Core** (Month 5): Code-first modeling, migrations, relationships, advanced querying (projections, compiled queries, split queries), transactions and concurrency, raw SQL and views, repository pattern, CQRS with MediatR, performance optimization, owned entities and value objects, interceptors, soft delete, audit logging, multi-tenancy, temporal tables, bulk operations.
+**Dapper and SQL data access** (Month 5): Parameterized SQL, mapping, joins, multi-result queries, transactions, connection ownership, repository boundaries, CQRS tradeoffs, migrations, performance measurement, PostgreSQL constraints, integration testing, and outbox-based delivery.
 
 **Auth and Security** (Month 5): ASP.NET Core Identity, JWT deep dive with refresh tokens, OAuth and OpenID Connect, 2FA with TOTP, data protection API, secrets management, OWASP API security, security testing.
 
@@ -244,7 +244,7 @@ After 130 days, you have working knowledge of the entire .NET ecosystem:
 <ConceptCallout type="tip" title="What's Next">
 You're now a proficient C#/.NET developer. Where to go from here:
 
-1. **Deep dives**: Pick one area and go expert-level. EF Core internals, Roslyn/source generators, Native AOT, Aspire for cloud-native development.
+1. **Deep dives**: Pick one area and go expert-level: PostgreSQL query planning, Dapper internals, Roslyn/source generators, Native AOT, or Aspire for cloud-native development.
 2. **Architecture**: Study Clean Architecture, Vertical Slice Architecture, and event sourcing in depth.
 3. **Community**: Attend .NET Conf, contribute to open-source .NET projects, follow the .NET team on GitHub.
 4. **Certifications**: Microsoft Azure Developer Associate (AZ-204) if you use Azure.
@@ -252,7 +252,7 @@ You're now a proficient C#/.NET developer. Where to go from here:
 </ConceptCallout>
 
 <ExerciseBlock>
-1. **Complete the capstone**: Implement every item on the backend checklist above. This is your portfolio project — make it production-quality. Aim for: all integration tests passing, &lt;100ms P95 under 50 concurrent users, Dockerized, CI/CD working, deployed to a cloud environment.
+1. **Run the release gate**: Choose one vertical slice—authenticate, load a board, move a task, persist it, and deliver the real-time event. Require passing unit/integration/security tests, a reproducible container build, a migration rehearsal, and measured latency under a documented load profile. Record failures instead of claiming production readiness.
 2. **Flutter integration**: Connect your existing Flutter skills to the .NET backend. Implement the Kanban board UI with real-time updates via SignalR. Every task card should update across all connected clients when moved, edited, or deleted.
 3. **Portfolio presentation**: Write a `README.md` that explains: (a) what the app does, (b) the technology stack and why each piece was chosen, (c) architecture decisions (e.g., why CQRS, why event-driven for real-time), (d) how to run it locally with `docker compose up`, (e) performance characteristics and test coverage. This is the artifact you show when demonstrating your .NET expertise.
 </ExerciseBlock>

@@ -145,7 +145,8 @@ app.MapPost("/api/auth/verify-2fa", async (
     TwoFactorRequest request,
     UserManager<AppUser> userManager,
     JwtTokenService jwtService,
-    IDataProtectionProvider dataProtection) =>
+    ITwoFactorAttemptStore attemptStore,
+    CancellationToken cancellationToken) =>
 {
     // Validate pre-auth token to get userId
     var userId = jwtService.ValidatePreAuthToken(request.PreAuthToken);
@@ -153,6 +154,9 @@ app.MapPost("/api/auth/verify-2fa", async (
 
     var user = await userManager.FindByIdAsync(userId);
     if (user is null) return Results.Unauthorized();
+
+    if (!await attemptStore.CanAttemptAsync(userId, cancellationToken))
+        return Results.StatusCode(StatusCodes.Status429TooManyRequests);
 
     // Try TOTP code first
     bool isValid = await userManager.VerifyTwoFactorTokenAsync(
@@ -174,12 +178,19 @@ app.MapPost("/api/auth/verify-2fa", async (
     }
 
     if (!isValid)
+    {
+        await attemptStore.RecordFailureAsync(userId, cancellationToken);
         return Results.Unauthorized();
+    }
+
+    await attemptStore.ClearAsync(userId, cancellationToken);
 
     var tokens = await jwtService.GenerateTokensAsync(user);
     return Results.Ok(tokens);
-});
+}).RequireRateLimiting("two-factor");
 ```
+
+The pre-auth token must use a separate audience or authentication scheme from normal API access, expire within minutes, contain a one-time challenge identifier, and grant no application permissions. Limit attempts by both challenge/account and network source; a valid password must not permit unlimited TOTP guessing.
 
 ## Account Security Features
 
@@ -212,7 +223,7 @@ public class SecurityEvent
 // Endpoints for account security dashboard
 app.MapGet("/api/account/sessions", async (
     ClaimsPrincipal user,
-    AppDbContext db) =>
+    AppIdentityDbContext db) =>
 {
     var userId = user.GetUserId();
     var sessions = await db.UserSessions
@@ -224,7 +235,7 @@ app.MapGet("/api/account/sessions", async (
 }).RequireAuthorization();
 
 app.MapDelete("/api/account/sessions/{id}", async (
-    int id, ClaimsPrincipal user, AppDbContext db) =>
+    int id, ClaimsPrincipal user, AppIdentityDbContext db) =>
 {
     var session = await db.UserSessions
         .FirstOrDefaultAsync(s => s.Id == id && s.UserId == user.GetUserId());

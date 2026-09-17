@@ -1,0 +1,41 @@
+---
+title: "Managed Memory and Data Semantics"
+order: 2
+summary: "Reason about copying, aliasing, allocation, garbage collection, and object lifetime without relying on the stack-versus-heap myth."
+flutterAnalogy: "Dart developers already know garbage collection; C# adds user-defined value types and explicit by-reference operations."
+relatedDays: [3, 24, 31, 63]
+---
+
+## Start with semantics
+
+A value-type variable contains a value. Assigning it copies that value. A reference-type variable contains a reference; assigning it copies the reference, so both variables can identify the same object. That rule is dependable. “Structs live on the stack and classes live on the heap” is not.
+
+Storage depends on context and runtime optimization. A value can be a field inside a heap object, boxed into an object, stored in an array, or kept in a register. A reference can be a local, field, or array element. The JIT may remove allocations when observable behavior permits it.
+
+```csharp
+var first = new MutableOrder { Status = "New" };
+var alias = first;
+alias.Status = "Paid";          // first observes the mutation
+
+var left = new Coordinate(2, 3);
+var copy = left;
+copy = copy with { X = 9 };     // left remains unchanged
+```
+
+## Garbage collection is not disposal
+
+The GC reclaims managed memory when objects are unreachable. It does not promise prompt release of files, sockets, database connections, or native handles. Those resources need `IDisposable`/`IAsyncDisposable` ownership.
+
+Allocations are normally fine. Optimize them only after measuring a hot path. Large object graphs, accidental retention by long-lived references, boxing, and repeated temporary allocations matter more than slogans about “zero allocation.”
+
+## Working rules
+
+- Choose `class` for identity and shared mutable state.
+- Choose small, preferably immutable `struct`/`record struct` types for value semantics.
+- Avoid mutable structs; copies make mutation surprising.
+- Use `ref`, `in`, `out`, spans, and pooling only when the benefit is understood and measured.
+
+## Sources
+
+- [C# type system](https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/types/)
+- [Fundamentals of garbage collection](https://learn.microsoft.com/en-us/dotnet/standard/garbage-collection/fundamentals)

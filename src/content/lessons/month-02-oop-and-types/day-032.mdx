@@ -49,7 +49,7 @@ Records are one of the best additions to C# — they solve the "immutable data c
   </div>
   <div slot="csharp">
   ```csharp
-  // C# record — immutable, equality, ToString, with — all free
+// Positional record with init-only generated properties
   public record User(string Name, string Email);
 
   var user = new User("Adam", "adam@example.com");
@@ -70,8 +70,8 @@ Records are one of the best additions to C# — they solve the "immutable data c
 </CodeComparison>
 
 <ConceptCallout type="tip" title="Records Auto-Generate Everything">
-A single `record` declaration gives you:
-- `init`-only properties
+A positional `record class` declaration gives you:
+- Generated `init`-only properties (unless you declare different members)
 - Value-based `==` and `!=`
 - `GetHashCode()` based on all properties
 - `ToString()` that prints all properties
@@ -107,17 +107,19 @@ var discounted = product with { Price = 7.99m };
 
 ## Records with Additional Methods
 
-Records can have methods, additional properties, and even custom constructors:
+Records can have methods, additional properties, and custom constructors. Records are not inherently immutable; immutability depends on their members.
 
 ```csharp
-public record Money(decimal Amount, string Currency)
+public sealed record Money
 {
-    // Validation in constructor
-    public Money : this(Amount, Currency)
+    public decimal Amount { get; init; }
+    public string Currency { get; }
+
+    public Money(decimal amount, string currency)
     {
-        if (Amount < 0) throw new ArgumentException("Amount cannot be negative");
-        if (string.IsNullOrEmpty(Currency)) throw new ArgumentException("Currency required");
-        Currency = Currency.ToUpper();
+        ArgumentException.ThrowIfNullOrWhiteSpace(currency);
+        Amount = amount;
+        Currency = currency.ToUpperInvariant();
     }
 
     // Computed properties
@@ -174,7 +176,7 @@ public readonly record struct Vector(double X, double Y)
 | Equality | Reference | Value (auto) | Value (auto) | Value (auto) |
 | `with` expression | No | No | Yes | Yes |
 | Inheritance | Yes | No | Limited | No |
-| Mutability | Mutable | Mutable/Immutable | Immutable | Immutable |
+| Mutability | Depends on members | Depends on members | Depends on members; positional properties are init-only | Mutable by default; `readonly record struct` is immutable |
 | Best for | Complex objects | Small value types | DTOs, events | Small immutable values |
 
 <ExerciseBlock>

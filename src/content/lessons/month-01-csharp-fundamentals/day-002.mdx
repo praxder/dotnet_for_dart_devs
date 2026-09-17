@@ -31,7 +31,7 @@ A `.csproj` file is MSBuild XML. It looks verbose but is actually quite readable
 
   <PropertyGroup>
     <!-- Which .NET version to target -->
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
 
     <!-- Exe = runnable app, Library = .dll with no entry point -->
     <OutputType>Exe</OutputType>
@@ -93,8 +93,8 @@ One feature `.csproj` has that `pubspec.yaml` does not is **multi-targeting** �
 
 ```xml
 <PropertyGroup>
-  <!-- Build for both .NET 8 and .NET 9 -->
-  <TargetFrameworks>net8.0;net9.0</TargetFrameworks>
+  <!-- Build for the current and previous LTS releases when a library needs both -->
+  <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
 </PropertyGroup>
 ```
 
@@ -276,7 +276,7 @@ After building, two directories appear that you should understand and never comm
 ```
 MyApp.Console/bin/
 └── Debug/
-    └── net9.0/
+    └── net10.0/
         ├── MyApp.Console.dll     ← Your compiled assembly
         ├── MyApp.Console.exe     ← Platform-specific launcher
         ├── MyApp.Core.dll        ← Referenced project assemblies are copied here
@@ -293,7 +293,7 @@ MyApp.Console/obj/
 ├── project.assets.json    ← NuGet dependency graph (do not edit)
 ├── project.nuget.cache    ← Restore cache
 └── Debug/
-    └── net9.0/
+    └── net10.0/
         └── ...            ← Intermediate compilation artifacts
 ```
 

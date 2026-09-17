@@ -1,0 +1,39 @@
+---
+title: "The ASP.NET Core Request Pipeline"
+order: 9
+summary: "Understand middleware order, endpoint selection, authentication, authorization, model binding, and response completion as one pipeline."
+flutterAnalogy: "Think of nested Flutter widgets or Dio interceptors where order changes which code wraps and observes later work."
+relatedDays: [76, 78, 79, 80, 84, 89]
+---
+
+## Middleware is ordered composition
+
+Each middleware may run code before and after the next component, short-circuit the request, or transform the response. Registration order is behavior.
+
+```csharp
+app.UseExceptionHandler();
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseRateLimiter();
+app.UseAuthorization();
+app.MapEndpoints();
+```
+
+Authentication establishes identity; authorization decides whether that identity may access a resource. Middleware that partitions by user must run after authentication. Exception handling must be early enough to wrap components whose failures it should translate.
+
+Endpoint routing selects a candidate using route patterns and metadata. Model binding then obtains values from routes, query strings, headers, forms, and bodies. Validation answers whether input meets contract rules; it does not make an operation authorized or protect a business invariant.
+
+## The response has a point of no return
+
+Once headers or body bytes are sent, middleware may be unable to replace the response with a clean problem document. Avoid buffering large responses by default, and handle failures before streaming begins when possible.
+
+Request cancellation is exposed through `HttpContext.RequestAborted`. Pass it into downstream I/O. Do not store `HttpContext` for later background work: its lifetime ends with the request. Copy only required, safe values into a durable work item.
+
+## Operational rule
+
+Document intentional middleware ordering in an integration test. Verify at least unauthenticated, forbidden, rate-limited, validation-failed, and unexpected-error paths—not only successful endpoints.
+
+## Sources
+
+- [ASP.NET Core middleware](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/)
+- [Routing in ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/routing)

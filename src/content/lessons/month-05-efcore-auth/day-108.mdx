@@ -104,32 +104,34 @@ app.MapPost("/api/auth/google", async (
 {
     // Verify the ID token with Google's public keys
     var payload = await verifier.VerifyAsync(request.IdToken);
-    if (payload is null) return Results.Unauthorized();
+    if (payload is null || !payload.EmailVerified) return Results.Unauthorized();
 
     // Find or create local user
     var user = await userManager.FindByLoginAsync("Google", payload.Subject);
 
     if (user is null)
     {
-        // New user — create account
-        user = await userManager.FindByEmailAsync(payload.Email) ?? new AppUser
+        // Never link solely because an email string matches. An existing account
+        // must authenticate first and use an explicit account-link flow.
+        var existingUser = await userManager.FindByEmailAsync(payload.Email);
+        if (existingUser is not null)
+            return Results.Conflict(new { message = "Sign in to link this provider." });
+
+        user = new AppUser
         {
             Email = payload.Email,
             UserName = payload.Email,
             DisplayName = payload.Name,
             AvatarUrl = payload.Picture,
-            EmailConfirmed = payload.EmailVerified
+            EmailConfirmed = true
         };
 
-        if (user.Id == null)  // brand new
-        {
-            var createResult = await userManager.CreateAsync(user);
-            if (!createResult.Succeeded) return Results.Problem("Failed to create user");
-        }
+        var createResult = await userManager.CreateAsync(user);
+        if (!createResult.Succeeded) return Results.Problem("Failed to create user");
 
-        // Link Google login to user
-        await userManager.AddLoginAsync(user,
+        var linkResult = await userManager.AddLoginAsync(user,
             new UserLoginInfo("Google", payload.Subject, "Google"));
+        if (!linkResult.Succeeded) return Results.Problem("Failed to link login");
     }
 
     var tokens = await jwtService.GenerateTokensAsync(user);
@@ -238,5 +240,5 @@ For Flutter apps, the recommended pattern is: Flutter handles the Google/Apple s
 <ExerciseBlock>
 1. Register a Google OAuth app in the Google Cloud Console (free). Implement the `POST /api/auth/google` endpoint that accepts a Google ID token and returns your app's JWT. Test it with a real Google token (use the Google OAuth Playground to get one).
 2. Implement "link account" functionality: a logged-in user can link their Google account to their existing email/password account. Handle the case where another user already linked that Google account.
-3. Add GitHub OAuth login: users can sign in with GitHub. Map their GitHub username to `DisplayName` and their GitHub avatar to `AvatarUrl`. Handle the case where their GitHub email is already registered — merge the accounts automatically.
+3. Add GitHub OAuth login: map the username to `DisplayName` and avatar to `AvatarUrl`. If its verified email already belongs to an account, reject automatic linking and require that account to authenticate before an explicit link operation.
 </ExerciseBlock>

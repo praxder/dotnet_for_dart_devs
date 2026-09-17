@@ -16,7 +16,7 @@ import DartEquivalent from '../../../components/lesson/DartEquivalent.astro';
 import CodeComparison from '../../../components/lesson/CodeComparison.astro';
 import ExerciseBlock from '../../../components/lesson/ExerciseBlock.astro';
 
-The Data Protection API (DPAPI) is ASP.NET Core's built-in solution for encrypting sensitive data — cookies, tokens, PII fields. Secrets management keeps API keys and connection strings out of source code. Together they protect data at rest and prevent credential leaks.
+ASP.NET Core Data Protection protects app-controlled payloads such as authentication cookies and short-lived tokens. It can also protect selected database fields when its key ring is durable and shared correctly, but it is not Windows DPAPI or a general-purpose key-management service. Secrets management keeps API keys and connection strings out of source code.
 
 ## Data Protection API — Encrypt Sensitive Data
 
@@ -40,6 +40,8 @@ builder.Services.AddDataProtection()
 
 ## Encrypting Sensitive Fields
 
+Protected values are intentionally nondeterministic, so they cannot be queried with ordinary equality searches. For searchable sensitive fields, store a separate keyed hash for lookup and protect the original value. Back up the Data Protection key ring: losing it makes existing values unreadable.
+
 ```csharp
 // Encrypt PII stored in the database — phone numbers, SSNs, etc.
 public class SensitiveDataService(IDataProtectionProvider dataProtection)
@@ -51,16 +53,16 @@ public class SensitiveDataService(IDataProtectionProvider dataProtection)
     public string Decrypt(string ciphertext) => _protector.Unprotect(ciphertext);
 }
 
-// Value converter for EF Core — transparently encrypt/decrypt
-public class EncryptedStringConverter(SensitiveDataService service)
-    : ValueConverter<string, string>(
-        v => service.Encrypt(v),         // encrypt when saving
-        v => service.Decrypt(v));        // decrypt when reading
+// With Dapper, make the protection boundary explicit in the repository.
+var protectedPhone = sensitiveData.Encrypt(user.PhoneNumber);
+await connection.ExecuteAsync(
+    "UPDATE users SET protected_phone = @protectedPhone WHERE id = @id",
+    new { protectedPhone, id = user.Id });
 
-// Apply to specific properties:
-modelBuilder.Entity<User>()
-    .Property(u => u.PhoneNumber)
-    .HasConversion(new EncryptedStringConverter(sensitiveDataService));
+var storedValue = await connection.QuerySingleAsync<string>(
+    "SELECT protected_phone FROM users WHERE id = @id",
+    new { id = user.Id });
+var phoneNumber = sensitiveData.Decrypt(storedValue);
 
 // Time-limited protection — tokens that expire
 public class TimeLimitedProtector(IDataProtectionProvider provider)
@@ -187,7 +189,7 @@ public class ApiKey
     public DateTime? LastUsedAt { get; set; }
 }
 
-public class ApiKeyService(AppDbContext db, SecureHasher hasher)
+public class ApiKeyService(IApiKeyRepository repository, SecureHasher hasher)
 {
     public async Task<(string fullKey, ApiKey record)> CreateApiKeyAsync(string userId, string name)
     {
@@ -199,17 +201,14 @@ public class ApiKeyService(AppDbContext db, SecureHasher hasher)
             Name = name,
             UserId = userId
         };
-        db.ApiKeys.Add(record);
-        await db.SaveChangesAsync();
+        await repository.InsertAsync(record);
         return (key, record);  // only return full key once — can't recover it
     }
 
     public async Task<ApiKey?> ValidateApiKeyAsync(string key)
     {
         var prefix = key[..12];
-        var candidates = await db.ApiKeys
-            .Where(k => k.KeyPrefix == prefix)
-            .ToListAsync();
+        var candidates = await repository.FindByPrefixAsync(prefix);
 
         var hash = hasher.HashApiKey(key);
         return candidates.FirstOrDefault(k => k.KeyHash == hash);
@@ -223,6 +222,6 @@ Before committing: ✅ No connection strings in `appsettings.json` (use `{Server
 
 <ExerciseBlock>
 1. Implement an API key authentication scheme: `ApiKeyAuthenticationHandler` that reads `X-API-Key` header, validates it against hashed keys in the database, and populates `ClaimsPrincipal`. Make it an alternative to JWT (both should work on the same app).
-2. Encrypt email addresses stored in the database using a Data Protection API `ValueConverter` in EF Core. Verify that the database contains ciphertext, but your service layer reads plaintext. Test that key rotation (simulated by changing the purpose string) invalidates old ciphertext.
+2. Protect a sensitive field at the Dapper repository boundary. Verify that PostgreSQL contains protected data while the application returns plaintext. Then document the recovery and re-encryption plan before changing keys or purpose strings; losing the key makes existing values unreadable.
 3. Configure your app to load secrets from three sources in order: `appsettings.json` → user secrets (dev) → Azure Key Vault (prod). Write a test that verifies the correct source is used in each environment without actually connecting to Azure.
 </ExerciseBlock>

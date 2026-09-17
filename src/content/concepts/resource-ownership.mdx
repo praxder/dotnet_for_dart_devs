@@ -1,0 +1,43 @@
+---
+title: "Resource Ownership and Disposal"
+order: 3
+summary: "Make ownership explicit so streams, database connections, locks, and native handles are released predictably."
+flutterAnalogy: "Like disposing controllers and subscriptions in Flutter, but encoded through IDisposable and await using."
+relatedDays: [24, 65, 91, 101]
+---
+
+## The ownership question
+
+For every disposable resource, ask: who creates it, who owns it, and when does that owner release it? The creator usually owns the resource unless an API explicitly transfers ownership.
+
+```csharp
+await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+// Commands use the same connection and transaction.
+await transaction.CommitAsync(cancellationToken);
+```
+
+`using` translates to `try/finally`, so cleanup runs during exceptions. Use `await using` when asynchronous cleanup is available and meaningful. Do not return a stream from inside a `using` block if the caller still needs to read it; either transfer ownership clearly or materialize the result first.
+
+## Dependency injection ownership
+
+The built-in container disposes instances it creates. Code resolving a scoped service should not dispose that service independently. A singleton must not capture a scoped disposable because that extends its lifetime beyond the request scope.
+
+Connection pooling does not remove the need to dispose connections. Disposal normally returns the underlying connection to the pool. Failing to dispose can exhaust the pool even though the GC eventually notices the wrapper.
+
+## Shutdown is also ownership
+
+Background services should stop accepting new work, finish or abandon in-flight work according to policy, and release resources. A cancellation token signals a request; it does not itself await cleanup.
+
+## Review checklist
+
+- Is ownership documented by API shape and lifetime rather than a comment?
+- Can every success, exception, and cancellation path release the resource?
+- Does a returned object depend on something already disposed?
+- Is graceful completion distinct from forced cancellation?
+
+## Sources
+
+- [Implement a Dispose method](https://learn.microsoft.com/en-us/dotnet/standard/garbage-collection/implementing-dispose)
+- [Dependency injection guidelines](https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines)

@@ -163,7 +163,7 @@ app.UseResponseCompression();  // must be before other response-writing middlewa
 app.MapGet("/api/status", () =>
     new { status = "ok", timestamp = DateTime.UtcNow.ToString() });
 
-// BETTER: use typed records (stack allocated for small types)
+// BETTER: use a typed response contract (this record class is still a reference type)
 app.MapGet("/api/status", () =>
     Results.Ok(new StatusResponse("ok", DateTime.UtcNow)));
 
@@ -202,14 +202,14 @@ finally { ArrayPool<byte>.Shared.Return(buffer); }
 ## Async Best Practices
 
 ```csharp
-// ConfigureAwait(false) — skip synchronization context resumption
-// Meaningful performance gain in library code / background services
-// (in ASP.NET Core, it's less critical since there's no SyncContext, but still good practice)
+// Reusable libraries may opt out of a caller's synchronization context.
+// ASP.NET Core application code normally has no custom SynchronizationContext,
+// so ConfigureAwait(false) is usually unnecessary there.
 var data = await db.Products.ToListAsync().ConfigureAwait(false);
 
 // Avoid async void — always return Task
 // BAD:
-public async void ProcessAsync() { /* exceptions are swallowed! */ }
+public async void ProcessAsync() { /* caller cannot await completion or catch failures */ }
 
 // GOOD:
 public async Task ProcessAsync() { /* exceptions propagate */ }
@@ -225,11 +225,13 @@ var result = await GetDataAsync();
 public ValueTask<string> GetCachedValueAsync(string key)
 {
     if (_cache.TryGetValue(key, out var cached))
-        return ValueTask.FromResult(cached);  // no heap allocation!
+        return ValueTask.FromResult(cached);  // can avoid allocating a Task on this path
 
     return new ValueTask<string>(FetchFromDatabaseAsync(key));
 }
 ```
+
+An `async void` exception is not simply swallowed: it is posted to the current `SynchronizationContext` when one exists, or becomes an unhandled process-level exception. Reserve `async void` for framework event-handler signatures.
 
 <ConceptCallout type="tip" title="Performance Priority Order">
 1. **Measure first** — profile, then optimize the actual bottleneck

@@ -77,7 +77,7 @@ void Store<T>(T item) where T : class
 // 3. Struct constraint — T must be a value type (no null)
 void Process<T>(T item) where T : struct
 {
-    // T is a value type — never null, stack-allocated
+    // T is a non-nullable value type; storage still depends on context
 }
 
 // 4. new() constraint — T must have a parameterless constructor

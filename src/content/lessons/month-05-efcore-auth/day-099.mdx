@@ -52,8 +52,8 @@ public async Task<IEnumerable<Product>> SearchAsync(ProductFilter f)
 
 ```csharp
 // SqlBuilder composes SQL clauses cleanly
-// Install: already included with Dapper
-// using Dapper;  ← SqlBuilder is in the Dapper namespace
+// Install separately: dotnet add package Dapper.SqlBuilder
+// using Dapper;
 
 public async Task<IEnumerable<Product>> SearchAsync(ProductFilter filter)
 {
@@ -94,6 +94,8 @@ public async Task<IEnumerable<Product>> SearchAsync(ProductFilter filter)
     return await conn.QueryAsync<Product>(selector.RawSql, selector.Parameters);
 }
 ```
+
+`SqlBuilder` is published as the separate `Dapper.SqlBuilder` package. It uses the `Dapper` namespace, but installing the main `Dapper` package alone does not add it.
 
 ## SqlBuilder — The Full API
 

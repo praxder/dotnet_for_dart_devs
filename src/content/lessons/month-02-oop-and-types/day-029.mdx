@@ -139,16 +139,20 @@ public class ApiService : ILoggable, IHealthCheckable
 
     public async Task StartAsync()
     {
-        LogInfo("Starting...");
+        ((ILoggable)this).LogInfo("Starting...");
         _connected = true;
-        LogInfo("Started");
+        ((ILoggable)this).LogInfo("Started");
     }
 }
 
 var svc = new ApiService();
-svc.LogInfo("Hello");
-Console.WriteLine(svc.GetHealthReport());
+ILoggable loggable = svc;
+IHealthCheckable healthCheck = svc;
+loggable.LogInfo("Hello");
+Console.WriteLine(healthCheck.GetHealthReport());
 ```
+
+Default interface members are dispatched through the interface. They do not become ordinary members of the implementing class, so use an interface-typed reference (or an explicit cast) when calling them.
 
 ## Approach 2: Abstract Base Class as Mixin
 
